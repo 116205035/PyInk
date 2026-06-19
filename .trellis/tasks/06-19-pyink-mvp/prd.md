@@ -445,6 +445,13 @@ def test_flex_direction_column():
 - 增量渲染优化（Phase 5）
 - 百分比尺寸（width/height "50%"）
 - aspectRatio、position absolute 的复杂场景
+- **`text-width.tsx` 的 truncate 用例**（lines 94-141）—— 需要 PR4 的 `Text` 组件的 `wrap` prop，PR3 阶段所有 text leaf 默认 word-wrap。PR4 实现 `Text` 后再补这些 oracle 测试。
+- **`alignContent` 多行 wrap**（已 xfail）—— MVP 阶段 flexWrap 实现了 nowrap/wrap/wrap-reverse 的单行场景，但多行 wrap 的 alignContent（start/center/end/space-between 等）需要 multi-line wrap path，留到后续
+
+### MVP 已知行为边界（PR3 实现中发现）
+
+- **`space-around` 在紧宽度下塌缩**：当 `free_space / (2n) < 1`（n 是子元素数），半 gap 向下取整为 0，space-around 退化为 flex-start 布局。ink 自身的 yoga 在极端情况下也有类似 rounding 问题，PyInk 这个 edge case 行为略有差异。MVP 接受此行为，文档化。
+- **`width=0` 容器渲染时 text 会越界**：layout 报告的 width/height 正确（width=0, height=1），但 `render_layout` 的 sparse grid 允许 text 写到边界外。PR4/PR5 实现 box 边界裁剪后修复。
 
 ### 永远不做（除非 Jarvis 真要）
 - 完整复刻 Claude Code 的 ink fork（layout engine、optimizer、termio 等专属特性）
