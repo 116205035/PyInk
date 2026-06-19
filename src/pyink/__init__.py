@@ -10,7 +10,6 @@ from pyink.components import Box, Newline, Spacer, Text
 from pyink.core.component import (
     ComponentInstance,
     HostInstance,
-    Instance,
 )
 from pyink.core.element import (
     Element,
@@ -46,7 +45,7 @@ from pyink.layout import (
     string_width,
     wrap_text,
 )
-from pyink.render import render_to_string
+from pyink.render import Instance, render, render_to_string
 
 __all__ = [
     # Signals
@@ -88,11 +87,11 @@ __all__ = [
     "Newline",
     "Spacer",
     "Text",
-    # Render (PR2/PR3 test renderer)
+    # Render (PR2/PR3 test renderer + PR5 live pipeline)
+    "render",
     "render_to_string",
 ]
 
 __version__ = "0.1.0"
 
-# TODO(PR5): from pyink.render import render, Instance.rerender / wait_until_exit / clear
 # TODO(PR6): from pyink.hooks import use_input, use_app, use_window_size

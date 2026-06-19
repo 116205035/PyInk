@@ -1,16 +1,22 @@
-"""Sync test renderer — flattens an Element tree to a string.
+"""Render package — sync test renderer + live render pipeline (PR5).
 
-PR2 introduced a no-layout concatenation renderer. PR3 replaces it with
-a real flex pipeline:
+Two entry points live here:
 
-1. **Mount** the tree via the reconciler (so effects register their
-   cleanup, mirroring ink's lifecycle semantics).
-2. **Layout** the resulting host-instance tree via
-   :mod:`pyink.layout.flex` to obtain a positioned
-   :class:`LayoutNode` tree.
-3. **Paint** the layout tree via :func:`render_layout_to_string` —
-   plain text only (ANSI styling arrives in PR4).
-4. **Unmount** so effect cleanups run.
+* :func:`render_to_string` — sync, side-effect-free renderer used by
+  tests and CI. PR2 introduced it; PR3 upgraded it to run the full
+  flex layout pipeline.
+* :func:`render` — the live TUI renderer added in PR5. Returns an
+  :class:`Instance` that owns the render loop, scheduler, and
+  terminal state. Inline mode is the default (PRD Decision 3);
+  alternate screen is opt-in.
+
+Sub-modules:
+
+* :mod:`pyink.render.ansi`     — colour / border helpers (PR4).
+* :mod:`pyink.render.diff`     — frame-level inline diff (PR5).
+* :mod:`pyink.render.terminal` — cross-platform terminal wrapper (PR5).
+* :mod:`pyink.render.instance` — live render handle (PR5).
+* :mod:`pyink.render.pipeline` — :func:`render` entry point (PR5).
 """
 
 from __future__ import annotations
@@ -20,13 +26,20 @@ from dataclasses import dataclass
 from pyink.core.element import Element
 from pyink.core.reconciler import Reconciler
 from pyink.layout import layout, render_layout_to_string
+from pyink.render.instance import Instance
+from pyink.render.pipeline import render
 
-__all__ = ["RenderOptions", "render_to_string"]
+__all__ = ["RenderOptions", "Instance", "render", "render_to_string"]
 
 
 @dataclass(frozen=True, slots=True)
 class RenderOptions:
-    """Options bag for :func:`render_to_string`."""
+    """Options bag for :func:`render_to_string`.
+
+    Separate from :class:`pyink.render.pipeline.RenderOptions` (which
+    allows ``None`` for auto-detect) because :func:`render_to_string`
+    always needs a concrete ``columns`` value to feed the layout.
+    """
 
     columns: int = 80
     rows: int | None = None
