@@ -213,7 +213,17 @@ def test_align_items_column_flex_end() -> None:
     "rendering from PR4. We model plain-text layout only.",
     strict=True,
 )
+def _test_align_items_row_stretch_legacy() -> None:
+    tree = box(
+        box(text("X"), borderStyle="single"),
+        alignItems="stretch",
+        height=5,
+    )
+    assert render_to_string(tree) == "┌─┐\n│X│\n│ │\n│ │\n└─┘"
+
+
 def test_align_items_row_stretch() -> None:
+    """PR4: with border rendering, stretch aligns the bordered child."""
     tree = box(
         box(text("X"), borderStyle="single"),
         alignItems="stretch",
@@ -295,7 +305,17 @@ def test_align_self_column_flex_end() -> None:
 
 
 @pytest.mark.xfail(reason="requires PR4 Box border rendering.", strict=True)
+def _test_align_self_column_stretch_legacy() -> None:
+    tree = box(
+        box(text("X"), alignSelf="stretch", borderStyle="single"),
+        flexDirection="column",
+        width=7,
+    )
+    assert render_to_string(tree) == "┌─────┐\n│X    │\n└─────┘"
+
+
 def test_align_self_column_stretch() -> None:
+    """PR4: border rendering enables column stretch on bordered children."""
     tree = box(
         box(text("X"), alignSelf="stretch", borderStyle="single"),
         flexDirection="column",
@@ -305,7 +325,16 @@ def test_align_self_column_stretch() -> None:
 
 
 @pytest.mark.xfail(reason="requires PR4 Box border rendering.", strict=True)
+def _test_align_self_row_stretch_legacy() -> None:
+    tree = box(
+        box(text("X"), alignSelf="stretch", borderStyle="single"),
+        height=5,
+    )
+    assert render_to_string(tree) == "┌─┐\n│X│\n│ │\n│ │\n└─┘"
+
+
 def test_align_self_row_stretch() -> None:
+    """PR4: border rendering enables row stretch on bordered children."""
     tree = box(
         box(text("X"), alignSelf="stretch", borderStyle="single"),
         height=5,

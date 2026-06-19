@@ -109,6 +109,15 @@ class FlexStyle:
 
     align_self: AlignSelf = "auto"
 
+    # PR4: border consumes layout cells. ``has_border`` is True when the
+    # element carries a ``borderStyle`` prop; the four booleans mirror the
+    # ``borderTop`` / ``borderRight`` / … overrides (default True).
+    has_border: bool = False
+    border_top: bool = True
+    border_right: bool = True
+    border_bottom: bool = True
+    border_left: bool = True
+
     # -- factories ---------------------------------------------------------
 
     @classmethod
@@ -131,6 +140,23 @@ class FlexStyle:
 
         s.padding = _edges_from(props, "padding")
         s.margin = _edges_from(props, "margin")
+
+        # PR4: fold border presence into padding so layout reserves the
+        # cells the renderer later fills with border characters. Per ink
+        # semantics, an explicit ``borderTop=False`` etc. removes only
+        # that one side. ``borderStyle`` may be a string or a dict.
+        if props.get("borderStyle") is not None:
+            s.has_border = True
+            s.border_top = props.get("borderTop", True) is not False
+            s.border_right = props.get("borderRight", True) is not False
+            s.border_bottom = props.get("borderBottom", True) is not False
+            s.border_left = props.get("borderLeft", True) is not False
+            s.padding = Edges(
+                top=s.padding.top + (1 if s.border_top else 0),
+                right=s.padding.right + (1 if s.border_right else 0),
+                bottom=s.padding.bottom + (1 if s.border_bottom else 0),
+                left=s.padding.left + (1 if s.border_left else 0),
+            )
 
         s.width = _int_or_none(props.get("width"))
         s.height = _int_or_none(props.get("height"))
@@ -256,6 +282,9 @@ class FlexNode:
     layout_height: int = 0
     # Source host instance (kept so render can read original element).
     source: Any = None
+    # Raw element ``props`` — PR4 reads border / colour / text-style
+    # overrides from here when painting.
+    props: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -266,6 +295,10 @@ class LayoutNode:
     corner** (including the parent's padding box). ``content`` is set
     only for text leaves and contains the rendered text for that leaf
     (may span multiple newline-separated lines).
+
+    ``props`` carries the raw element props verbatim so the PR4 renderer
+    can apply border / background / text-style without re-reading the
+    source instance.
     """
 
     x: int
@@ -276,6 +309,7 @@ class LayoutNode:
     children: list[LayoutNode] = field(default_factory=list)
     style: dict[str, Any] = field(default_factory=dict)
     kind: str = "box"
+    props: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +348,35 @@ def build_flex_tree(instance: Any) -> FlexNode | None:
     return None
 
 
+def _inline_text_element(element: Any) -> str | None:
+    """Recursively flatten a nested ``text`` Element into its string body.
+
+    A ``text`` element's children may include ``str``, lazy callables,
+    or further nested ``text`` elements (the latter coming from
+    :func:`pyink.components.Newline` or nested :func:`Text` calls). This
+    helper joins them in source order, evaluating callables once.
+    """
+    from pyink.core.element import Element
+
+    if not isinstance(element, Element):
+        return None
+    if element.type != "text":
+        return None
+    parts: list[str] = []
+    for child in element.children:
+        if isinstance(child, str):
+            parts.append(child)
+        elif callable(child):
+            result = child()
+            if result is not None:
+                parts.append(str(result))
+        elif isinstance(child, Element):
+            sub = _inline_text_element(child)
+            if sub is not None:
+                parts.append(sub)
+    return "".join(parts)
+
+
 def _build_host_node(instance: Any) -> FlexNode:
     from pyink.core.component import HostInstance
 
@@ -328,9 +391,16 @@ def _build_host_node(instance: Any) -> FlexNode:
         kind=element_type,
         style=style,
         source=instance,
+        props=dict(instance.element.props),
     )
     if element_type == "text":
         # Resolve text leaves immediately (callables evaluated once).
+        # Nested text host elements (e.g. ``Newline()``) are inlined
+        # verbatim — their body joins this leaf's body. Styling on a
+        # nested Text element is dropped (PR4 does not implement ink's
+        # nested-Text transform pipeline).
+        from pyink.core.element import Element
+
         parts: list[str] = []
         for leaf in instance.children:
             if isinstance(leaf, str):
@@ -339,14 +409,19 @@ def _build_host_node(instance: Any) -> FlexNode:
                 result = leaf()
                 if result is not None:
                     parts.append(str(result))
+            elif isinstance(leaf, Element):
+                # Inline nested text host (Newline / nested Text).
+                sub = _inline_text_element(leaf)
+                if sub is not None:
+                    parts.append(sub)
         node.text = "".join(parts)
         return node
     # Non-text host: mount child host instances (skip component instances
     # by flattening to their inner host children).
     for child in instance.children:
-        sub = build_flex_tree(child)
-        if sub is not None:
-            node.children.append(sub)
+        sub_node = build_flex_tree(child)
+        if sub_node is not None:
+            node.children.append(sub_node)
     return node
 
 
@@ -449,6 +524,7 @@ def _to_layout_tree(node: FlexNode, offset_x: int, offset_y: int) -> LayoutNode:
         content=node.text if node.kind == "text" else None,
         kind=node.kind,
         style=_snapshot_style(node.style),
+        props=dict(node.props),
     )
     for child in node.children:
         out.children.append(
@@ -478,6 +554,11 @@ def _snapshot_style(style: FlexStyle) -> dict[str, Any]:
         ),
         "width": style.width,
         "height": style.height,
+        "hasBorder": style.has_border,
+        "borderTop": style.border_top,
+        "borderRight": style.border_right,
+        "borderBottom": style.border_bottom,
+        "borderLeft": style.border_left,
     }
 
 
@@ -551,7 +632,10 @@ def _layout_node(
         node.measured_width = w
         node.measured_height = h
         # Reflow the text content at the resolved width so the renderer
-        # receives multi-line content directly.
+        # receives multi-line content directly. PR4 honours the Text
+        # ``wrap`` prop (``"wrap"`` default, ``"hard"`` /
+        # ``"truncate"`` family for explicit control).
+        text_wrap = node.props.get("wrap", "wrap")
         if (
             node.text
             and max_w_for_text != float("inf")
@@ -559,7 +643,7 @@ def _layout_node(
             and "\n" not in node.text
             and string_width(node.text) > max_w_for_text
         ):
-            wrapped = wrap_text(node.text, int(max_w_for_text), mode="wrap")
+            wrapped = wrap_text(node.text, int(max_w_for_text), mode=text_wrap)
             node.text = "\n".join(wrapped)
             # Recompute measurements from wrapped content.
             w = max((string_width(line) for line in wrapped), default=0)

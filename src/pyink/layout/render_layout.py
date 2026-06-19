@@ -1,4 +1,4 @@
-"""Render a :class:`LayoutNode` tree to a string (PR3).
+"""Render a :class:`LayoutNode` tree to a string (PR3 + PR4).
 
 The renderer walks the layout tree and writes each text leaf into a 2D
 character grid keyed by the leaf's absolute coordinates. Cells are then
@@ -7,28 +7,52 @@ from each line (matching ink's behaviour — padding/gap filler that lives
 at the end of a row must not leak into the snapshot).
 
 Wide characters (CJK / most emoji) occupy two cells. ANSI escape
-sequences are passed through verbatim without consuming any cell —
-that lets PR4 reintroduce colour/style runs without changing the
-renderer's bookkeeping.
+sequences are passed through verbatim without consuming any cell.
 
-PR3 renders **plain text only** — no borders. Colours, backgrounds and
-explicit styles land in PR4 (but already pass through here safely).
+PR4 additions on top of PR3:
+
+* Text leaves are wrapped with :func:`pyink.render.ansi.apply_style`
+  when the originating element props carry colour / bold / italic /
+  underline / strikethrough / inverse / dimColor.
+* Box hosts paint a background fill across their content area when
+  ``backgroundColor`` is set, then draw a border around the outer
+  edge when ``borderStyle`` is set. Border cells are reserved in the
+  layout pass (``FlexStyle`` folds them into padding) so the renderer
+  simply writes the characters at the box's coordinate frame.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from pyink.layout.flex import LayoutNode
 from pyink.layout.measure import _char_width, _split_visible_chunks, string_width
 
 __all__ = ["render_layout_to_string"]
 
+#: SGR reset sequence used to terminate every colour / style run.
+_SGR_RESET = "\x1b[0m"
+
+
+def _load_ansi() -> Any:
+    """Lazy import of :mod:`pyink.render.ansi` to avoid a load cycle.
+
+    ``pyink.render`` imports from :mod:`pyink.layout`, so importing
+    :mod:`pyink.render.ansi` at module load time here would re-enter
+    the partially-initialised ``pyink.render`` package.
+    """
+    from pyink.render import ansi
+
+    return ansi
+
 
 def render_layout_to_string(root: LayoutNode) -> str:
     """Render ``root`` to a plain string snapshot.
 
     The string uses ``\\n`` between rows and may contain ANSI escapes
-    when the source text leaves did. Rows whose width would otherwise
-    be padded with trailing spaces are right-trimmed (matches ink).
+    when the source text leaves or box borders carried colour. Rows
+    whose visible width would otherwise be padded with trailing spaces
+    are right-trimmed (matches ink).
     """
     grid = _Grid(width=root.width, height=root.height)
     _paint_node(grid, root, base_x=0, base_y=0)
@@ -57,6 +81,14 @@ class _Grid:
         # a single visible character, an empty string (wide-tail marker)
         # or a single space (default filler for unwritten cells).
         self._rows: dict[int, list[str]] = {}
+
+    @property
+    def width(self) -> int:
+        return self._width
+
+    @property
+    def height(self) -> int:
+        return self._height
 
     def _ensure_capacity(self, y: int, up_to: int) -> list[str]:
         row = self._rows.setdefault(y, [])
@@ -124,6 +156,27 @@ class _Grid:
                     last_visible_cell = cursor
                     cursor += 2
 
+    def fill_row(self, x: int, y: int, width: int, payload: str) -> None:
+        """Fill ``width`` cells of row ``y`` starting at column ``x``.
+
+        Used by the background painter. The payload is expected to span
+        exactly ``width`` visible cells (one ANSI open + ``width``
+        spaces + reset). If any cell in the span was already written to
+        (text leaf or border), the fill is skipped — the inheriting
+        text already carries the background colour via ``apply_style``.
+        """
+        if width <= 0:
+            return
+        row = self._ensure_capacity(y, x + width)
+        for i in range(width):
+            if row[x + i] != " ":
+                return
+        # Whole span empty — the payload string occupies cell ``x``;
+        # the visible spaces inside it visually fill the remaining cells.
+        row[x] = payload
+        for i in range(1, width):
+            row[x + i] = ""
+
     def to_string(self) -> str:
         if self._height == 0:
             return ""
@@ -140,37 +193,215 @@ class _Grid:
         return "\n".join(lines)
 
 
-def _paint_node(grid: _Grid, node: LayoutNode, base_x: int, base_y: int) -> None:
+def _paint_node(
+    grid: _Grid,
+    node: LayoutNode,
+    base_x: int,
+    base_y: int,
+    inherited_bg: str | None = None,
+) -> None:
     """Paint ``node`` (and its subtree) onto ``grid``.
 
     ``base_x`` / ``base_y`` are the absolute coordinates of the parent's
     top-left content box; each child's own ``x`` / ``y`` is relative to
     that and already includes the child's own margin (the layout engine
     folds margin into ``layout_x`` / ``layout_y``).
+
+    ``inherited_bg`` carries the nearest ancestor Box's
+    ``backgroundColor`` so text leaves can apply it (mirrors ink's
+    BackgroundContext behaviour). A Box with its own ``backgroundColor``
+    overrides the inheritance for its descendants.
     """
     abs_x = base_x + node.x
     abs_y = base_y + node.y
 
+    own_bg = node.props.get("backgroundColor") if node.kind == "box" else None
+    effective_bg = own_bg or inherited_bg
+
     if node.content is not None:
-        _paint_text(grid, node, abs_x, abs_y)
+        _paint_text(grid, node, abs_x, abs_y, inherited_bg=effective_bg)
         return
 
-    # Recurse into children — non-text nodes don't paint themselves,
-    # they only establish a coordinate frame for descendants.
+    # Recurse into children first so text leaves are painted before the
+    # background fill — the background painter then only fills cells
+    # that the children have not already populated, which preserves any
+    # colour / style already attached to those cells.
     for child in node.children:
-        _paint_node(grid, child, abs_x, abs_y)
+        _paint_node(grid, child, abs_x, abs_y, inherited_bg=effective_bg)
+
+    if node.kind == "box":
+        _paint_box_background(grid, node, abs_x, abs_y)
+        _paint_box_border(grid, node, abs_x, abs_y)
 
 
-def _paint_text(grid: _Grid, node: LayoutNode, abs_x: int, abs_y: int) -> None:
+def _paint_text(
+    grid: _Grid,
+    node: LayoutNode,
+    abs_x: int,
+    abs_y: int,
+    *,
+    inherited_bg: str | None = None,
+) -> None:
     """Write a text leaf's content into the grid honouring its box.
 
     If the node has an explicit height that's smaller than the natural
     line count, lines beyond the height are clipped (matches ink's
-    ``<Box height={n}>`` truncation behaviour).
+    ``<Box height={n}>`` truncation behaviour). When the source props
+    carry colour / bold / italic / … the styled text is wrapped via
+    :func:`apply_style` before being painted. The inherited Box
+    ``backgroundColor`` (if any) is applied unless the Text declares its
+    own ``backgroundColor``.
     """
     text = node.content or ""
-    lines = text.split("\n")
+    styled = _apply_text_style(text, node.props, inherited_bg=inherited_bg)
+    lines = styled.split("\n")
     if node.height > 0:
         lines = lines[: node.height]
     for i, line in enumerate(lines):
         grid.put(abs_x, abs_y + i, line)
+
+
+def _apply_text_style(
+    text: str,
+    props: dict[str, Any],
+    *,
+    inherited_bg: str | None = None,
+) -> str:
+    """Apply ``Text`` colour / bold / italic / … props to ``text``."""
+    if not props and not inherited_bg:
+        return text
+    color = props.get("color") if props else None
+    own_bg = props.get("backgroundColor") if props else None
+    bg = own_bg if own_bg is not None else inherited_bg
+    bold = bool(props.get("bold")) if props else False
+    italic = bool(props.get("italic")) if props else False
+    underline = bool(props.get("underline")) if props else False
+    strikethrough = bool(props.get("strikethrough")) if props else False
+    inverse = bool(props.get("inverse")) if props else False
+    dim = bool(props.get("dimColor")) if props else False
+    if not any([color, bg, bold, italic, underline, strikethrough, inverse, dim]):
+        return text
+    ansi = _load_ansi()
+    styled: str = ansi.apply_style(
+        text,
+        color=color,
+        backgroundColor=bg,
+        bold=bold,
+        italic=italic,
+        underline=underline,
+        strikethrough=strikethrough,
+        inverse=inverse,
+        dimColor=dim,
+    )
+    return styled
+
+
+def _paint_box_background(grid: _Grid, node: LayoutNode, abs_x: int, abs_y: int) -> None:
+    """Fill the box's interior with ``backgroundColor`` if set.
+
+    The fill covers the content area *inside* the border (when present)
+    so the visible coloured band matches ink's behaviour.
+    """
+    bg = node.props.get("backgroundColor")
+    if not bg:
+        return
+    ansi = _load_ansi()
+    body = ansi.parse_color(bg, type_="background")
+    if body is None:
+        return
+    # Compute interior rectangle after border (1-cell per visible side).
+    style = node.style
+    has_border = bool(style.get("hasBorder"))
+    top = 1 if (has_border and style.get("borderTop", True)) else 0
+    bottom = 1 if (has_border and style.get("borderBottom", True)) else 0
+    left = 1 if (has_border and style.get("borderLeft", True)) else 0
+    right = 1 if (has_border and style.get("borderRight", True)) else 0
+    inner_x = abs_x + left
+    inner_y = abs_y + top
+    inner_w = max(0, node.width - left - right)
+    inner_h = max(0, node.height - top - bottom)
+    payload = _bg_payload(bg, inner_w)
+    for row in range(inner_h):
+        grid.fill_row(inner_x, inner_y + row, inner_w, payload)
+
+
+def _bg_payload(color: str, width: int) -> str:
+    """Return the per-row background payload string of ``width`` cells."""
+    ansi = _load_ansi()
+    body = ansi.parse_color(color, type_="background")
+    if body is None:
+        return " " * width
+    return f"\x1b[{body}m{' ' * width}\x1b[0m"
+
+
+def _paint_box_border(grid: _Grid, node: LayoutNode, abs_x: int, abs_y: int) -> None:
+    """Draw the four border edges directly into the grid."""
+    ansi = _load_ansi()
+
+    raw = node.props.get("borderStyle")
+    if raw is None:
+        return
+    chars = ansi.resolve_border_chars(raw)
+    style = node.style
+
+    show_top = style.get("borderTop", True) is not False
+    show_bottom = style.get("borderBottom", True) is not False
+    show_left = style.get("borderLeft", True) is not False
+    show_right = style.get("borderRight", True) is not False
+
+    top_color = node.props.get("borderTopColor") or node.props.get("borderColor")
+    bottom_color = node.props.get("borderBottomColor") or node.props.get("borderColor")
+    left_color = node.props.get("borderLeftColor") or node.props.get("borderColor")
+    right_color = node.props.get("borderRightColor") or node.props.get("borderColor")
+    top_bg = node.props.get("borderTopBackgroundColor") or node.props.get("borderBackgroundColor")
+    bottom_bg = (
+        node.props.get("borderBottomBackgroundColor") or node.props.get("borderBackgroundColor")
+    )
+    left_bg = node.props.get("borderLeftBackgroundColor") or node.props.get("borderBackgroundColor")
+    right_bg = (
+        node.props.get("borderRightBackgroundColor") or node.props.get("borderBackgroundColor")
+    )
+    top_dim = _opt_bool(node.props, "borderTopDimColor", "borderDimColor")
+    bottom_dim = _opt_bool(node.props, "borderBottomDimColor", "borderDimColor")
+    left_dim = _opt_bool(node.props, "borderLeftDimColor", "borderDimColor")
+    right_dim = _opt_bool(node.props, "borderRightDimColor", "borderDimColor")
+
+    content_w = max(0, node.width - (1 if show_left else 0) - (1 if show_right else 0))
+
+    if show_top:
+        seg = (
+            (chars["topLeft"] if show_left else "")
+            + chars["top"] * content_w
+            + (chars["topRight"] if show_right else "")
+        )
+        grid.put(abs_x, abs_y, ansi.style_segment(seg, fg=top_color, bg=top_bg, dim=top_dim))
+
+    middle_start = abs_y + (1 if show_top else 0)
+    middle_end = abs_y + node.height - (1 if show_bottom else 0)
+    if show_left:
+        seg = ansi.style_segment(chars["left"], fg=left_color, bg=left_bg, dim=left_dim)
+        for y in range(middle_start, middle_end):
+            grid.put(abs_x, y, seg)
+    if show_right:
+        seg = ansi.style_segment(chars["right"], fg=right_color, bg=right_bg, dim=right_dim)
+        for y in range(middle_start, middle_end):
+            grid.put(abs_x + node.width - 1, y, seg)
+
+    if show_bottom:
+        seg = (
+            (chars["bottomLeft"] if show_left else "")
+            + chars["bottom"] * content_w
+            + (chars["bottomRight"] if show_right else "")
+        )
+        grid.put(
+            abs_x,
+            abs_y + node.height - 1,
+            ansi.style_segment(seg, fg=bottom_color, bg=bottom_bg, dim=bottom_dim),
+        )
+
+
+def _opt_bool(props: dict[str, Any], key: str, fallback: str) -> bool:
+    v = props.get(key)
+    if v is None:
+        v = props.get(fallback)
+    return bool(v)

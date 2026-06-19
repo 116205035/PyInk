@@ -6,6 +6,7 @@ and a sync ``render_to_string`` test renderer. Layout, real components,
 the full render pipeline and hooks arrive in later PRs.
 """
 
+from pyink.components import Box, Newline, Spacer, Text
 from pyink.core.component import (
     ComponentInstance,
     HostInstance,
@@ -82,12 +83,16 @@ __all__ = [
     "render_layout_to_string",
     "string_width",
     "wrap_text",
+    # Built-in components (PR4)
+    "Box",
+    "Newline",
+    "Spacer",
+    "Text",
     # Render (PR2/PR3 test renderer)
     "render_to_string",
 ]
 
 __version__ = "0.1.0"
 
-# TODO(PR4): from pyink.components.box import Box, Text, Newline, Spacer, Static, Transform
 # TODO(PR5): from pyink.render import render, Instance.rerender / wait_until_exit / clear
 # TODO(PR6): from pyink.hooks import use_input, use_app, use_window_size
