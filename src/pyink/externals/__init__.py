@@ -1,0 +1,3 @@
+"""PyInk extension components (placeholder — later phases)."""
+
+# TODO(later): Spinner, TextInput, SelectInput, Link, Divider, Markdown, ...

@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "检查实现是否过度复制 pyinkcli/ink TS 而未做 Python 化改造；检查框架内部是否有重复逻辑（如多处实现 ANSI 处理、文本宽度计算）。"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "检查跨层接口契约：组件返回的 Element 结构是否稳定？signals 触发的 rerender 是否正确流经 reconciler→layout→output？渲染管线异常是否清晰冒泡？"}

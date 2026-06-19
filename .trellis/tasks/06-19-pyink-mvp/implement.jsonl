@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "PyInk 大量参考 pyinkcli、ink TS 源、yoga-layout-python。要求实现者搜重复再写、识别可借鉴的现有模式，避免无脑复制或重复造轮子。"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "PyInk 分 5 层（core/components/hooks/layout/render），组件树渲染涉及 signals → reconciler → layout → output → terminal 的多层穿越。跨层数据流和接口契约必须清晰。"}
