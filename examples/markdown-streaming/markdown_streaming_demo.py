@@ -114,7 +114,17 @@ def MarkdownStreamingDemo() -> Element:
 
 
 def main() -> int:
-    inst = render(MarkdownStreamingDemo(), columns=70, rows=24)
+    # ``rows=30`` (was 24) gives the rendered Markdown enough vertical
+    # room for the heading + paragraph + list + fenced code block +
+    # trailing "Done." paragraph without forcing the flex engine to
+    # shrink the inner code-block border Box below its minimum
+    # (top-edge + content + bottom-edge). At 24 rows the code block's
+    # second source line (``return n * n``) is dropped because the
+    # border Box is squeezed to three rows; at 30 both lines fit and
+    # the border closes cleanly. See the Phase 3 hardening notes
+    # (PRD Bug Fixes → Bug 8) for the renderer-side guard that keeps
+    # the border whole even when shrink does leave the box too small.
+    inst = render(MarkdownStreamingDemo(), columns=70, rows=30)
     try:
         inst.wait_until_exit()
     except KeyboardInterrupt:

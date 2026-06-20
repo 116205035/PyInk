@@ -492,6 +492,110 @@ have only the inner-left border.
   state and at the end of the stream — no orphaned half-width
   edges, no missing inner-right border.
 
+### Bug 8 — bordered Box drops one edge when vertical overflow shrinks it below 2 rows
+
+**Symptom**: `examples/markdown-streaming/markdown_streaming_demo.py`
+in a viewport too short for the rendered content (e.g. ``rows=10``)
+left the inner code-block border Box visually split: the painter drew
+the bottom edge ``└─┘`` on one row and the content row below it, but
+the matching top edge ``┌─┐`` was missing — so the reader saw a
+dangling half-border with no close. At ``rows=24`` (the demo's
+original default) the inner border also squeezed to 3 rows and lost
+the second source line (``return n * n``), but at least the top and
+bottom edges were on separate rows so the artefact was less glaring.
+
+**Reproduction**: a throwaway script mounted
+``Box(Text("Header"), Markdown(md), padding=1, borderStyle="round")``
+at ``rows=10`` and inspected the painted frame. The inner code-block
+border Box resolved to ``66x1`` in the layout tree (height 1!), but
+the painter still wrote both edges — the bottom edge write at
+``abs_y + height - 1`` landed on the same row as the top edge write
+at ``abs_y``, and because the bottom write happens last the bottom
+won, leaving the visible artefact ``└─┘`` with no matching ``┌─┐``.
+
+**Root cause**: the flex engine's main-axis shrink path
+(:func:`pyink.layout.flex._distribute_main`) is allowed to shrink any
+child below its renderable minimum — a single-rounding ``int(round())``
+can drop a text leaf from 1 row to 0, and a bordered Box from 2 rows
+(the minimum needed to fit its top and bottom edges) to 1 or 0. The
+renderer (:func:`pyink.layout.render_layout._paint_box_border`) then
+unconditionally wrote both edges, so when both landed on the same row
+the later write clobbered the earlier one and left a single orphaned
+edge character. The Box's children (positioned by the layout as if
+the box still had its natural interior) also leaked past the parent's
+border into adjacent rows.
+
+The fix could have lived in either layer; the renderer-side guard is
+strictly simpler and matches ink's "either render whole or skip"
+contract for clipped elements (``render-node-to-output.ts`` clips
+boxes to their computed region; PyInk's MVP grid does not carry a
+clip stack, so the equivalent is to skip painting the node entirely
+when there is no room to honour the border).
+
+**Fix** (renderer-side guard in
+:func:`pyink.layout.render_layout._paint_node`):
+
+* Compute the bordered Box's renderable minimum from the per-edge
+  flags: ``needed = (1 if show_top else 0) + (1 if show_bottom else
+  0)``. With both edges enabled the minimum is 2 (top + bottom);
+  with one edge opted out (``borderTop=False`` or
+  ``borderBottom=False``) the minimum is 1; with both opted out
+  there is no constraint.
+* When ``node.height < needed`` the renderer returns early and
+  paints neither the box nor its subtree. The parent's grid cells
+  stay blank, which reads as "the element was truncated" rather
+  than as a corrupted frame.
+* Other node kinds (text leaves, unbordered Boxes) are left to the
+  existing ``_paint_text`` height-clip path — they have no edges to
+  dangle and the historic "shrink-to-zero but still paint naturally"
+  behaviour is preserved (some examples rely on this).
+
+**Demo adjustment**: ``examples/markdown-streaming/markdown_streaming_demo.py``
+bumped its viewport from ``rows=24`` to ``rows=30``. At 24 rows the
+rendered Markdown's natural height (heading + paragraph + list +
+code block + Done) overflowed the outer Box's interior by enough that
+the flex engine squeezed the inner code-block border Box to 3 rows,
+which fit top + bottom edges + one content row but dropped the
+second source line. At 30 rows the entire Markdown fits without
+shrink and both code lines render with a properly closed border.
+The renderer-side guard keeps the border whole even when shrink
+*does* leave the box too small, but bumping the rows gives the
+reader the full content too.
+
+**Regression tests** (``tests/components/test_box.py``):
+
+* ``test_bordered_box_shrunk_to_zero_height_is_skipped`` — a
+  bordered Box squeezed to height 0 paints neither edge nor content.
+* ``test_bordered_box_shrunk_to_one_row_is_skipped`` — same with
+  height 1 (both edges enabled, minimum is 2, height 1 fails the
+  guard).
+* ``test_bordered_box_with_only_one_edge_at_height_1_renders`` —
+  with ``borderBottom=False`` the minimum is 1, so a height-1 box
+  still paints its single (top) edge.
+* ``test_borderless_top_and_bottom_box_at_height_1_renders`` — the
+  historic ``borderTop=False, borderBottom=False`` shape continues
+  to render at height 1 (the opt-out path the per-edge override
+  unlocks).
+* ``test_nested_bordered_box_overflow_closes_borders`` — end-to-end
+  nested-Box reproduction: when an inner bordered Box is squeezed
+  out by an outer padded bordered Box, neither the inner edge
+  characters nor the inner content leak onto the rendered frame.
+
+**Verification**:
+
+* All 885 tests pass (880 baseline + 5 new regression tests).
+* ``ruff check src tests`` and ``mypy src tests`` both clean (the
+  two remaining mypy warnings are the pre-existing
+  ``measure.py``/``wcwidth`` ones, unrelated to this fix).
+* Manual ``markdown_streaming_demo.py`` run at ``rows=30`` shows
+  the inner code-block border rendering with both source lines and
+  a cleanly closed top + bottom edge at every intermediate stream
+  state and at the end of the stream.
+* Manual repro at ``rows=10`` no longer emits a dangling half-border;
+  the inner code-block border Box is skipped entirely (the language
+  header line ``python`` is still visible because it lives outside
+  the bordered Box; the border itself does not appear).
+
 ---
 
 ## Out of Scope

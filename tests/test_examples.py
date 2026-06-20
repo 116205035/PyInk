@@ -577,8 +577,11 @@ def test_markdown_streaming_example_runs() -> None:
         "markdown-streaming/markdown_streaming_demo.py",
         "pyink_example_markdown_streaming",
     )
+    # ``rows=30`` matches the value ``main()`` uses (see the comment in
+    # ``markdown_streaming_demo.main`` for the Bug-8 rationale — 24
+    # rows squeezes the inner code-block border Box past its minimum).
     out = _run_example(
-        mod.MarkdownStreamingDemo(), columns=70, rows=24, run_seconds=0.4
+        mod.MarkdownStreamingDemo(), columns=70, rows=30, run_seconds=0.4
     )
     assert "Streaming Markdown demo" in out
     # The streamed source opens with ``# Streaming Markdown`` — after a

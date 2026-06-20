@@ -211,9 +211,52 @@ def _paint_node(
     ``backgroundColor`` so text leaves can apply it (mirrors ink's
     BackgroundContext behaviour). A Box with its own ``backgroundColor``
     overrides the inheritance for its descendants.
+
+    Vertical-overflow graceful truncation: when a node's resolved
+    ``height`` is too small to render anything meaningful the renderer
+    skips painting the node (and its subtree) entirely. This prevents
+    the "dangling half-border" artefact where a bordered Box the flex
+    engine shrank to zero or one row would otherwise emit a single
+    orphaned edge (top OR bottom, never both) and then leak its
+    children's content past the parent's border into adjacent rows.
+    The contract is: a bordered Box is either painted whole
+    (top + content + bottom) or not at all.
     """
     abs_x = base_x + node.x
     abs_y = base_y + node.y
+
+    # Vertical-overflow graceful truncation for bordered Boxes: when a
+    # bordered Box is shrunk so small that it cannot fit both its top
+    # and bottom edges on separate rows, skip painting the node (and
+    # its subtree) entirely. Without this guard the painter would emit
+    # a single orphaned edge — top OR bottom, never both — because
+    # ``_paint_box_border`` writes the top edge at ``abs_y`` and the
+    # bottom edge at ``abs_y + height - 1``; with ``height == 1`` both
+    # land on the same row and the later write wins, leaving a
+    # dangling ``┌─┐`` (or ``└─┘``) with no matching edge. The
+    # children's content would then leak past the parent's border into
+    # adjacent rows because the layout positioned them as if the box
+    # still had its natural interior. Skipping the whole node keeps
+    # the contract "a bordered Box is either painted whole (top +
+    # content + bottom) or not at all".
+    #
+    # The check honours per-edge overrides: ``borderTop=False`` removes
+    # the top-edge constraint, ``borderBottom=False`` the bottom-edge,
+    # so a borderless-top-and-bottom Box with height 1 still renders
+    # (the user explicitly opted out of those edges). Other kinds of
+    # nodes (text leaves, unbordered Boxes) are left to the existing
+    # ``_paint_text`` height-clip path — they have no edges to dangle
+    # and the historic "shrink-to-zero but still paint naturally"
+    # behaviour is preserved (some examples rely on this).
+    if node.kind == "box" and node.style.get("hasBorder"):
+        show_top = node.style.get("borderTop", True) is not False
+        show_bottom = node.style.get("borderBottom", True) is not False
+        # Minimum height required to fit the requested edges without
+        # them colliding on the same row. Both edges → 2 rows; one
+        # edge → 1 row; neither → 0 rows (no constraint).
+        needed = (1 if show_top else 0) + (1 if show_bottom else 0)
+        if node.height < needed:
+            return
 
     own_bg = node.props.get("backgroundColor") if node.kind == "box" else None
     effective_bg = own_bg or inherited_bg

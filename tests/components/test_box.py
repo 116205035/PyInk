@@ -576,3 +576,166 @@ def test_spacer_in_column_with_borders() -> None:
         ]
     )
     assert out == expected
+
+
+# ---------------------------------------------------------------------------
+# Vertical-overflow graceful truncation (Phase 3 hardening pass — Bug 8).
+#
+# When the flex engine shrinks a bordered Box below the minimum height it
+# needs to render both edges (top + bottom) the renderer must skip the
+# node entirely. Otherwise the painter writes the top edge at
+# ``abs_y`` and the bottom edge at ``abs_y + height - 1`` — with
+# ``height == 1`` both writes land on the same row and the later one
+# wins, leaving a single orphaned ``┌─┐`` (or ``└─┘``) with no matching
+# edge. Children of the shrunken Box would also leak past the parent's
+# border into adjacent rows because the layout positioned them as if
+# the box still had its natural interior.
+#
+# Contract enforced by these tests: a bordered Box is either painted
+# whole (top + content + bottom) or not at all.
+# ---------------------------------------------------------------------------
+
+
+def test_bordered_box_shrunk_to_zero_height_is_skipped() -> None:
+    """A bordered Box squeezed to height 0 paints nothing.
+
+    The outer Box (``height=1``) holds three children that the flex
+    engine must shrink. The inner bordered Box lands at height 0
+    because the column has no room left; the renderer skips it
+    entirely so no orphaned border character leaks onto the screen.
+    """
+    tree = Box(
+        Text("a"),
+        Text("b"),
+        Box(Text("inside"), borderStyle="single"),
+        flexDirection="column",
+        height=1,
+    )
+    out = render_to_string(tree)
+    # The first row carries the flex-column's leading child only;
+    # the bordered Box neither paints its border nor its content.
+    assert "inside" not in out
+    assert "┌" not in out
+    assert "└" not in out
+
+
+def test_bordered_box_shrunk_to_one_row_is_skipped() -> None:
+    """A bordered Box squeezed to height 1 cannot fit both edges — skip it.
+
+    With both ``borderTop`` and ``borderBottom`` enabled the minimum
+    renderable height is 2 (top + bottom). At height 1 the painter
+    would write both edges on the same row and the bottom would
+    overwrite the top — a dangling-edge artefact. The renderer skips
+    the whole node instead.
+    """
+    # The outer column has 4 children and only 2 rows of available
+    # height, so the inner bordered Box gets squeezed to 1 row.
+    tree = Box(
+        Text("a"),
+        Text("b"),
+        Box(Text("inside"), borderStyle="single"),
+        Text("c"),
+        flexDirection="column",
+        height=2,
+    )
+    out = render_to_string(tree)
+    # The bordered Box neither paints its border nor its content.
+    assert "inside" not in out
+    assert "┌" not in out
+    assert "└" not in out
+    assert "│" not in out
+
+
+def test_bordered_box_with_only_one_edge_at_height_1_renders() -> None:
+    """A bordered Box with one edge disabled may render at height 1.
+
+    With ``borderBottom=False`` the minimum height required to fit the
+    remaining (top) edge is 1, so the renderer does not skip. The
+    content area is empty in this degenerate case (the single row is
+    occupied by the top edge), but the edge itself draws cleanly
+    rather than being dropped — this is the opt-out path the per-edge
+    override unlocks.
+    """
+    tree = Box(
+        Box(borderStyle="single", borderBottom=False, width=4),
+        flexDirection="column",
+        height=1,
+    )
+    out = render_to_string(tree)
+    # Top edge drawn on the single available row.
+    assert "┌" in out
+    assert "┐" in out
+    # Bottom edge opted out — should not appear.
+    assert "└" not in out
+    assert "┘" not in out
+
+
+def test_borderless_top_and_bottom_box_at_height_1_renders() -> None:
+    """A bordered Box with both top/bottom disabled renders at height 1.
+
+    The user opted out of both horizontal edges, so there is no edge
+    collision to avoid — the single row is free for content. This is
+    the historic ``Box(borderTop=False, borderBottom=False)`` shape
+    that the renderer must continue to support after the
+    vertical-overflow guard lands.
+    """
+    tree = Box(
+        Box(
+            Text("c"),
+            borderStyle="round",
+            borderTop=False,
+            borderBottom=False,
+        ),
+        flexDirection="column",
+        height=1,
+        alignItems="flex-start",
+    )
+    out = render_to_string(tree)
+    # Vertical edges only — no top/bottom edge.
+    assert "c" in out
+    assert "│" in out
+    assert "╭" not in out
+    assert "╰" not in out
+
+
+def test_nested_bordered_box_overflow_closes_borders() -> None:
+    """Nested Box overflow: when an inner bordered Box is squeezed out,
+    its border is not drawn at all (no orphaned edge).
+
+    Reproduces the original Bug 8 symptom: ``markdown_streaming_demo``
+    inside an outer padded bordered Box squeezed the inner code-block
+    border Box to height 1, leaving a dangling ``└─┘`` with no
+    matching top. The fix is the renderer guard tested above; this
+    test exercises the nested scenario end-to-end.
+    """
+    # Outer Box gives the inner column 1 row of usable height after
+    # border + padding; the inner column has three children including
+    # a bordered Box, forcing heavy shrink.
+    tree = Box(
+        Text("header"),
+        Box(
+            Text("a"),
+            Box(Text("deep"), borderStyle="single"),
+            Text("b"),
+            flexDirection="column",
+        ),
+        flexDirection="column",
+        padding=1,
+        borderStyle="round",
+        height=5,
+        width=12,
+    )
+    out = render_to_string(tree)
+    # The outer border is intact (height 5 is plenty).
+    assert out.count("╭") == 1
+    assert out.count("╰") == 1
+    # The inner bordered Box was squeezed below its minimum and is
+    # therefore not painted — neither edge nor content leaks out.
+    # ``deep`` lives only inside the skipped Box.
+    assert "deep" not in out
+    # No stray single-edge characters from the inner Box.
+    # The outer Box uses round corners (╭╮╰╯); the inner used single
+    # (┐┘┌└─│), so any of those single-style chars would indicate a
+    # leaked inner edge.
+    for ch in ("┌", "┐", "└", "┘"):
+        assert ch not in out
