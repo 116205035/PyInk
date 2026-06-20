@@ -12,19 +12,24 @@ application-level threads.
 
 ## Status
 
-MVP + Phase 2 + Phase 3 complete. The reactive core, layout engine,
-built-in components, hooks, live render pipeline and examples all ship
-in this repository. Phase 2 layers on the high-frequency Jarvis / Claude
-Code TUI building blocks — animated spinners, OSC 8 hyperlinks, focusable
-inputs (via a real `use_focus` / `use_focus_manager` pair backed by a
-Context system), section dividers and a `measure_element` API for
-dynamic, measurement-driven layout. Phase 3 adds the content-rendering
-externals a Claude Code-style chat UI needs: streaming text (typing
-animation), Markdown rendering, Pygments-driven syntax highlighting and
-structured file diffs. See the project PRDs
+MVP + Phase 2 + Phase 3 + Phase 4 complete. The reactive core, layout
+engine, built-in components, hooks, live render pipeline and examples
+all ship in this repository. Phase 2 layers on the high-frequency
+Jarvis / Claude Code TUI building blocks — animated spinners, OSC 8
+hyperlinks, focusable inputs (via a real `use_focus` /
+`use_focus_manager` pair backed by a Context system), section dividers
+and a `measure_element` API for dynamic, measurement-driven layout.
+Phase 3 adds the content-rendering externals a Claude Code-style chat
+UI needs: streaming text (typing animation), Markdown rendering,
+Pygments-driven syntax highlighting and structured file diffs. Phase 4
+rounds out the input surface with three externals — `TextInput`
+(single-line + multi-line editing, selection, paste, password masking),
+`SelectInput` (single- and multi-select option lists) and `ConfirmInput`
+(Y/N confirmation prompts). See the project PRDs
 (`.trellis/tasks/06-19-pyink-mvp/prd.md`,
 `.trellis/tasks/06-20-pyink-phase2/prd.md`,
-`.trellis/tasks/06-20-pyink-phase3/prd.md`) for the full roadmap and
+`.trellis/tasks/06-20-pyink-phase3/prd.md`,
+`.trellis/tasks/06-20-pyink-phase4/prd.md`) for the full roadmap and
 design decisions.
 
 ## Install (editable)
@@ -147,7 +152,7 @@ the nearest matching entry, falling back to the context's default.
 
 Opt-in components — import them explicitly
 (`from pyink.externals import Spinner, Link, Divider`). Phase 2 +
-Phase 3:
+Phase 3 + Phase 4:
 
 | Name | Description |
 | --- | --- |
@@ -158,6 +163,9 @@ Phase 3:
 | `HighlightedCode(code, *, language="text", theme=None, line_numbers=False, **text_props)` | Pygments-driven syntax highlighting. Lazy-imports `pygments`; raises `ImportError("pip install pyink[highlight]")` on first call without the extra. Phase 3. |
 | `Markdown(source, *, theme=None, **box_props)` | Render Markdown (CommonMark + tables) via `markdown-it-py`. `source` is a `str` / `Signal[str]` / `Callable[[], str]`. Fenced code blocks render via `HighlightedCode` when Pygments is installed, plain text otherwise. Raises `ImportError("pip install pyink[markdown]")` without the extra. Phase 3. |
 | `StructuredDiff(before, after, *, language="text", context_lines=3, show_header=True, **box_props)` | File-edit diff via `difflib.unified_diff`. `+` green / `-` red / `@@` magenta. Optional Pygments highlighting of `+`/`-` bodies when `language != "text"` and Pygments is installed. Phase 3. |
+| `TextInput(*, initial_value="", placeholder=None, on_change=None, on_submit=None, multiline=False, mask=None, max_length=None, color=None, cursor_color=None, cursor_style="bar", is_active=True, **box_props)` | Single-line or multi-line text input. Owns three writable signals (`value` / `cursor` / `selection`); Emacs-style editing (Ctrl+A/E/K/U/W), Shift-arrow selection, bracketed-paste, password `mask`, `max_length` truncation. Phase 4. |
+| `SelectInput(items, *, initial_index=0, on_select=None, on_change=None, multi_select=False, indicator="❯", selected_indicator="✓", unselected_indicator=" ", color=None, selected_color="green", is_active=True, **box_props)` | Keyboard-navigable option list. `ArrowUp`/`Down` or `j`/`k` move the focus; `1`..`9` jump to an index; `Enter` confirms (single-select fires `on_select(value)`, multi-select fires `on_select(list[value])`); `Space` toggles (multi-select only). Phase 4. |
+| `ConfirmInput(on_confirm, on_cancel=None, *, prompt="Confirm?", confirm_key="y", cancel_key="n", require_enter=False, default=None, confirm_label=None, cancel_label=None, color=None, selected_color="green", is_active=True, **box_props)` | Y/N confirmation prompt. Single-key mode (default) fires the callback on the keystroke; `require_enter=True` highlights first, then Enter confirms. Custom `confirm_key` / `cancel_key` (e.g. `q` / `a`) are supported. Phase 4. |
 
 ### Imperative API (`measure_element`)
 
@@ -200,7 +208,7 @@ decisions behind each delta.
 
 ## Examples
 
-Twenty-three runnable examples live under [`examples/`](./examples), each
+Twenty-eight runnable examples live under [`examples/`](./examples), each
 modelled after ink's own examples:
 
 | Example | What it demonstrates | Run |
@@ -228,15 +236,20 @@ modelled after ink's own examples:
 | [`markdown`](./examples/markdown/markdown_demo.py) | `Markdown` external — every supported block (headings, lists, quote, code block, table, horizontal rule). Requires `pip install pyink[markdown]`. | `python examples/markdown/markdown_demo.py` |
 | [`diff`](./examples/diff/diff_demo.py) | `StructuredDiff` external — three variants of a Python-module diff: default context, zero-context, and plain-text fallback. | `python examples/diff/diff_demo.py` |
 | [`markdown-streaming`](./examples/markdown-streaming/markdown_streaming_demo.py) | Advanced integration: live AI token stream + `Markdown` re-parsing on every character. Requires `pip install pyink[all]`. | `python examples/markdown-streaming/markdown_streaming_demo.py` |
+| [`text-input`](./examples/text-input/text_input_demo.py) | `TextInput` external — single-line + multi-line + password (`mask="*"`) + placeholder inputs, mounted inside a `use_focus_manager` so Tab cycles focus. | `python examples/text-input/text_input_demo.py` |
+| [`text-input-selection`](./examples/text-input-selection/selection_demo.py) | `TextInput` selection — Shift+arrows / Ctrl+Shift+arrows extend a selection, Backspace / typing replace it, Ctrl+W kills a word. | `python examples/text-input-selection/selection_demo.py` |
+| [`select-input-real`](./examples/select-input-real/select_input_demo.py) | The real `SelectInput` external — `ArrowUp`/`Down` + `j`/`k` + digit-key jumps; Enter confirms. Contrasts with the hand-rolled `examples/select-input`. | `python examples/select-input-real/select_input_demo.py` |
+| [`select-input-multi`](./examples/select-input-multi/multi_select_demo.py) | `SelectInput(multi_select=True)` — Space toggles items in/out of a selection set; Enter confirms the whole list. | `python examples/select-input-multi/multi_select_demo.py` |
+| [`confirm-input`](./examples/confirm-input/confirm_demo.py) | `ConfirmInput` external — three Y/N prompts side by side: single-key (default), `require_enter=True`, and custom keys (`q`/`a`). | `python examples/confirm-input/confirm_demo.py` |
 
 Most examples wait for `Ctrl+C` (the default `exit_on_ctrl_c=True`).
-Press `Ctrl+C` to quit any of them. The Phase 2 / Phase 3 examples
-additionally accept `Esc`.
+Press `Ctrl+C` to quit any of them. The Phase 2 / Phase 3 / Phase 4
+examples additionally accept `Esc`.
 
 ## Development
 
 ```bash
-python -m pytest tests -v          # ~892 tests (unit + integration)
+python -m pytest tests -v          # ~1100 tests (unit + integration)
 python -m mypy src/pyink tests examples
 python -m ruff check src/pyink tests examples
 ```

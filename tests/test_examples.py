@@ -442,6 +442,11 @@ def test_counter_unmount_is_idempotent_after_run() -> None:
         "markdown/markdown_demo.py",
         "diff/diff_demo.py",
         "markdown-streaming/markdown_streaming_demo.py",
+        "text-input/text_input_demo.py",
+        "text-input-selection/selection_demo.py",
+        "select-input-real/select_input_demo.py",
+        "select-input-multi/multi_select_demo.py",
+        "confirm-input/confirm_demo.py",
     ],
 )
 def test_example_file_exists(rel_path: str) -> None:
@@ -589,4 +594,112 @@ def test_markdown_streaming_example_runs() -> None:
     # inside the markdown body (the ``#`` marker is stripped during
     # heading rendering).
     assert "Streaming Markdown" in out
+    assert "\x1b[2J" not in out
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 PR5 — examples for TextInput / SelectInput / ConfirmInput
+# externals (single-line + multi-line + password + placeholder + selection,
+# single-select, multi-select, Y/N confirmation).
+# ---------------------------------------------------------------------------
+
+
+def test_text_input_example_runs() -> None:
+    """TextInput example mounts + paints the four labelled inputs."""
+    mod = _load_example_module(
+        "text-input/text_input_demo.py", "pyink_example_text_input"
+    )
+    out = _run_example(
+        mod.TextInputDemo(), columns=72, rows=24, run_seconds=0.3
+    )
+    assert "TextInput demo" in out
+    # The four section labels render in the initial paint.
+    for label in ("Single-line", "Multi-line", "Password", "Placeholder"):
+        assert label in out
+    # The first input grabs auto-focus on mount — its id is reported
+    # in the active-focus status line.
+    assert "Active: name" in out
+    # The placeholder on the focused input is visible (the buffer is
+    # empty).
+    assert "Type your name" in out
+    assert "\x1b[2J" not in out
+
+
+def test_text_input_selection_example_runs() -> None:
+    """TextInput selection example mounts + paints the multi-line buffer."""
+    mod = _load_example_module(
+        "text-input-selection/selection_demo.py",
+        "pyink_example_text_input_selection",
+    )
+    out = _run_example(
+        mod.SelectionDemo(), columns=64, rows=14, run_seconds=0.3
+    )
+    assert "selection demo" in out
+    # The instruction line mentions the Shift-select interaction.
+    assert "Shift" in out
+    # The initial multi-line buffer is rendered.
+    assert "The quick brown fox" in out
+    assert "jumps over the lazy dog" in out
+    # The status line reports the cursor offset / line / column.
+    assert "Cursor offset" in out
+    assert "\x1b[2J" not in out
+
+
+def test_select_input_real_example_runs() -> None:
+    """The real SelectInput external mounts + paints every option."""
+    mod = _load_example_module(
+        "select-input-real/select_input_demo.py",
+        "pyink_example_select_input_real",
+    )
+    out = _run_example(
+        mod.SelectInputDemo(), columns=48, rows=14, run_seconds=0.3
+    )
+    assert "SelectInput demo (real external)" in out
+    # All five fruit options render on mount.
+    for label in ("Apple", "Banana", "Cherry", "Date", "Elderberry"):
+        assert label in out
+    # The "not selected yet" status line is visible before any Enter.
+    assert "nothing selected" in out
+    assert "\x1b[2J" not in out
+
+
+def test_select_input_multi_example_runs() -> None:
+    """The multi-select SelectInput mounts + paints all ten items."""
+    mod = _load_example_module(
+        "select-input-multi/multi_select_demo.py",
+        "pyink_example_select_input_multi",
+    )
+    out = _run_example(
+        mod.MultiSelectDemo(), columns=64, rows=18, run_seconds=0.3
+    )
+    assert "multi-select demo" in out
+    # The instruction line calls out the Space-toggles interaction.
+    assert "Space" in out
+    # Several checklist items render on mount (we don't pin every one —
+    # the test above already verifies that SelectInput paints all items
+    # in single-select mode; the multi-select paint path is identical
+    # modulo the indicator prefix).
+    assert "Read README" in out
+    assert "Open PR" in out
+    assert "not confirmed yet" in out
+    assert "\x1b[2J" not in out
+
+
+def test_confirm_input_example_runs() -> None:
+    """ConfirmInput example mounts + paints all three Y/N prompts."""
+    mod = _load_example_module(
+        "confirm-input/confirm_demo.py", "pyink_example_confirm_input"
+    )
+    out = _run_example(
+        mod.ConfirmDemo(), columns=60, rows=22, run_seconds=0.3
+    )
+    assert "ConfirmInput demo" in out
+    # Single-key + require-enter prompts derive "yes" / "no" labels.
+    assert "yes" in out
+    assert "no" in out
+    # The custom-keys prompt overrides with "quit" / "abort".
+    assert "quit" in out
+    assert "abort" in out
+    # Each prompt's status line starts in its initial state.
+    assert out.count("no action yet") >= 3
     assert "\x1b[2J" not in out
