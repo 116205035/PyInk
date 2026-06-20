@@ -6,10 +6,12 @@ externals carry heavier dependencies / non-essential surface area and
 stay out of the default namespace).
 """
 
+from pyink.externals.divider import Divider
 from pyink.externals.link import Link
 from pyink.externals.spinner import SPINNERS, Spinner
 
 __all__ = [
+    "Divider",
     "Link",
     "SPINNERS",
     "Spinner",
