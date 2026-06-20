@@ -9,14 +9,17 @@ stay out of the default namespace).
 from pyink.externals.divider import Divider
 from pyink.externals.highlighted_code import DEFAULT_THEME, HighlightedCode
 from pyink.externals.link import Link
+from pyink.externals.markdown import DEFAULT_MARKDOWN_THEME, Markdown
 from pyink.externals.spinner import SPINNERS, Spinner
 from pyink.externals.streaming_text import StreamingText
 
 __all__ = [
+    "DEFAULT_MARKDOWN_THEME",
     "DEFAULT_THEME",
     "Divider",
     "HighlightedCode",
     "Link",
+    "Markdown",
     "SPINNERS",
     "Spinner",
     "StreamingText",
