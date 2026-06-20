@@ -91,6 +91,35 @@ def test_unmount_clears_the_painted_frame() -> None:
     assert "\x1b[2K" in out.getvalue()
 
 
+def test_unmount_resets_terminal_sgr_state() -> None:
+    """Inline-mode unmount emits an SGR reset so the shell doesn't inherit
+    styling left over from the last painted frame.
+
+    Regression for the "streaming_text_demo leaves the font green after
+    exit" bug: ``StreamingText`` / Markdown / HighlightedCode leave SGR
+    state set to whatever colour the last painted row carried; the shell
+    inherits it without a trailing ``\\x1b[0m``.
+    """
+    # A green Text forces a non-default SGR sequence into the painted
+    # frame so we can assert the reset lands after it.
+    inst, out = _make_instance(Text("hi", color="green"))
+    out.truncate(0)
+    out.seek(0)
+    inst.unmount()  # type: ignore[attr-defined]
+    written = out.getvalue()
+    assert "\x1b[0m" in written
+
+
+def test_unmount_emits_reset_even_with_empty_frame() -> None:
+    """Reset fires on inline unmount regardless of whether a frame was
+    painted — the goal is to leave the terminal in a clean SGR state."""
+    inst, out = _make_instance(Text(""))
+    out.truncate(0)
+    out.seek(0)
+    inst.unmount()  # type: ignore[attr-defined]
+    assert "\x1b[0m" in out.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # wait_until_exit
 # ---------------------------------------------------------------------------

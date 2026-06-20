@@ -166,28 +166,44 @@ def _resolve_source(
     return source
 
 
+# Module-level parser cache. ``MarkdownIt`` construction is non-trivial
+# (it builds the rule pipeline + table plugin every call); reusing a
+# single process-wide instance is safe because ``MarkdownIt.parse`` is
+# stateless across calls (the per-call state lives on the parser's
+# ``StateBlock``, not on the parser itself).
+_PARSER: Any = None
+
+
+def _get_parser() -> Any:
+    """Return a process-wide ``MarkdownIt`` instance.
+
+    Construction goes through the ``"commonmark"`` preset + the ``table``
+    plugin. Reusing a single instance avoids re-building the rule pipeline
+    on every render, which was a significant contributor to the Phase 3
+    "streaming Markdown pins CPU" bug: the streaming demo drips ~50
+    characters/sec into the buffer, each write re-parses the whole
+    document, and the per-parse cost is dominated by parser setup.
+    """
+    global _PARSER
+    if _PARSER is None:
+        try:
+            from markdown_it import MarkdownIt
+        except ImportError as exc:
+            raise ImportError(
+                "Markdown requires markdown-it-py. "
+                "Install: pip install pyink[markdown]"
+            ) from exc
+        _PARSER = MarkdownIt("commonmark").enable("table")
+    return _PARSER
+
+
 def _parse(text: str) -> list[Token]:
     """Parse ``text`` into a list of markdown_it ``Token``\\ s.
 
-    Configured with the ``"commonmark"`` preset plus the ``table`` plugin
-    (the PRD's supported-elements list calls out tables). A fresh parser
-    per call avoids carrying state between renders.
+    Uses the shared process-wide parser (see :func:`_get_parser`).
     """
-    try:
-        from markdown_it import MarkdownIt
-    except ImportError as exc:
-        # Re-raise with the friendly "install the extra" message; the
-        # original ``ImportError`` is chained via ``from`` so callers can
-        # still inspect what went wrong. This check is duplicated in
-        # :func:`Markdown` so the static fast path fails before parsing
-        # — but the reactive path's parser also goes through here, so
-        # the import must be guarded at every entry point.
-        raise ImportError(
-            "Markdown requires markdown-it-py. "
-            "Install: pip install pyink[markdown]"
-        ) from exc
-    md = MarkdownIt("commonmark").enable("table")
-    return md.parse(text)
+    tokens = _get_parser().parse(text)
+    return list(tokens)
 
 
 def _merge_theme(theme: dict[str, Any] | None) -> dict[str, Any]:
@@ -839,6 +855,71 @@ def _render_tokens(
 # ---------------------------------------------------------------------------
 
 
+def _render_markdown_to_string(text: str, columns: int, theme: dict[str, Any]) -> str:
+    """Render a Markdown source string to a flat styled string.
+
+    Centralised so the static fast path (:func:`Markdown`) and the
+    reactive component (:func:`_MarkdownImpl`) share the same
+    parse-render-snapshot pipeline. The result is a single string
+    carrying inline SGR sequences (and OSC 8 link wrappers) that a
+    ``Text`` leaf can hand to the layout engine.
+
+    A throwaway :class:`Reconciler` mounts the per-block ``box`` tree
+    so we can run ``layout`` + ``render_layout_to_string`` on it. This
+    mirrors the pattern :func:`Link` / :func:`Transform` use to render
+    a sub-tree to a snapshot string; the throwaway scope contains any
+    hooks the blocks might establish.
+    """
+    from pyink.core.reconciler import Reconciler
+    from pyink.layout import layout, render_layout_to_string
+
+    tokens = _parse(text)
+    elements, _ = _render_tokens(tokens, 0, theme)
+    inner = create_element("box", *elements, flexDirection="column", gap=1)
+    reconciler = Reconciler()
+    mounted = reconciler.mount(inner)
+    try:
+        tree = layout(mounted, columns=columns)
+        return render_layout_to_string(tree)
+    finally:
+        reconciler.unmount(mounted)
+
+
+#: Rendered-string cache. Keyed on ``(text, columns, theme_id)``. The
+#: render-loop's subscription layout *and* the paint layout both evaluate
+#: the reactive ``Text`` callable, so without a cache each signal flush
+#: re-parses the Markdown and re-lays-out the per-block tree twice. For
+#: the streaming demo (≈50 writes/sec) that pinned a core at 100% CPU.
+#:
+#: The cache is bounded (LRU, ``_RENDER_CACHE_MAX`` entries). Theme is a
+#: mutable ``dict`` so we key on its ``id()`` — themes are built once per
+#: ``Markdown(...)`` call site and reused across renders, which makes
+#: ``id(theme)`` a stable identity within a streaming session.
+_RENDER_CACHE_MAX: int = 64
+_render_cache: dict[tuple[str, int, int], str] = {}
+
+
+def _cached_render(text: str, columns: int, theme: dict[str, Any]) -> str:
+    """LRU-cached wrapper around :func:`_render_markdown_to_string`.
+
+    Returns the cached string when ``(text, columns, theme_id)`` was
+    rendered recently; otherwise computes, caches and returns it.
+    """
+    key = (text, columns, id(theme))
+    cached = _render_cache.get(key)
+    if cached is not None:
+        # Move-to-end so the LRU eviction order reflects recent use.
+        _render_cache.pop(key)
+        _render_cache[key] = cached
+        return cached
+    value = _render_markdown_to_string(text, columns, theme)
+    _render_cache[key] = value
+    if len(_render_cache) > _RENDER_CACHE_MAX:
+        # Evict the oldest entry (first inserted).
+        _render_cache.pop(next(iter(_render_cache)))
+    return value
+
+
 def _MarkdownImpl(**props: Any) -> Element:
     """Function component body for the reactive source branch.
 
@@ -853,10 +934,10 @@ def _MarkdownImpl(**props: Any) -> Element:
 
     1. Resolves the current source string (``Signal.value`` / callable /
        ``str``).
-    2. Parses the Markdown into tokens.
-    3. Renders the tokens into a tree of ``Element``\\ s.
-    4. Lays that tree out via a throwaway :class:`Reconciler` at the
-       active instance's column width and renders it to a string.
+    2. Renders the Markdown into a styled string via
+       :func:`_cached_render` (which parses, lays out a throwaway tree,
+       and memoises the result so the render-loop's double-layout does
+       not double the work).
 
     The resulting string becomes the ``Text`` leaf's body. Because the
     signal read happens inside the layout-time callable, the render
@@ -870,9 +951,7 @@ def _MarkdownImpl(**props: Any) -> Element:
     theme: dict[str, Any] = props["theme"]
     box_props: dict[str, Any] = props["box_props"]
 
-    from pyink.core.reconciler import Reconciler
     from pyink.hooks._runtime import _get_current_instance
-    from pyink.layout import layout, render_layout_to_string
 
     def render_reactive() -> str:
         # Resolve the source at layout time so a Signal read here
@@ -881,29 +960,13 @@ def _MarkdownImpl(**props: Any) -> Element:
         text = _resolve_source(source)
         if not text:
             return ""
-        tokens = _parse(text)
-        elements, _ = _render_tokens(tokens, 0, theme)
-        # Render the per-block tree to a string via a throwaway
-        # reconciler. Same pattern as :func:`Link` /
-        # :func:`Transform`; the throwaway scope keeps any hooks the
-        # blocks might establish (none in PR3, but ``Link`` does)
-        # contained to this snapshot.
-        inner = create_element(
-            "box", *elements, flexDirection="column", gap=1
-        )
-        reconciler = Reconciler()
-        mounted = reconciler.mount(inner)
-        try:
-            inst = _get_current_instance()
-            columns = 80
-            if inst is not None:
-                cols_attr = getattr(inst, "columns", 0)
-                if isinstance(cols_attr, int) and cols_attr > 0:
-                    columns = cols_attr
-            tree = layout(mounted, columns=columns)
-            return render_layout_to_string(tree)
-        finally:
-            reconciler.unmount(mounted)
+        inst = _get_current_instance()
+        columns = 80
+        if inst is not None:
+            cols_attr = getattr(inst, "columns", 0)
+            if isinstance(cols_attr, int) and cols_attr > 0:
+                columns = cols_attr
+        return _cached_render(text, columns, theme)
 
     box_props = dict(box_props)
     box_props.pop("flexDirection", None)

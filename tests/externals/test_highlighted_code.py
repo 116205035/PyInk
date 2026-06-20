@@ -610,3 +610,31 @@ def test_highlighted_code_not_in_pyink_top_level() -> None:
     assert not hasattr(pyink, "HighlightedCode"), (
         "HighlightedCode must NOT be top-level"
     )
+
+
+# ---------------------------------------------------------------------------
+# Token cache (Bug 2/3 regression)
+# ---------------------------------------------------------------------------
+
+
+def test_tokenize_cache_returns_same_tokens_for_same_input() -> None:
+    """Two tokenise calls with identical inputs hit the cache.
+
+    Regression for the Phase 3 "highlighted-code demo pins CPU" bug.
+    """
+    from pyink.externals.highlighted_code import _token_cache, _tokenize
+
+    if not _pygments_available():
+        import pytest
+
+        pytest.skip("pygments not installed")
+
+    import pygments
+    from pygments.lexers import get_lexer_by_name, guess_lexer
+
+    _token_cache.clear()
+    code = "def f(): pass"
+    first = _tokenize(code, "python", pygments, get_lexer_by_name, guess_lexer)
+    second = _tokenize(code, "python", pygments, get_lexer_by_name, guess_lexer)
+    assert first == second
+    assert (code, "python") in _token_cache

@@ -240,6 +240,49 @@ def _group_tokens_by_line(
     return rows
 
 
+#: LRU cache for Pygments tokenisation. Keyed on ``(code, language)``.
+#: The render-loop's subscription layout *and* the paint layout both
+#: evaluate reactive ``Text`` callables, so without a cache a single
+#: signal flush tokenises the same code block twice. Pygments lexing is
+#: the dominant cost for highlighted code in a streaming Markdown
+#: context, hence the memoisation. Bound to ``_TOKEN_CACHE_MAX`` entries
+#: so a long-lived process streaming many distinct snippets does not
+#: grow the cache unbounded.
+_TOKEN_CACHE_MAX: int = 64
+_token_cache: dict[tuple[str, str], list[tuple[Any, str]]] = {}
+
+
+def _tokenize(
+    code: str,
+    language: str,
+    pygments_module: Any,
+    get_lexer_by_name: Any,
+    guess_lexer: Any,
+) -> list[tuple[Any, str]]:
+    """Pygments lex with an LRU cache on ``(code, language)``.
+
+    Resolved lexer/tokens functions are passed in by the caller so the
+    lazy import inside :func:`HighlightedCode` stays the single point
+    that establishes the Pygments dependency.
+    """
+    key = (code, language)
+    cached = _token_cache.get(key)
+    if cached is not None:
+        _token_cache.pop(key)
+        _token_cache[key] = cached
+        return cached
+    lexer = (
+        guess_lexer(code)
+        if language == "auto"
+        else get_lexer_by_name(language)
+    )
+    value = list(pygments_module.lex(code, lexer))
+    _token_cache[key] = value
+    if len(_token_cache) > _TOKEN_CACHE_MAX:
+        _token_cache.pop(next(iter(_token_cache)))
+    return value
+
+
 def _build_line_rows(
     rows: list[list[Element]],
     *,
@@ -361,13 +404,17 @@ def HighlightedCode(
             "Install: pip install pyink[highlight]"
         ) from exc
 
-    lexer = guess_lexer(code) if language == "auto" else get_lexer_by_name(language)
-
     effective_theme: dict[str, str | None] = dict(DEFAULT_THEME)
     if theme:
         effective_theme.update(theme)
 
-    tokens = list(pygments.lex(code, lexer))
+    # Tokenise once. ``_tokenize`` memoises on ``(code, language)`` so
+    # a reactive Markdown that re-highlights the same code block on
+    # every layout pass (the render loop runs layout twice per signal
+    # flush — once for subscription tracking, once for the paint) does
+    # not pay the Pygments lexing cost twice. This was a major
+    # contributor to the Phase 3 "highlighted-code demo pins CPU" bug.
+    tokens = _tokenize(code, language, pygments, get_lexer_by_name, guess_lexer)
     token_rows = _group_tokens_by_line(tokens, effective_theme)
     line_rows = _build_line_rows(token_rows, line_numbers=line_numbers)
 

@@ -451,7 +451,17 @@ class Instance:
             self.current_frame = ""
         if frame:
             write_diff(frame, "", self.stdout)
-            self.stdout.flush()
+        # Always emit an SGR reset on inline-mode exit. Components
+        # (StreamingText cursor, Markdown inline styling, HighlightedCode
+        # token colours) leave terminal SGR state set to whatever the
+        # last painted row applied; without a reset the user's shell
+        # inherits that styling (the "green cursor leaked into my shell"
+        # bug). In alternate-screen mode the buffer swap discards the
+        # state and we skip this to avoid perturbing the restored
+        # primary buffer; this method is only called in inline mode
+        # anyway (see :meth:`unmount`).
+        self.stdout.write("\x1b[0m")
+        self.stdout.flush()
 
 
 def _safe_call(fn: Callable[[], None]) -> None:

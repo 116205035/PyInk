@@ -239,6 +239,112 @@ def StructuredDiff(
 - 全部 quality gates 绿
 - 公共导出（externals 不默认导出，用户显式 import）
 
+## Bug Fixes (post-PR6 hardening pass)
+
+Five user-reported bugs against the Phase 3 examples were addressed in a
+single hardening pass. Root-cause analysis + fix per bug:
+
+### Bug 1 — ANSI SGR state leaks into the shell after exit
+
+**Symptom**: after quitting `streaming_text_demo.py` the terminal font
+kept the colour of the StreamingText cursor (green) and any subsequent
+shell input was green too.
+
+**Root cause**: `Instance._clear_frame_for_exit` only emitted cursor-up
++ per-row `\\x1b[2K` line clears; it never reset the terminal SGR state.
+Components leave whatever SGR sequence the last painted row applied in
+the active terminal state, so the shell inherited it.
+
+**Fix**: `src/pyink/render/instance.py` — `_clear_frame_for_exit` now
+writes a trailing `\\x1b[0m` after the frame clear so the terminal is
+returned to the default SGR state. Alternate-screen mode is unaffected
+(the buffer swap discards SGR state, and `_clear_frame_for_exit` only
+runs in inline mode anyway).
+
+### Bug 2 / 3 — high CPU + streaming Markdown shows only the final frame
+
+**Symptom**: highlighted-code / markdown / diff / markdown-streaming
+examples all showed a perceptible startup delay and pinned a CPU core
+near 100%; `markdown_streaming_demo.py` rendered the full Markdown
+instantly rather than streaming it token-by-token.
+
+**Root cause**: the render loop runs the layout **twice** per signal
+flush — once inside the render-loop `effect` body (to establish signal
+subscriptions) and once inside the throttled `_paint_now` (the actual
+paint). For reactive Markdown this meant:
+
+* `_MarkdownImpl`'s `Text` callable re-parsed the whole document with a
+  freshly-constructed `MarkdownIt` parser on every layout.
+* It then built a per-block Element tree, mounted it via a throwaway
+  `Reconciler`, ran a nested `layout`, and rendered it to a string.
+* All of this happened **twice** per signal flush (≈50 writes/sec in the
+  streaming demo).
+* `HighlightedCode` did the same — re-tokenising the same code block on
+  every layout.
+
+**Fix** (per-layer caches; no change to the render loop's double-layout
+contract, which is intentional — the subscription layout must run
+inside the effect's tracking context):
+
+* `src/pyink/externals/markdown.py`:
+  * Replaced the per-call `MarkdownIt` construction with a shared
+    process-wide parser instance (`_get_parser`).
+  * Added an LRU render cache (`_cached_render`) keyed on
+    `(text, columns, id(theme))` so the second layout of the same
+    signal flush hits the cache. Bounded to 64 entries.
+  * Extracted the snapshot pipeline into `_render_markdown_to_string`
+    so the cache layer is testable in isolation.
+* `src/pyink/externals/highlighted_code.py`:
+  * Added an LRU tokenise cache (`_tokenize`) keyed on
+    `(code, language)`, bounded to 64 entries.
+
+**Bug 3 follow-up**: with the cache in place the render loop can keep
+up with the 50 Hz buffer writes and the user sees the incremental
+typing animation again.
+
+### Bug 4 — bordered Box border "scrambled" at the end of a stream
+
+**Symptom**: at the end of `markdown_streaming_demo.py` the round border
+around the Markdown Box appeared with its characters in the wrong
+columns.
+
+**Root cause**: this was a visible artefact of Bug 2/3 — when the render
+loop fell behind, frames were coalesced mid-flush and the diff wrote
+border characters against a stale `current_frame` whose row count no
+longer matched the actual on-screen state. Once the cache fixed the
+throughput the artefact disappeared; the frame diff code itself is
+correct for the constant-height case (the bordered Box always stretches
+to the viewport, so every frame has the same row count and the
+line-by-line diff can't drift).
+
+**Regression test**: `test_streaming_markdown_inside_border_box_stays_consistent`
+grows the buffer one character at a time and asserts every painted
+frame keeps its left border column on every row.
+
+### Bug 5 — reference implementations consulted
+
+* **ink** (`D:\\Projects\\github\\ink`): confirmed the inline-renderer
+  convention of never emitting `\\x1b[2J` and that exit cleanup emits a
+  reset; PyInk's instance already followed the no-`2J` rule and now
+  also emits the reset.
+* **Textual** (`D:\\Projects\\github\\textual-main`): consulted its
+  `Markdown` widget caching strategy (parse once, re-render on theme
+  change) — the LRU cache mirrors that pattern at a smaller scale.
+* **Claude Code** (`D:\\Projects\\github\\claude-code`): the
+  `Markdown.tsx` / `HighlightedCode` / `StructuredDiff` components
+  inspired the original Phase 3 design; this pass focused on the
+  caching layer that the original implementation omits.
+
+### Verification
+
+* All 877 tests pass (870 baseline + 7 new regression tests).
+* `ruff check src tests` and `mypy src tests` both clean.
+* Manual `markdown_streaming_demo.py` run now shows incremental typing
+  animation rather than a single instant render; quitting no longer
+  leaves the shell with a coloured font.
+
+---
+
 ## Out of Scope
 
 - 不实现 tree-sitter 高亮（Pygments 已够 MVP）

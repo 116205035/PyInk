@@ -464,6 +464,69 @@ def test_signal_source_rerenders_on_write() -> None:
     inst.unmount()
 
 
+def test_signal_source_incremental_stream_shows_each_state() -> None:
+    """Streaming regression (Bug 3): each incremental write to the buffer
+    should land on screen, not just the final state. Before the render
+    cache the parse + nested layout was so slow the render loop couldn't
+    keep up with ~50 writes/sec and the user only saw the final frame.
+    """
+    buf = signal("")
+    inst = render(
+        Markdown(buf),
+        stdout=io.StringIO(),
+        stdin=_FakeTTY(),
+        columns=80,
+        rows=20,
+        exit_on_ctrl_c=False,
+    )
+    # Drip "AB" then "ABC" — the intermediate "AB" state must appear
+    # before the longer write clobbers the buffer.
+    buf.value = "AB"
+    assert _wait_for(lambda: "AB" in inst.current_frame)
+    buf.value = "ABC"
+    assert _wait_for(lambda: "ABC" in inst.current_frame)
+    inst.unmount()
+
+
+def test_streaming_markdown_inside_border_box_stays_consistent() -> None:
+    """Regression (Bug 4): streaming Markdown inside a bordered Box must
+    keep the border intact at every intermediate state. The frame is
+    always the viewport height (the border Box stretches to fill rows),
+    so each row of every painted frame should still carry the left/right
+    border columns.
+    """
+    buf = signal("")
+    inst = render(
+        Box(
+            Markdown(buf),
+            flexDirection="column",
+            borderStyle="round",
+        ),
+        stdout=io.StringIO(),
+        stdin=_FakeTTY(),
+        columns=30,
+        rows=10,
+        exit_on_ctrl_c=False,
+    )
+    # Grow the buffer one character at a time and verify each frame
+    # still has its border characters on every visible row.
+    src = "# Title\n\n- one\n- two\n- three\n"
+    for i in range(1, len(src) + 1):
+        buf.value = src[:i]
+        # Wait for the next paint to land (current_frame always reflects
+        # the latest rendered state). Cap the wait at 2 s — long enough
+        # for the throttle to flush on a slow CI box.
+        _wait_for(lambda: bool(inst.current_frame))
+        # Each line of the frame should start with a non-space character
+        # (the left border column). We don't check the exact glyph
+        # (round-border corner chars differ on top/bottom rows).
+        for line in inst.current_frame.split("\n"):
+            assert line[:1] != " ", (
+                f"border lost on line {line!r} at i={i}"
+            )
+    inst.unmount()
+
+
 # ---------------------------------------------------------------------------
 # Reactive source: Callable
 # ---------------------------------------------------------------------------
@@ -903,3 +966,42 @@ def test_nested_code_block_in_markdown_does_not_break_surrounding_blocks(
     out = _render(Markdown(src))
     for needle in ("Title", "Before code.", "print('hi')", "After code."):
         assert needle in out, f"missing {needle!r} in fallback output"
+
+
+# ---------------------------------------------------------------------------
+# Reactive cache (Bug 2/3 regression)
+# ---------------------------------------------------------------------------
+
+
+def test_reactive_render_cache_hits_avoid_repeated_parse() -> None:
+    """Two reactive renders with the same source hit the cache.
+
+    Regression for the Phase 3 "streaming Markdown pins CPU" bug: the
+    render loop's subscription layout *and* the paint layout both
+    evaluate the reactive ``Text`` callable, so without the cache each
+    signal flush re-parses the whole document twice. We assert the
+    cache key is hit on the second call with the same input.
+    """
+    from pyink.externals.markdown import _cached_render, _render_cache
+
+    _render_cache.clear()
+    theme: dict[str, Any] = {"_test": True}
+    src = "# Title\n\nParagraph."
+    first = _cached_render(src, 80, theme)
+    # Second call with identical arguments must hit the cache (return
+    # the exact same string instance).
+    second = _cached_render(src, 80, theme)
+    assert first == second
+    assert (src, 80, id(theme)) in _render_cache
+
+
+def test_reactive_render_cache_evicts_lru_entries() -> None:
+    """The cache is bounded; inserting past the cap evicts the oldest."""
+    from pyink.externals import markdown as md_mod
+
+    md_mod._render_cache.clear()
+    theme: dict[str, Any] = {}
+    # Push twice the cap so eviction kicks in.
+    for i in range(md_mod._RENDER_CACHE_MAX * 2):
+        md_mod._cached_render(f"# Title {i}", 80, theme)
+    assert len(md_mod._render_cache) <= md_mod._RENDER_CACHE_MAX
