@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Phase 3 大量参考 ink 第三方包（ink-markdown/ink-syntax-highlight）+ Claude Code 的 Markdown/HighlightedCode/StructuredDiff 组件。要求实现者搜重复再写，参考 ink 的渲染策略但 Python 化实现"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Phase 3 跨层交互密集：Markdown AST → PyInk Element 树、Pygments tokens → ANSI 颜色、difflib 输出 → 染色 Text、StreamingText buffer signal → use_interval → rerender"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "StreamingText 用 signal buffer；Markdown 接受 Signal/Callable[str]/str 三种源类型；这些 reactive 模式必须遵守已沉淀的 signals 用法"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "Externals（StreamingText/Markdown/HighlightedCode/StructuredDiff）必须遵守 MVP+Phase 2 风格：函数组件 + 位置参数 children + style props callable + lazy import 重依赖"}

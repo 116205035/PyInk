@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "检查 Phase 3 externals 是否过度复制 ink 上游而未 Python 化；检查 PyInk 内部是否有重复逻辑（如 Markdown 和 HighlightedCode 各自实现颜色映射，应该复用 PR4 的 ansi.parse_color）"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "检查跨层契约：Markdown AST 节点 → PyInk Element 映射稳定？Pygments token → 颜色映射完整？difflib 输出格式 → 染色规则一致？lazy import 失败时降级行为清晰？"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "检查 StreamingText 的 signal buffer 用法、Markdown 的三种源类型处理、StructuredDiff 的可响应式源（Signal[str]）支持"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "检查 externals 的函数组件模式、style props callable 支持、lazy import 错误信息友好（'pip install pyink[xxx]'）"}
