@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 1
+- **Total Sessions**: 2
 - **Last Active**: 2026-06-20
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~49 | Active |
+| `journal-1.md` | ~84 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 2 | 2026-06-20 | PyInk MVP-fits examples + 3 bug fixes | `06c04b7`, `c606633`, `838f01d` | `main` |
 | 1 | 2026-06-20 | PyInk MVP: 8 PRs from empty repo to 516-test TUI framework | `101a04a`, `4315595`, `c6aa70c`, `98d9826`, `b657951`, `00357db`, `d7c3bbe`, `3c42a4d`, `cefbdde`, `e7c0869` | `main` |
 <!-- @@@/auto:session-history -->
 

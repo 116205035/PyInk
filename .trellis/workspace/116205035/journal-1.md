@@ -47,3 +47,38 @@ Built complete PyInk MVP from scratch in one session: 8 PRs covering signals cor
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: PyInk MVP-fits examples + 3 bug fixes
+
+**Date**: 2026-06-20
+**Task**: PyInk MVP-fits examples + 3 bug fixes
+**Branch**: `main`
+
+### Summary
+
+Added 6 examples (alternate-screen, transform, computed-batch, nested-layout, ansi-colors, use-window-size) covering MVP features that lacked demos. Examples then surfaced 3 real bugs in MVP core, all fixed with regression tests: (1) long text overflowed bordered Box in nested-layout — flex.py text-leaf wrap guard suppressed re-wrapping on subsequent layout passes, fixed via FlexNode.original_text snapshot + monotonic-tighten re-wrap; (2) alternate-screen exit wiped user scrollback — Instance.unmount cleared frame after exit_alternate_screen restored primary buffer + bare \x1b[?1049h/l didn't save cursor on some terminals, fixed by skipping clear-frame in alt mode and bracketing 1049 with explicit DECSC/DECRC; (3) text style leak across wrapped lines (user-reported 'background overflow') — _paint_text wrapped entire multi-line string with one style pair then split, only first line had opener and last had reset, fixed by per-line styling. Final state: 534 passed + 22 xfailed, mypy strict + ruff green. 13 examples total now demonstrate every MVP capability.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `06c04b7` | (see git log) |
+| `c606633` | (see git log) |
+| `838f01d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
