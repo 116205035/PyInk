@@ -299,6 +299,17 @@ class FlexNode:
     style: FlexStyle
     children: list[FlexNode] = field(default_factory=list)
     text: str | None = None  # for kind == "text"
+    # Deferred text renderer for leaves whose source is a single
+    # callable. When set, the text body is produced *inside* the
+    # layout pass (see :func:`_layout_node`'s text branch) rather than
+    # at flex-tree construction. This is what lets width-aware
+    # callables (e.g. ``Markdown``'s reactive branch, which pre-renders
+    # the document to a snapshot string) read the actual measurement
+    # width via :mod:`pyink.layout._text_width_context` and size their
+    # output to fit, instead of overflowing the parent's content box.
+    # ``None`` for plain-string / mixed leaves, which are still
+    # evaluated eagerly at construction time.
+    text_renderer: Callable[[], str] | None = None
     # Original unwrapped source text — preserved verbatim so that
     # repeated layout passes (the engine re-lays-out children after
     # grow/shrink distribution) can re-wrap at the *current* resolved
@@ -576,6 +587,30 @@ def _build_host_node(instance: Any) -> FlexNode:
         # nested-Text transform pipeline).
         from pyink.core.element import Element
 
+        # Deferred-rendering fast path: a leaf whose only child is a
+        # single callable. We store the callable on the FlexNode and
+        # let the layout pass invoke it once the available width is
+        # known (see :func:`_layout_node`'s text branch). This is what
+        # lets width-aware renderers (e.g. ``Markdown``'s reactive
+        # branch) size their output to fit, instead of overflowing
+        # their parent's content box. Mixed str+callable leaves are
+        # rare; they fall through to the eager path below.
+        if (
+            len(instance.children) == 1
+            and callable(instance.children[0])
+            and not isinstance(instance.children[0], Element)
+        ):
+            renderer = instance.children[0]
+            # The narrowing above (callable + not Element) plus the
+            # ``list[Any]`` annotation on ``HostInstance.children``
+            # makes this assignment safe under mypy strict. The
+            # renderer returns ``str`` per the ``Text`` contract.
+            node.text_renderer = renderer
+            node.text = ""
+            # ``original_text`` stays ``None`` so the wrap pass below
+            # never tries to re-wrap a string we have not produced yet.
+            return node
+
         parts: list[str] = []
         for leaf in instance.children:
             if isinstance(leaf, str):
@@ -812,8 +847,41 @@ def _layout_node(
     if node.kind == "text":
         max_w_for_text = (
             own_w if own_w >= 0
-            else (effective_max_w if effective_max_w != float("inf") else float("inf"))
+            else (effective_max_w if effective_max_w != float("inf") else float("inf")
+                  )
         )
+        # Deferred text renderer (single-callable leaf, see
+        # :func:`_build_host_node`). Invoke it now — the measurement
+        # width is known — so width-aware renderers (e.g. Markdown's
+        # reactive branch) can size their output to fit. The renderer
+        # is memoised by the caller (see ``_cached_render`` in
+        # ``markdown.py``) so re-invocation across layout passes is
+        # cheap; we still cache the last (width, text) on the node so
+        # subsequent passes with the same width skip the call. The
+        # ``_rendered_width`` prop tracks the width the cached text
+        # was rendered at, mirroring the ``_wrapped_width`` bookkeeping
+        # used by the wrap path below.
+        if node.text_renderer is not None:
+            ctx_width = (
+                int(max_w_for_text)
+                if max_w_for_text != float("inf") and max_w_for_text >= 1
+                else None
+            )
+            prev_rendered_w = node.props.get("_rendered_width")
+            if ctx_width is None or prev_rendered_w != ctx_width:
+                from pyink.layout._text_width_context import (
+                    reset_current_text_width,
+                    set_current_text_width,
+                )
+
+                token = set_current_text_width(ctx_width)
+                try:
+                    rendered = node.text_renderer()
+                finally:
+                    reset_current_text_width(token)
+                node.text = str(rendered) if rendered is not None else ""
+                node.original_text = node.text
+                node.props["_rendered_width"] = ctx_width
         # Re-wrap from the **original** source text — but only when the
         # current ``max_w_for_text`` is *tighter* than any width we've
         # already wrapped to. The flex engine re-lays-out children

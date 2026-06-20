@@ -527,6 +527,135 @@ def test_streaming_markdown_inside_border_box_stays_consistent() -> None:
     inst.unmount()
 
 
+def test_signal_source_nested_border_box_does_not_scramble() -> None:
+    """Regression: streaming Markdown inside a bordered Box must size the
+    Markdown snapshot to the actual available width, not the viewport
+    width. Pre-fix the snapshot was rendered at ``inst.columns`` (e.g.
+    70) and then placed inside a narrower content area (e.g. 66); the
+    pre-rendered box-drawing characters inside the snapshot could not
+    be re-wrapped by the layout engine, so the inner code-block border
+    overflowed the outer Box's right border and the outer border
+    appeared to "scramble" at the end of the stream — orphaned
+    half-width inner borders on their own rows and missing inner
+    right-edge characters on the code-bearing rows.
+
+    The fix exposes the layout-time measurement width to width-aware
+    text renderers (see ``pyink.layout._text_width_context``) so the
+    Markdown snapshot is sized to the actual content box.
+
+    We grow the buffer character-by-character and at the final state
+    assert:
+
+    * Every line of the painted frame fits within ``columns`` visible
+      cells (no overflow into the column past the right border).
+    * The outer border uses round corners; every visible body row
+      carries the outer right-edge ``│`` at the same column
+      (``columns - 1``).
+    * The inner code-block border (single-line ``│``) is consistent
+      across every code-bearing row: the inner left-edge column and
+      the inner right-edge column are the same on every such row.
+      Pre-fix the orphaned-border bug produced inner-left without
+      inner-right (or vice versa) on some rows.
+    """
+    buf = signal("")
+    columns = 70
+    inst = render(
+        Box(
+            Markdown(buf),
+            flexDirection="column",
+            padding=1,
+            borderStyle="round",
+        ),
+        stdout=io.StringIO(),
+        stdin=_FakeTTY(),
+        columns=columns,
+        rows=18,
+        exit_on_ctrl_c=False,
+    )
+    src = (
+        "# Title\n\n"
+        "Intro.\n\n"
+        "```python\n"
+        "def square(n: int) -> int:\n"
+        "    return n * n\n"
+        "```\n\n"
+        "Done.\n"
+    )
+    for i in range(1, len(src) + 1):
+        buf.value = src[:i]
+        _wait_for(lambda: bool(inst.current_frame))
+    # Snapshot the final frame.
+    final = inst.current_frame
+    inst.unmount()
+
+    # Strip colour/style SGR sequences so visible widths are exact, but
+    # keep the box-drawing characters we want to make assertions about.
+    import re
+
+    visible = re.sub(r"\x1b\[[0-9;]*m", "", final)
+    lines = visible.split("\n")
+    assert lines, "expected a painted frame"
+
+    # Every line must fit within ``columns`` cells.
+    for i, line in enumerate(lines):
+        assert len(line) <= columns, (
+            f"line {i} overflows viewport: len={len(line)} > {columns}: "
+            f"{line!r}"
+        )
+
+    # The outer border uses round corners; the right edge on body rows
+    # is ``│``. Every body row that fills the viewport width should
+    # end with ``│`` at ``columns - 1``.
+    body_lines = [
+        (i, ln) for i, ln in enumerate(lines)
+        if len(ln) == columns and ln.endswith("│")
+    ]
+    assert body_lines, (
+        f"expected at least one outer-border body row, got: {lines!r}"
+    )
+
+    # If pygments is unavailable the inner code block renders as plain
+    # dim Text with no inner border; the overflow assertion above is
+    # still the load-bearing guarantee in that case.
+    if not _pygments_available():  # pragma: no cover - environment dep
+        return
+
+    # The inner code-block border uses single-line box-drawing. Each
+    # code-bearing body row should carry both the inner-left and
+    # inner-right ``│`` at consistent columns across rows. We collect
+    # the inner-left and inner-right columns per row and assert every
+    # code-bearing row carries the same pair.
+    code_bearing_rows: list[tuple[int, str]] = [
+        (i, ln) for i, ln in body_lines
+        if ("def " in ln or "return " in ln)
+    ]
+    assert code_bearing_rows, (
+        f"expected code-bearing rows in frame; got: "
+        f"{[ln for _, ln in body_lines]!r}"
+    )
+    inner_left_cols: set[int] = set()
+    inner_right_cols: set[int] = set()
+    for i, ln in code_bearing_rows:
+        inner_cols = [
+            col for col in range(1, columns - 1)
+            if col < len(ln) and ln[col] == "│"
+        ]
+        assert len(inner_cols) == 2, (
+            f"code-bearing line {i} should have exactly two inner "
+            f"border columns (left + right); got {inner_cols}: {ln!r}"
+        )
+        inner_left_cols.add(inner_cols[0])
+        inner_right_cols.add(inner_cols[1])
+    assert len(inner_left_cols) == 1, (
+        f"inner left border column inconsistent across rows: "
+        f"{inner_left_cols}"
+    )
+    assert len(inner_right_cols) == 1, (
+        f"inner right border column inconsistent across rows: "
+        f"{inner_right_cols}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Reactive source: Callable
 # ---------------------------------------------------------------------------

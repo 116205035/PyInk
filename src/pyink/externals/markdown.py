@@ -952,6 +952,7 @@ def _MarkdownImpl(**props: Any) -> Element:
     box_props: dict[str, Any] = props["box_props"]
 
     from pyink.hooks._runtime import _get_current_instance
+    from pyink.layout._text_width_context import get_current_text_width
 
     def render_reactive() -> str:
         # Resolve the source at layout time so a Signal read here
@@ -960,12 +961,25 @@ def _MarkdownImpl(**props: Any) -> Element:
         text = _resolve_source(source)
         if not text:
             return ""
-        inst = _get_current_instance()
-        columns = 80
-        if inst is not None:
-            cols_attr = getattr(inst, "columns", 0)
-            if isinstance(cols_attr, int) and cols_attr > 0:
-                columns = cols_attr
+        # Prefer the layout-time measurement width (the actual content
+        # box the parent grants this Text leaf) over the viewport
+        # width. Without this, the snapshot is rendered at the
+        # viewport width and then placed inside a narrower parent —
+        # the pre-rendered box-drawing characters cannot be re-wrapped
+        # by the layout engine and the parent's border scrambles. The
+        # context width is set by the layout pass around the deferred
+        # renderer invocation (see ``_layout_node``'s text branch);
+        # ``None`` means the layout is measuring under unbounded width
+        # (e.g. the very first subscription layout), in which case we
+        # fall back to the viewport width.
+        columns = get_current_text_width()
+        if columns is None or columns < 1:
+            inst = _get_current_instance()
+            columns = 80
+            if inst is not None:
+                cols_attr = getattr(inst, "columns", 0)
+                if isinstance(cols_attr, int) and cols_attr > 0:
+                    columns = cols_attr
         return _cached_render(text, columns, theme)
 
     box_props = dict(box_props)

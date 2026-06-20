@@ -411,6 +411,87 @@ callback that woke us).
   animation rather than a single instant render; quitting no longer
   leaves the shell with a coloured font.
 
+### Bug 7 — nested Markdown code-block border scrambles at end of stream
+
+**Symptom**: streaming Markdown inside a bordered parent Box renders
+with the inner code-block border "scrambled" at the end of the stream.
+Inner top/bottom edges appear on their own rows at the wrong width;
+inner left/right edges are missing on the code-bearing rows; the
+outer parent's right border carries the orphaned inner-edge
+characters. The visual reads as the inner box having been cleaved
+across multiple lines.
+
+**Root cause**: `_MarkdownImpl` (the reactive source branch) renders
+its Markdown snapshot to a single string via `_cached_render`. The
+width it passed to `_render_markdown_to_string` was `inst.columns`
+— i.e. the **viewport width** (e.g. 70), not the width of the
+content box the Markdown `Text` leaf actually lives in (e.g. 66 = 70
+- 2 outer border - 2 outer padding). The snapshot was therefore
+pre-rendered at 70 cells with box-drawing characters locked in, then
+handed to a `Text` leaf that the layout engine constrained to 66
+cells. The engine cannot re-wrap pre-rendered box-drawing characters
+without scrambling them, so the inner border overflowed into the
+parent's right border column.
+
+The static `str` fast path was unaffected because it returns a real
+element tree (no snapshot string); the layout engine sees the
+inner `Box(highlighted, borderStyle=...)` directly and constrains
+it correctly. Only the reactive branch snapshot suffered.
+
+**Fix** (plumb the layout-time width into width-aware text
+renderers):
+
+* `src/pyink/layout/_text_width_context.py` (new): a
+  `contextvars.ContextVar` exposing the active text-leaf
+  measurement width. ``None`` means "unbounded" / "not set".
+* `src/pyink/layout/flex.py`:
+  * New `FlexNode.text_renderer` field for single-callable text
+    leaves whose body depends on the available width.
+  * `_build_host_node` now defers evaluation of single-callable
+    text leaves: instead of invoking the callable at flex-tree
+    construction (when no width is known), it stores the callable
+    on the FlexNode for later.
+  * `_layout_node`'s text branch invokes the deferred renderer
+    inside a `set_current_text_width(max_w_for_text)` block, so
+    the renderer can read the actual measurement width via
+    `get_current_text_width()`. The result is cached on the node
+    keyed by width so subsequent layout passes with the same
+    width skip the call (mirrors the existing `_wrapped_width`
+    bookkeeping for the wrap path).
+* `src/pyink/externals/markdown.py`: `_MarkdownImpl`'s
+  `render_reactive` callable now consults
+  `get_current_text_width()` first; only when that returns
+  ``None`` (the layout pass is measuring under unbounded width,
+  e.g. the very first subscription layout) does it fall back to
+  `inst.columns`.
+
+The deferred-evaluation change preserves the existing subscription
+model: the renderer still runs inside the render-loop effect's
+tracking context (because `_layout_node` is called from `layout`
+which is called from the effect body), so `Signal.value` reads
+inside the renderer still establish subscriptions and signal writes
+still trigger paints.
+
+**Regression test**
+(`tests/externals/test_markdown.py::test_signal_source_nested_border_box_does_not_scramble`):
+grows the buffer character-by-character and at the final state
+asserts every painted line fits within the viewport, every
+code-bearing row carries both inner-left and inner-right ``│``
+columns, and those columns are consistent across all code-bearing
+rows. Pre-fix the assertion fails because the code-bearing rows
+have only the inner-left border.
+
+**Verification**:
+
+* All 880 tests pass (879 baseline + 1 new regression test).
+* `ruff check src tests` and `mypy src tests` both clean (the two
+  remaining mypy warnings are pre-existing in `measure.py`'s
+  `wcwidth` import and unrelated to this fix).
+* Manual `markdown_streaming_demo.py` run shows the inner
+  code-block border rendering consistently at every intermediate
+  state and at the end of the stream — no orphaned half-width
+  edges, no missing inner-right border.
+
 ---
 
 ## Out of Scope
