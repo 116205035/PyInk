@@ -12,15 +12,19 @@ application-level threads.
 
 ## Status
 
-MVP + Phase 2 complete. The reactive core, layout engine, built-in
-components, hooks, live render pipeline and examples all ship in this
-repository. Phase 2 layers on the high-frequency Jarvis / Claude Code
-TUI building blocks — animated spinners, OSC 8 hyperlinks, focusable
+MVP + Phase 2 + Phase 3 complete. The reactive core, layout engine,
+built-in components, hooks, live render pipeline and examples all ship
+in this repository. Phase 2 layers on the high-frequency Jarvis / Claude
+Code TUI building blocks — animated spinners, OSC 8 hyperlinks, focusable
 inputs (via a real `use_focus` / `use_focus_manager` pair backed by a
 Context system), section dividers and a `measure_element` API for
-dynamic, measurement-driven layout. See the project PRDs
+dynamic, measurement-driven layout. Phase 3 adds the content-rendering
+externals a Claude Code-style chat UI needs: streaming text (typing
+animation), Markdown rendering, Pygments-driven syntax highlighting and
+structured file diffs. See the project PRDs
 (`.trellis/tasks/06-19-pyink-mvp/prd.md`,
-`.trellis/tasks/06-20-pyink-phase2/prd.md`) for the full roadmap and
+`.trellis/tasks/06-20-pyink-phase2/prd.md`,
+`.trellis/tasks/06-20-pyink-phase3/prd.md`) for the full roadmap and
 design decisions.
 
 ## Install (editable)
@@ -29,6 +33,25 @@ design decisions.
 cd D:/Projects/PyInk
 pip install -e ".[dev]"
 ```
+
+### Optional extras (Phase 3)
+
+The Phase 3 content-rendering externals pull in heavier third-party
+libraries. Install only what you need:
+
+```bash
+pip install pyink                     # core only (no extra deps)
+pip install pyink[highlight]          # + HighlightedCode / StructuredDiff highlighting (Pygments)
+pip install pyink[markdown]           # + Markdown rendering (markdown-it-py)
+pip install pyink[all]                # both — full Phase 3 content surface
+```
+
+Externals are imported explicitly (`from pyink.externals import
+Markdown`) — they are **not** re-exported from the top-level `pyink`
+namespace, so the optional dependencies stay optional. Each external
+that needs its extra raises an `ImportError` with a `pip install
+pyink[...]` hint the first time it is called without the extra
+installed.
 
 ## Minimal example
 
@@ -123,13 +146,18 @@ the nearest matching entry, falling back to the context's default.
 ### Externals (`pyink.externals`)
 
 Opt-in components — import them explicitly
-(`from pyink.externals import Spinner, Link, Divider`). Phase 2:
+(`from pyink.externals import Spinner, Link, Divider`). Phase 2 +
+Phase 3:
 
 | Name | Description |
 | --- | --- |
 | `Spinner(*, type="dots", color=None, interval_ms=80)` | Animated loading indicator driven by `use_interval`. `type` selects a frame sequence from `SPINNERS`; unknown names fall back to `"dots"`. |
 | `Link(*children, url, **text_props)` | Wrap children in an OSC 8 terminal hyperlink. Style props (`color`, `bold`, `underline`, …) are forwarded to the emitted `Text` leaf. |
 | `Divider(*, label=None, direction="horizontal", border_style="single", color=None, width=None, height=None, padding=0)` | Single-line section separator, optionally carrying a centred label. Vertical mode (`direction="vertical"`) renders a column inside a row container. |
+| `StreamingText(buffer, *, cursor=None, cursor_color=None, reveal_speed=0, color=None, **text_props)` | Stream-in text display. `buffer` is a `Signal[str]` / `Callable[[], str]` / `str`. `reveal_speed>0` enables a typing animation; `cursor` adds a trailing glyph. Phase 3. |
+| `HighlightedCode(code, *, language="text", theme=None, line_numbers=False, **text_props)` | Pygments-driven syntax highlighting. Lazy-imports `pygments`; raises `ImportError("pip install pyink[highlight]")` on first call without the extra. Phase 3. |
+| `Markdown(source, *, theme=None, **box_props)` | Render Markdown (CommonMark + tables) via `markdown-it-py`. `source` is a `str` / `Signal[str]` / `Callable[[], str]`. Fenced code blocks render via `HighlightedCode` when Pygments is installed, plain text otherwise. Raises `ImportError("pip install pyink[markdown]")` without the extra. Phase 3. |
+| `StructuredDiff(before, after, *, language="text", context_lines=3, show_header=True, **box_props)` | File-edit diff via `difflib.unified_diff`. `+` green / `-` red / `@@` magenta. Optional Pygments highlighting of `+`/`-` bodies when `language != "text"` and Pygments is installed. Phase 3. |
 
 ### Imperative API (`measure_element`)
 
@@ -172,7 +200,7 @@ decisions behind each delta.
 
 ## Examples
 
-Eighteen runnable examples live under [`examples/`](./examples), each
+Twenty-three runnable examples live under [`examples/`](./examples), each
 modelled after ink's own examples:
 
 | Example | What it demonstrates | Run |
@@ -195,15 +223,20 @@ modelled after ink's own examples:
 | [`divider`](./examples/divider/divider_demo.py) | `Divider` external — horizontal lines, labelled sections, multiple border styles, vertical divider inside a row. | `python examples/divider/divider_demo.py` |
 | [`use-focus-real`](./examples/use-focus-real/use_focus_real_demo.py) | The real `use_focus` + `use_focus_manager` hooks — Tab / Shift+Tab cycle + digit-key jumps between three focusable boxes. | `python examples/use-focus-real/use_focus_real_demo.py` |
 | [`measure-element`](./examples/measure-element/measure_demo.py) | `measure_element` API + `use_box_metrics` hook — live `Width × Height` and width-driven content switch on terminal resize. | `python examples/measure-element/measure_demo.py` |
+| [`streaming-text`](./examples/streaming-text/streaming_text_demo.py) | `StreamingText` external — a background-thread token stream with **instant** vs **smooth** (`reveal_speed=20`) side-by-side panels. | `python examples/streaming-text/streaming_text_demo.py` |
+| [`highlighted-code`](./examples/highlighted-code/highlighted_code_demo.py) | `HighlightedCode` external — Python / JavaScript / SQL / JSON blocks with `line_numbers` and a custom-token-colour `theme` override. Requires `pip install pyink[highlight]`. | `python examples/highlighted-code/highlighted_code_demo.py` |
+| [`markdown`](./examples/markdown/markdown_demo.py) | `Markdown` external — every supported block (headings, lists, quote, code block, table, horizontal rule). Requires `pip install pyink[markdown]`. | `python examples/markdown/markdown_demo.py` |
+| [`diff`](./examples/diff/diff_demo.py) | `StructuredDiff` external — three variants of a Python-module diff: default context, zero-context, and plain-text fallback. | `python examples/diff/diff_demo.py` |
+| [`markdown-streaming`](./examples/markdown-streaming/markdown_streaming_demo.py) | Advanced integration: live AI token stream + `Markdown` re-parsing on every character. Requires `pip install pyink[all]`. | `python examples/markdown-streaming/markdown_streaming_demo.py` |
 
 Most examples wait for `Ctrl+C` (the default `exit_on_ctrl_c=True`).
-Press `Ctrl+C` to quit any of them. The Phase 2 examples additionally
-accept `Esc`.
+Press `Ctrl+C` to quit any of them. The Phase 2 / Phase 3 examples
+additionally accept `Esc`.
 
 ## Development
 
 ```bash
-python -m pytest tests -v          # ~693 tests (unit + integration)
+python -m pytest tests -v          # ~892 tests (unit + integration)
 python -m mypy src/pyink tests examples
 python -m ruff check src/pyink tests examples
 ```

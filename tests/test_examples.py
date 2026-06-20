@@ -437,6 +437,11 @@ def test_counter_unmount_is_idempotent_after_run() -> None:
         "divider/divider_demo.py",
         "use-focus-real/use_focus_real_demo.py",
         "measure-element/measure_demo.py",
+        "streaming-text/streaming_text_demo.py",
+        "highlighted-code/highlighted_code_demo.py",
+        "markdown/markdown_demo.py",
+        "diff/diff_demo.py",
+        "markdown-streaming/markdown_streaming_demo.py",
     ],
 )
 def test_example_file_exists(rel_path: str) -> None:
@@ -496,3 +501,89 @@ def test_counter_wait_until_exit_returns_on_unmount() -> None:
     t.join(timeout=1.0)
     assert not t.is_alive()
     assert "tests passed" in captured["out"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 PR6 — examples for StreamingText / HighlightedCode / Markdown /
+# StructuredDiff / streaming Markdown integration.
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_text_example_runs() -> None:
+    """StreamingText example mounts + paints the leading reply text."""
+    mod = _load_example_module(
+        "streaming-text/streaming_text_demo.py",
+        "pyink_example_streaming_text",
+    )
+    out = _run_example(
+        mod.StreamingTextDemo(), columns=70, rows=12, run_seconds=0.4
+    )
+    assert "StreamingText demo" in out
+    # The simulated stream starts with "Hello" — even a few ticks in,
+    # the buffer signal has grown past the first word.
+    assert "Hello" in out
+    assert "\x1b[2J" not in out
+
+
+def test_highlighted_code_example_runs() -> None:
+    """HighlightedCode example mounts + paints at least one code block."""
+    mod = _load_example_module(
+        "highlighted-code/highlighted_code_demo.py",
+        "pyink_example_highlighted_code",
+    )
+    out = _run_example(
+        mod.HighlightedCodeDemo(), columns=70, rows=40, run_seconds=0.2
+    )
+    assert "HighlightedCode demo" in out
+    # The Python snippet defines a class via ``def`` — Pygments emits
+    # the keyword regardless of theme. Without Pygments the literal
+    # ``def`` still appears in the plain-text fallback.
+    assert "def" in out
+    assert "\x1b[2J" not in out
+
+
+def test_markdown_example_runs() -> None:
+    """Markdown example mounts + paints the heading marker."""
+    mod = _load_example_module(
+        "markdown/markdown_demo.py", "pyink_example_markdown"
+    )
+    out = _run_example(
+        mod.MarkdownDemo(), columns=70, rows=36, run_seconds=0.2
+    )
+    assert "Markdown demo" in out
+    # The rendered output carries the H2 heading text ``Lists`` (the
+    # ``#`` marker is stripped during heading rendering, so we look
+    # for the heading label instead).
+    assert "Lists" in out
+    assert "\x1b[2J" not in out
+
+
+def test_diff_example_runs() -> None:
+    """StructuredDiff example mounts + paints a +/- line."""
+    mod = _load_example_module(
+        "diff/diff_demo.py", "pyink_example_diff"
+    )
+    out = _run_example(mod.DiffDemo(), columns=72, rows=40, run_seconds=0.2)
+    assert "StructuredDiff demo" in out
+    # A diff between two non-trivial snapshots always has at least one
+    # addition or deletion line.
+    assert "+" in out or "-" in out
+    assert "\x1b[2J" not in out
+
+
+def test_markdown_streaming_example_runs() -> None:
+    """Streaming Markdown example mounts + paints the live heading."""
+    mod = _load_example_module(
+        "markdown-streaming/markdown_streaming_demo.py",
+        "pyink_example_markdown_streaming",
+    )
+    out = _run_example(
+        mod.MarkdownStreamingDemo(), columns=70, rows=24, run_seconds=0.4
+    )
+    assert "Streaming Markdown demo" in out
+    # The streamed source opens with ``# Streaming Markdown`` — after a
+    # short delay the rendered heading ``Streaming Markdown`` appears
+    # inside the markdown body (the ``#`` marker is stripped during
+    # heading rendering).
+    assert "Streaming Markdown" in out
+    assert "\x1b[2J" not in out
