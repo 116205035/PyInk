@@ -250,3 +250,69 @@ def ConfirmInput(
 ## Research References
 
 （暂无；可在 PR1 前派 trellis-research 调研 ink-text-input 的状态管理 + paste handling）
+
+## Bug Fixes (post-PR5 hardening pass)
+
+### Bug 9 — 中文/emoji 输入在 TextInput 中显示乱码
+
+**Symptom**: 用户在 `TextInput` 中输入中文（如 "你好"）显示乱码，每个汉字
+变成 3 个无关字符。
+
+**Root cause**: `src/pyink/render/terminal.py` 的 input 读取管线按 chunk 调用
+`KeyParser.feed(bytes)`，而 `KeyParser.feed` 内部用
+`bytes(data).decode("utf-8", errors="replace")` —— 这是 **per-chunk 一次性
+解码**。当内核把单个汉字的多字节 UTF-8 序列（"你" = `\\xe4\\xbd\\xa0`）
+拆分到两次 `_read_stdin_chunk` 调用时（合法情况，内核不保证按 codepoint
+原子交付）：
+
+* 第一次 feed 收到 `b"\\xe4"`，独立解码 → 0xe4 是 3-byte UTF-8 序列的 lead
+  byte，单独无效，被 `errors="replace"` 转成 `\\ufffd`（U+FFFD 替换符）。
+* 第二次 feed 收到 `b"\\xbd\\xa0"`，两个 continuation byte 单独无效 → 又
+  得到 `\\ufffd\\ufffd`。
+* `KeyParser` 把这 3 个 `\\ufffd` 当作 3 个独立字符 emit → TextInput 收到
+  3 个垃圾 Key 而不是 1 个含 "你" 的 Key。
+
+即使是单 chunk 内的多字节序列，"per-feed 解码" 也只是恰好掩盖了问题；
+根本性修复需要让 decoder 跨 chunk 累积。
+
+**Fix (方案 A — Incremental UTF-8 decoder)**:
+`src/pyink/render/terminal.py` —— 在 `Terminal` 上加了一个
+`codecs.getincrementaldecoder("utf-8")(errors="replace")` 实例
+（`_utf8_decoder` slot）。新增 `_decode_utf8(raw) -> str` 方法把原始
+bytes 喂给增量 decoder，decoder 内部缓存不完整的尾部序列；下一次调用
+自动把缓存的 lead byte + 新到的 continuation bytes 拼成完整 codepoint。
+`_key_loop` 和 `read_key` 都改成 `_decode_utf8(raw)` → `_key_parser.feed(text)`
+两步：decoder 返回空字符串（说明 bytes 还不够组成一个 codepoint）就
+`continue` 等下一 chunk，绝不把不完整序列喂给 KeyParser。
+
+`enter_raw_mode` 末尾 reset decoder，避免上一个 raw session 残留的 lead
+byte 泄漏到新 session。
+
+为什么不选方案 B（KeyParser 自己处理 UTF-8）：KeyParser 现在的
+`feed(bytes|str)` 接口已经接受 str；只需要 Terminal 在 feed 之前做增量
+解码即可，KeyParser 不动。方案 A 干净 + 测试覆盖好。
+
+**Files**:
+
+* `src/pyink/render/terminal.py`: 加 `_utf8_decoder` slot + `_decode_utf8`
+  方法 + 在 `_key_loop` / `read_key` 中包增量解码层 + `enter_raw_mode`
+  末尾 reset decoder。
+* `tests/render/test_utf8_input.py`: 新增 13 个回归测试：
+  * 单 chunk 单 codepoint（ASCII / 2-byte é / 3-byte 你 / 4-byte 🎉）
+  * Split chunk：lead byte 单独一个 chunk、continuation bytes 在下一个
+    chunk，验证 decoder 仍只 emit 一个 Key
+  * 混合 chunk（ASCII + 中文 + emoji 同一 stream）
+  * 不完整序列后接 ASCII（验证 decoder buffer 不丢）
+  * `enter_raw_mode` reset decoder（上一个 session 残留 lead byte 不泄漏）
+  * 端到端：`use_input` handler 收到 1 个完整 Key（不是 N 个垃圾 Key）
+  * 集成：`TextInput` 累积 "你好" / 单 split "你" 都正确显示
+
+**Verification**:
+
+* 1093 tests pass（1080 baseline + 13 新增）。
+* mypy strict + ruff 全绿（pre-existing `measure.py` wcwidth stub errors
+  与本 bug 无关）。
+* 用户验证步骤：`python examples/text-input/text_input_demo.py`，在
+  Single-line input 里输入 "你好" —— 应在 input 框中正确显示 "你好"
+  而不是 6 个乱码字符。再输入 emoji 🎉 也应正确显示。
+

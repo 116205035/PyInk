@@ -27,10 +27,24 @@ Raw mode (PR6):
 * In raw mode Ctrl+C arrives as the byte ``\\x03`` instead of raising
   ``SIGINT`` — callers that want ``Ctrl+C`` to exit must check for it in
   their key handler (the default :func:`use_input` wiring does this).
+
+UTF-8 input (Bug 9):
+
+* Multi-byte UTF-8 sequences (CJK characters, emoji) can be split across
+  two ``os.read`` / ``msvcrt.getch`` chunks — the kernel doesn't promise
+  atomic delivery of a whole codepoint. The Terminal wraps every raw
+  chunk in an :func:`codecs.getincrementaldecoder` so a partial UTF-8
+  lead byte is buffered internally and only emitted to the key parser
+  once the trailing continuation bytes arrive. Without this layer a
+  single ``你`` (``\\xe4\\xbd\\xa0``) keystroke surfaced as three
+  separate ``Key`` events whose ``input`` was one junk byte each, which
+  TextInput rendered as mojibake. The decoder is per-Terminal and lives
+  for the lifetime of raw mode; it is reset whenever raw mode re-arms.
 """
 
 from __future__ import annotations
 
+import codecs
 import os
 import select
 import shutil
@@ -113,6 +127,7 @@ class Terminal:
         "_key_stop",
         "_key_parser",
         "_paste_buffer",
+        "_utf8_decoder",
         "_raw_lock",
         "_lock",
     )
@@ -151,6 +166,14 @@ class Terminal:
         # single-char events arrive, then flushed as one ``Key(paste=…)``
         # when the closing marker is seen.
         self._paste_buffer: str | None = None
+        # Incremental UTF-8 decoder so multi-byte sequences split across
+        # two raw reads are reassembled before reaching the key parser.
+        # ``errors="replace"`` keeps a malformed lead byte from crashing
+        # the reader — it surfaces as U+FFFD instead, matching what a
+        # naive ``bytes.decode("utf-8", "replace")`` would have done.
+        self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(
+            errors="replace"
+        )
         self._raw_lock = threading.RLock()
         self._lock = threading.RLock()
 
@@ -381,6 +404,12 @@ class Terminal:
             else:
                 self._enter_raw_mode_windows()
             self._raw_active = True
+            # Reset the incremental decoder so any partial UTF-8 bytes
+            # left over from a previous raw-mode session don't bleed into
+            # the new one.
+            self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(
+                errors="replace"
+            )
             # Enable bracketed paste only when writing to a real TTY —
             # otherwise we'd spray escapes into captured stdout during
             # tests. The guard matches the one used for alternate-screen.
@@ -574,7 +603,12 @@ class Terminal:
                 return None
             if not data:
                 return None
-            sequences = self._key_parser.feed(data)
+            text = self._decode_utf8(data)
+            if not text:
+                # Incomplete multi-byte UTF-8 sequence — wait for more
+                # bytes rather than surfacing a junk Key.
+                continue
+            sequences = self._key_parser.feed(text)
             if sequences:
                 return parse_key(sequences[0])
             # No complete sequence yet — if we're sitting on a pending
@@ -683,8 +717,14 @@ class Terminal:
             consecutive_errors = 0
             if not data:
                 continue
+            text = self._decode_utf8(data)
+            if not text:
+                # Incomplete multi-byte UTF-8 sequence — wait for the
+                # next chunk before feeding the parser so a split
+                # codepoint surfaces as one Key instead of N junk ones.
+                continue
             with self._raw_lock:
-                sequences = self._key_parser.feed(data)
+                sequences = self._key_parser.feed(text)
                 callbacks = list(self._key_callbacks)
             self._dispatch_sequences(sequences, callbacks)
             # If we're holding a pending ESC and nothing else arrives
@@ -752,6 +792,23 @@ class Terminal:
         if deadline is None:
             return None
         return max(0.0, deadline - _monotonic())
+
+    def _decode_utf8(self, raw: bytes) -> str:
+        """Incrementally decode ``raw`` as UTF-8.
+
+        The incremental decoder buffers a partial trailing sequence
+        (e.g. a lead byte whose continuation bytes haven't arrived yet)
+        and returns only the fully-decoded prefix. On the next call the
+        buffered bytes are prepended to the new chunk so a multi-byte
+        codepoint split across two raw reads reassembles into one
+        character before reaching :class:`KeyParser`.
+
+        Returns an empty string when ``raw`` completes no codepoints —
+        callers should treat that as "wait for more bytes" and not feed
+        the parser at all.
+        """
+        with self._raw_lock:
+            return self._utf8_decoder.decode(raw)
 
     # ------------------------------------------------------------------
     # I/O
