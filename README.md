@@ -128,7 +128,7 @@ decisions behind each delta.
 
 ## Examples
 
-Six runnable examples live under [`examples/`](./examples), each
+Thirteen runnable examples live under [`examples/`](./examples), each
 modelled after ink's own examples:
 
 | Example | What it demonstrates | Run |
@@ -139,14 +139,22 @@ modelled after ink's own examples:
 | [`static`](./examples/static/static.py) | `Static` permanent-output region coexisting with a live counter. | `python examples/static/static.py` |
 | [`use-input`](./examples/use-input/use_input_demo.py) | Captures every keystroke and shows the parsed flag set. | `python examples/use-input/use_input_demo.py` |
 | [`use-focus`](./examples/use-focus/use_focus_demo.py) | Tab-driven focus between two boxes using `signal` directly. | `python examples/use-focus/use_focus_demo.py` |
+| [`debug-input`](./examples/debug-input/debug_input.py) | Diagnostic tool that echoes every received key + parsed flags. | `python examples/debug-input/debug_input.py` |
+| [`alternate-screen`](./examples/alternate-screen/alternate_screen.py) | `render(tree, alternate_screen=True)` — full-screen UI with scrollback preserved on exit. | `python examples/alternate-screen/alternate_screen.py` |
+| [`transform`](./examples/transform/transform_demo.py) | `Transform` component — uppercase, hanging indent, line numbering. | `python examples/transform/transform_demo.py` |
+| [`computed-batch`](./examples/computed-batch/computed_batch.py) | `computed` derived state + `batch` write coalescing (5 writes, 1 effect run). | `python examples/computed-batch/computed_batch.py` |
+| [`nested-layout`](./examples/nested-layout/nested_layout.py) | Outer column → row → inner columns with `flexGrow` (sidebar + main content). | `python examples/nested-layout/nested_layout.py` |
+| [`ansi-colors`](./examples/ansi-colors/ansi_colors.py) | Every named colour + hex/rgb/ansi256 + every text style (bold/italic/underline/...). | `python examples/ansi-colors/ansi_colors.py` |
+| [`use-window-size`](./examples/use-window-size/use_window_size.py) | `use_window_size` reacting to terminal resize, with width-driven layout switch. | `python examples/use-window-size/use_window_size.py` |
 
 Most examples wait for `Ctrl+C` (the default `exit_on_ctrl_c=True`).
-Press `Ctrl+C` to quit any of them.
+Press `Ctrl+C` to quit any of them. The `alternate-screen` example
+additionally accepts `Esc`.
 
 ## Development
 
 ```bash
-python -m pytest tests -v          # ~500 tests (unit + integration)
+python -m pytest tests -v          # ~530 tests (unit + integration)
 python -m mypy src/pyink tests examples
 python -m ruff check src/pyink tests examples
 ```

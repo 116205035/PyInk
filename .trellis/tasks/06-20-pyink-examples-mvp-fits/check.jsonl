@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "检查新 examples 是否有重复代码（如重复的 main 模板、重复的 _flags 辅助函数等）；与现有 examples 风格一致"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "检查 examples 是否有 hooks 调用位置错误（在 Factory body 而非 Impl 闭包内）"}

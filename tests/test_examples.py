@@ -164,6 +164,136 @@ def test_debug_input_example_runs() -> None:
     assert "\x1b[2J" not in out
 
 
+def test_alternate_screen_example_runs() -> None:
+    """Alternate-screen example enters and exits the alternate buffer cleanly."""
+    mod = _load_example_module(
+        "alternate-screen/alternate_screen.py", "pyink_example_alternate_screen"
+    )
+    # Mount with alternate_screen=True so the enter/exit escapes are
+    # observable in the captured stdout.
+    from pyink import render
+
+    out = io.StringIO()
+    inst = render(
+        mod.AlternateScreen(),
+        stdout=out,
+        stdin=io.StringIO(),
+        columns=70,
+        rows=14,
+        alternate_screen=True,
+        exit_on_ctrl_c=False,
+    )
+    time.sleep(0.3)
+    snapshot = out.getvalue()
+    inst.unmount()
+    after_unmount = out.getvalue()
+    # ``\x1b[?1049h`` enters the alternate screen on mount.
+    assert "\x1b[?1049h" in snapshot
+    # ``\x1b[?1049l`` exits it on unmount.
+    assert "\x1b[?1049l" in after_unmount
+    # The UI carries a border.
+    assert "Alternate Screen Demo" in snapshot
+    assert "Press Esc" in snapshot
+    assert "\x1b[2J" not in snapshot
+
+
+def test_transform_example_runs() -> None:
+    """Transform example produces uppercase + line-numbered output."""
+    mod = _load_example_module(
+        "transform/transform_demo.py", "pyink_example_transform"
+    )
+    out = _run_example(mod.TransformDemo(), columns=60, rows=18, run_seconds=0.2)
+    # uppercase block — "HELLO WORLD" appears in the output.
+    assert "HELLO WORLD" in out
+    # line-numbering block — the first line gets the "  1: " prefix.
+    assert "1:" in out
+    # hanging-indent label is present.
+    assert "hanging indent" in out
+    assert "\x1b[2J" not in out
+
+
+def test_computed_batch_example_runs() -> None:
+    """computed + batch example mounts cleanly with derived state visible."""
+    mod = _load_example_module(
+        "computed-batch/computed_batch.py", "pyink_example_computed_batch"
+    )
+    out = _run_example(
+        mod.ComputedBatch(), columns=60, rows=10, run_seconds=0.3
+    )
+    assert "Count:" in out
+    assert "Double:" in out
+    assert "Effect runs:" in out
+    # Initial state: count == 0, double == 0.
+    assert "Count:  0" in out
+    assert "Double: 0" in out
+    assert "\x1b[2J" not in out
+
+
+def test_nested_layout_example_runs() -> None:
+    """Nested-layout example renders multiple bordered regions."""
+    mod = _load_example_module(
+        "nested-layout/nested_layout.py", "pyink_example_nested_layout"
+    )
+    out = _run_example(mod.NestedLayout(), columns=70, rows=18, run_seconds=0.2)
+    assert "Nested Layout Demo" in out
+    assert "Sidebar" in out
+    assert "Main Title" in out
+    assert "Footer" in out
+    # At least three bordered regions (outer + sidebar + main + status bar).
+    # ``│`` is the single-border vertical edge — appears multiple times.
+    assert out.count("│") >= 6
+    assert "\x1b[2J" not in out
+
+
+def test_ansi_colors_example_runs() -> None:
+    """ansi-colors example emits ANSI escape sequences for the named colours."""
+    mod = _load_example_module(
+        "ansi-colors/ansi_colors.py", "pyink_example_ansi_colors"
+    )
+    out = _run_example(mod.AnsiColors(), columns=80, rows=30, run_seconds=0.2)
+    assert "ANSI Colors + Styles Demo" in out
+    # Named foreground colours emit their basic SGR code, e.g. ``\x1b[31m``
+    # for ``red``. We don't pin a specific colour — any of the 16 will do.
+    assert any(
+        f"\x1b[{code}m" in out for code in range(30, 38)
+    ), "expected a basic-colour SGR sequence in output"
+    # hex / truecolor sequences start with ``\x1b[38;2;``.
+    assert "38;2;" in out
+    # Style toggles are present as visible labels.
+    assert "bold" in out
+    assert "italic" in out
+    assert "underline" in out
+    assert "\x1b[2J" not in out
+
+
+def test_use_window_size_example_runs() -> None:
+    """use-window-size example renders the current size + layout mode."""
+    mod = _load_example_module(
+        "use-window-size/use_window_size.py", "pyink_example_use_window_size"
+    )
+    # Use columns >= 60 so the two-column mode kicks in.
+    out = _run_example(
+        mod.UseWindowSize(), columns=80, rows=12, run_seconds=0.2
+    )
+    assert "use_window_size demo" in out
+    assert "x" in out  # "80 x 12"
+    assert "Layout mode:" in out
+    assert "two-column" in out  # 80 >= 60 threshold
+    assert "\x1b[2J" not in out
+
+
+def test_use_window_size_single_column_mode() -> None:
+    """Below the threshold the use-window-size example switches to single-column."""
+    mod = _load_example_module(
+        "use-window-size/use_window_size.py",
+        "pyink_example_use_window_size_narrow",
+    )
+    out = _run_example(
+        mod.UseWindowSize(), columns=40, rows=10, run_seconds=0.2
+    )
+    assert "single-column" in out
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle — every example must unmount cleanly even if signals keep
 # writing from a background thread (counter, static).
@@ -206,6 +336,12 @@ def test_counter_unmount_is_idempotent_after_run() -> None:
         "use-input/use_input_demo.py",
         "use-focus/use_focus_demo.py",
         "debug-input/debug_input.py",
+        "alternate-screen/alternate_screen.py",
+        "transform/transform_demo.py",
+        "computed-batch/computed_batch.py",
+        "nested-layout/nested_layout.py",
+        "ansi-colors/ansi_colors.py",
+        "use-window-size/use_window_size.py",
     ],
 )
 def test_example_file_exists(rel_path: str) -> None:

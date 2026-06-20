@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "新 examples 应参考现有 7 个 examples 的结构（docstring 风格、main() 函数、render().wait_until_exit() 模式），保持一致性；同时参考 ink 上游对应 example 的设计"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "确认 examples 是否遵守函数组件 + 位置参数 children + signals 模型的规范（特别是 hooks 必须在 Impl 闭包内调用）"}
