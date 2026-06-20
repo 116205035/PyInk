@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Phase 2 大量参考 ink 上游 externals（ink-spinner/ink-link/ink-divider）+ ink hooks（use-focus）+ pyinkcli 的 react_context.py。要求实现者搜重复再写、识别可借鉴的现有模式，避免无脑复制或重复造轮子。"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Phase 2 引入新基础设施（Context 系统）+ 新 hooks（use_focus/use_box_metrics/use_interval）+ 新 externals。跨层数据流必须清晰：Context 跨组件边界、ref 从 Box 传到 LayoutNode、signal 触发 rerender。"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Phase 2 的 signals 用法（use_focus 内部状态、Spinner frame signal、use_box_metrics 订阅 layout）必须遵守已沉淀的 signals 模式"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "Externals 组件（Spinner/Link/Divider）必须遵守 MVP 风格：函数组件 + 位置参数 children + style props 支持 callable"}

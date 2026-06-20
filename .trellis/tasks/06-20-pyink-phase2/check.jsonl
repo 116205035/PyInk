@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "检查 externals/hooks 是否过度复制 ink 上游而未做 Python 化改造；检查 PyInk 内部是否有重复逻辑（如多个 hook 各自实现 daemon thread，应该复用 use_interval）"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "检查 Context 系统 Provider/Consumer 栈 push/pop 顺序严格配对（reconciler mount/unmount 必须配对）；检查 ref 从 Box prop 到 LayoutNode 的回填时机正确；检查 use_focus 在多组件 mount/unmount 时焦点状态一致"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "检查 signals 用法：use_focus 内部状态用 signal 而非 ref；Spinner frame 用 signal 触发 rerender；use_box_metrics 通过 effect 订阅 layout 变化"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "检查 externals 是否遵守函数组件 + 位置参数 children + style props callable；检查 hooks 是否在 Impl 闭包内调用（不在 Factory body）"}

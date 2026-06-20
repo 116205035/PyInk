@@ -38,6 +38,7 @@ from pyink.hooks import (
     WindowSize,
     use_app,
     use_input,
+    use_interval,
     use_window_size,
 )
 from pyink.layout import (
@@ -96,11 +97,12 @@ __all__ = [
     "Static",
     "Text",
     "Transform",
-    # Hooks (PR6)
+    # Hooks (PR6 + Phase 2 PR1)
     "AppHandle",
     "WindowSize",
     "use_app",
     "use_input",
+    "use_interval",
     "use_window_size",
     # Render (PR2/PR3 test renderer + PR5 live pipeline)
     "render",
