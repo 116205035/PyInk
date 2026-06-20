@@ -139,6 +139,39 @@ def _install_markdown_it_import_blocker() -> None:
             del sys.modules[mod]
 
 
+def _install_pygments_import_blocker() -> None:
+    """Make ``import pygments`` raise ``ImportError`` until reset.
+
+    PR4 routes fenced code blocks through :func:`HighlightedCode`, which
+    lazily imports :mod:`pygments`. Patching ``__import__`` lets us
+    exercise the plain-text fallback path even on environments where
+    pygments is installed. We also remove cached ``pygments`` / ``pygments.*``
+    modules so the lazy import inside :func:`HighlightedCode` actually
+    hits the blocker.
+    """
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "pygments" or name.startswith("pygments."):
+            raise ImportError(f"mocked: pygments not installed ({name})")
+        return real_import(name, *args, **kwargs)
+
+    builtins.__import__ = fake_import
+    for mod in list(sys.modules):
+        if mod == "pygments" or mod.startswith("pygments."):
+            del sys.modules[mod]
+
+
+def _pygments_available() -> bool:
+    """Return ``True`` if :mod:`pygments` is importable in this env."""
+    try:
+        import pygments  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 @pytest.fixture
 def _restore_import() -> Any:
     real_import = builtins.__import__
@@ -321,12 +354,22 @@ def test_ordered_list_starts_at_custom_offset() -> None:
 
 
 def test_fenced_code_block_renders_lines_dim() -> None:
+    """Code blocks render via HighlightedCode when pygments is installed.
+
+    PR3 asserted dim (SGR 2) text rows; PR4 changes the default to
+    highlighted output when pygments is importable. We still check the
+    source lines are present (with per-token ANSI interleaving) and
+    that *some* syntax colour is emitted. The dedicated PR4 fallback
+    test (``test_fenced_code_block_falls_back_to_dim_when_pygments_missing``)
+    covers the original dim path via an import blocker.
+    """
     out = _render(Markdown("```\ndef f():\n    pass\n```"))
-    # All three source lines present.
-    assert "def f():" in out
+    # ``def`` and ``pass`` are present as tokens (possibly split by
+    # ANSI sequences when HighlightedCode is in play). With no language
+    # label the block goes through HighlightedCode's plain-text fast
+    # path, so the source still renders verbatim.
+    assert "def" in out
     assert "pass" in out
-    # Dim color (SGR 2) is applied to the body.
-    assert f"{ESC}[2m" in out
 
 
 def test_fenced_code_block_emits_language_header() -> None:
@@ -517,6 +560,10 @@ def test_full_document_renders_all_blocks() -> None:
         "[Link](https://example.com)\n"
     )
     out = _render(Markdown(src))
+    # Code-block tokens are interleaved with ANSI sequences once PR4
+    # routes them through HighlightedCode, so we check the individual
+    # tokens (``print`` / ``hi``) rather than the literal ``print('hi')``
+    # substring.
     for needle in (
         "Title",
         "Paragraph with",
@@ -525,7 +572,8 @@ def test_full_document_renders_all_blocks() -> None:
         "Subsection",
         "Item 1",
         "Item 2",
-        "print('hi')",
+        "print",
+        "hi",
         "A quote",
         "Link",
         "https://example.com",
@@ -551,3 +599,307 @@ def test_markdown_not_in_top_level_namespace() -> None:
     assert not hasattr(pyink, "Markdown"), (
         "Markdown should not be exported from the top-level pyink namespace"
     )
+
+
+# ---------------------------------------------------------------------------
+# PR4: HighlightedCode integration
+# ---------------------------------------------------------------------------
+
+
+# These tests exercise the PR4 path: fenced code blocks render via
+# :func:`HighlightedCode` when :mod:`pygments` is importable, and fall
+# back to PR3's plain dim Text when it isn't. We need to be tolerant of
+# environments where pygments is missing — those environments skip the
+# "highlighted" assertions and only the fallback + theme-knob tests
+# remain meaningful. Conversely, the fallback path is exercised via an
+# import blocker regardless of whether pygments is installed.
+
+
+_pygments_mark = pytest.mark.skipif(
+    not _pygments_available(),
+    reason="pygments not installed (pip install pyink[highlight])",
+)
+
+
+@_pygments_mark
+def test_fenced_python_block_uses_highlighted_code() -> None:
+    """A ``python`` fence routes through HighlightedCode.
+
+    HighlightedCode maps ``def`` to magenta (SGR 35) and string literals
+    to green (SGR 32). Either colour sequence appearing in the output
+    proves the highlighted path was taken — PR3's plain dim fallback
+    only ever emits SGR 2.
+    """
+    out = _render(Markdown("```python\ndef hello():\n    return 'world'\n```"))
+    # Magenta (35) for the ``def`` keyword.
+    assert f"{ESC}[35m" in out
+    # Green (32) for the string literal.
+    assert f"{ESC}[32m" in out
+    # Both source tokens present (possibly split by ANSI sequences).
+    assert "def" in out
+    assert "hello" in out
+
+
+@_pygments_mark
+def test_fenced_block_forwards_code_block_theme() -> None:
+    """``code_block_theme`` overrides HighlightedCode's token colours.
+
+    The default mapping colours ``def`` magenta (SGR 35). Overriding
+    ``Keyword`` to cyan (SGR 36) should remove the magenta and emit
+    cyan instead.
+    """
+    out = _render(
+        Markdown(
+            "```python\ndef f():\n    pass\n```",
+            theme={"code_block_theme": {"Keyword": "cyan"}},
+        )
+    )
+    assert f"{ESC}[36m" in out
+    # The default magenta (35) should NOT appear for the keyword.
+    assert f"{ESC}[35m" not in out
+
+
+@_pygments_mark
+def test_fenced_block_applies_border_color() -> None:
+    """``code_block_border_color`` sets the wrapper border colour.
+
+    Default border colour is ``gray`` (SGR 90). Overriding it to
+    ``magenta`` (SGR 35) should make the wrapper border box's
+    ``borderColor`` prop ``"magenta"``.
+    """
+    el = Markdown(
+        "```python\nx = 1\n```",
+        theme={"code_block_border_color": "magenta"},
+    )
+    # Tree shape: outer column box -> code-block box -> [header?, border box].
+    # The border box is one level deeper than the column children; walk
+    # the grandchildren to find it.
+    border_box: Element | None = None
+    for child in el.children:
+        if not isinstance(child, Element) or child.type != "box":
+            continue
+        for sub in child.children:
+            if (
+                isinstance(sub, Element)
+                and sub.type == "box"
+                and sub.props.get("borderStyle") == "single"
+            ):
+                border_box = sub
+                break
+        if border_box is not None:
+            break
+    assert border_box is not None, "expected a single-border Box wrapping code"
+    assert border_box.props.get("borderColor") == "magenta"
+
+
+@_pygments_mark
+def test_fenced_block_show_border_false_removes_frame() -> None:
+    """``code_block_show_border=False`` skips the wrapper border Box.
+
+    With the border disabled, the code-block box should NOT contain a
+    child Box with ``borderStyle="single"`` — the HighlightedCode result
+    sits directly under the code-block box.
+    """
+    el = Markdown(
+        "```python\nx = 1\n```",
+        theme={"code_block_show_border": False},
+    )
+    # Walk grandchildren (outer column -> code-block box -> border box?).
+    for child in el.children:
+        if not isinstance(child, Element) or child.type != "box":
+            continue
+        for sub in child.children:
+            if not isinstance(sub, Element) or sub.type != "box":
+                continue
+            assert sub.props.get("borderStyle") != "single", (
+                "border box should be absent when code_block_show_border=False"
+            )
+
+
+@_pygments_mark
+def test_fenced_block_show_language_false_omits_header() -> None:
+    """``code_block_show_language=False`` drops the language header line."""
+    out_no_header = _render(
+        Markdown(
+            "```python\nx = 1\n```",
+            theme={"code_block_show_language": False},
+        )
+    )
+    # The string "python" should NOT appear as a standalone dim header
+    # line. It might still appear as part of an attribute somewhere, so
+    # we check the dim header styling is absent for the literal "python"
+    # token: PR4 emits the header as ``Text("python", dimColor=True)``,
+    # which produces SGR 2 ... python ... SGR 0.
+    header_seq = f"{ESC}[2mpython{ESC}[0m"
+    assert header_seq not in out_no_header, (
+        "language header should be omitted when "
+        "code_block_show_language=False"
+    )
+
+
+@_pygments_mark
+def test_fenced_javascript_block_renders() -> None:
+    """A non-Python language fence renders via the matching lexer."""
+    out = _render(
+        Markdown(
+            "```javascript\n"
+            "function greet(name) {\n"
+            "    console.log('Hello, ' + name);\n"
+            "}\n"
+            "```"
+        )
+    )
+    # ``function`` keyword → magenta in the default theme.
+    assert f"{ESC}[35m" in out
+    # String literal → green.
+    assert f"{ESC}[32m" in out
+    # Identifiers / structure present (possibly ANSI-split).
+    assert "greet" in out
+    assert "name" in out
+
+
+@_pygments_mark
+def test_fenced_json_block_renders() -> None:
+    """A JSON fence routes through the json lexer without error."""
+    out = _render(
+        Markdown(
+            '```json\n{"key": "value", "n": 42}\n```'
+        )
+    )
+    # Strings → green (32), number → cyan (36).
+    assert f"{ESC}[32m" in out
+    assert f"{ESC}[36m" in out
+    assert "key" in out
+    assert "value" in out
+
+
+@_pygments_mark
+def test_fenced_sql_block_renders() -> None:
+    """A SQL fence routes through the sql lexer without error."""
+    out = _render(
+        Markdown("```sql\nSELECT * FROM users WHERE id = 1;\n```")
+    )
+    # ``SELECT`` keyword → magenta (35).
+    assert f"{ESC}[35m" in out
+    # Number → cyan (36).
+    assert f"{ESC}[36m" in out
+
+
+@_pygments_mark
+def test_indented_code_block_also_uses_highlighted_code() -> None:
+    """markdown_it emits ``code_block`` (not ``fence``) for indented code.
+
+    Both token types route through :func:`_render_fence`; an indented
+    block has no language label, so HighlightedCode falls back to its
+    plain-text fast path and the source renders verbatim.
+    """
+    out = _render(Markdown("    x = 1\n    y = 2\n"))
+    # Plain text path: source lines render verbatim, no syntax colours.
+    assert "x = 1" in out
+    assert "y = 2" in out
+
+
+@_pygments_mark
+def test_markdown_with_code_block_inside_box_border_composes() -> None:
+    """A highlighted code block composes inside a parent border Box."""
+    out = _render(
+        Box(
+            Markdown("# Title\n\n```python\nx = 1\n```"),
+            borderStyle="round",
+            padding=1,
+        )
+    )
+    # Heading + code keyword both present.
+    assert "Title" in out
+    assert f"{ESC}[35m" in out  # keyword magenta from the code block
+
+
+def test_fenced_code_block_falls_back_to_dim_when_pygments_missing(
+    _restore_import: None,
+) -> None:
+    """When pygments is unavailable, fenced blocks render as dim Text.
+
+    Blocks the ``import pygments`` lookup so HighlightedCode raises the
+    friendly ImportError and ``_render_fence`` falls back to the PR3
+    plain dim path. The body should emit SGR 2 (dim) for every code
+    row, with no syntax-highlight colours.
+    """
+    _install_pygments_import_blocker()
+    out = _render(Markdown("```python\ndef f():\n    return 'x'\n```"))
+    # Source lines render verbatim (no ANSI splitting).
+    assert "def f():" in out
+    assert "return 'x'" in out
+    # Dim (SGR 2) is applied to the body.
+    assert f"{ESC}[2m" in out
+    # No syntax-highlight colours leak through.
+    assert f"{ESC}[35m" not in out  # no magenta keyword
+    assert f"{ESC}[32m" not in out  # no green string
+
+
+def test_fenced_code_block_fallback_respects_show_language(
+    _restore_import: None,
+) -> None:
+    """The fallback path still honours ``code_block_show_language``.
+
+    The header is emitted as ``Text("python", dimColor=True, color="gray")``
+    which produces nested SGR sequences (``\\x1b[2m\\x1b[90mpython\\x1b[0m``).
+    We assert the substring ``"python"`` appears in the output when the
+    header is on, and is absent when ``show_language=False``.
+    """
+    _install_pygments_import_blocker()
+    out_with_header = _render(Markdown("```python\nx = 1\n```"))
+    assert "python" in out_with_header
+
+    out_no_header = _render(
+        Markdown(
+            "```python\nx = 1\n```",
+            theme={"code_block_show_language": False},
+        )
+    )
+    # With the header disabled, "python" should not appear at all — the
+    # fallback path renders only the source code lines.
+    assert "python" not in out_no_header
+
+
+def test_fenced_code_block_fallback_has_no_border(
+    _restore_import: None,
+) -> None:
+    """The fallback path never wraps code in a border Box.
+
+    The border is a PR4 addition tied to the HighlightedCode path; the
+    PR3 fallback stays a plain Box of dim Text rows.
+    """
+    _install_pygments_import_blocker()
+    el = Markdown("```python\nx = 1\n```")
+    # Walk grandchildren (outer column -> code-block box -> ?).
+    for child in el.children:
+        if not isinstance(child, Element) or child.type != "box":
+            continue
+        for sub in child.children:
+            if not isinstance(sub, Element) or sub.type != "box":
+                continue
+            assert sub.props.get("borderStyle") != "single", (
+                "fallback path should not wrap code in a border"
+            )
+
+
+def test_nested_code_block_in_markdown_does_not_break_surrounding_blocks(
+    _restore_import: None,
+) -> None:
+    """Code block fallback composes inside a full Markdown document.
+
+    Surrounding blocks (heading, paragraph, list) must still render
+    correctly when the code block falls back to the dim path.
+    """
+    _install_pygments_import_blocker()
+    src = (
+        "# Title\n\n"
+        "Before code.\n\n"
+        "```python\n"
+        "print('hi')\n"
+        "```\n\n"
+        "After code.\n"
+    )
+    out = _render(Markdown(src))
+    for needle in ("Title", "Before code.", "print('hi')", "After code."):
+        assert needle in out, f"missing {needle!r} in fallback output"

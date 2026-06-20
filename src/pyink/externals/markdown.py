@@ -55,10 +55,15 @@ named-colour table (see :data:`pyink.render.ansi.NAMED_COLORS`) spells
 it that way (see :mod:`pyink.externals.highlighted_code` for the same
 choice).
 
-Code-block integration: per the PR3 scope, code blocks (``fence`` /
-``code_block``) are rendered as plain ``Text`` with ``dimColor=True``
-inside a plain ``Box``. The :func:`HighlightedCode` integration lands
-in PR4; PR3 keeps the code path single-purpose and easy to extend.
+Code-block integration (PR4): fenced / indented code blocks render via
+:func:`HighlightedCode` when :mod:`pygments` is importable. The block is
+wrapped in a single-line bordered ``Box`` so the reader can see where it
+starts and stops. If :mod:`pygments` is missing (or the
+``code_block_show_border`` theme knob disables the frame), we fall back
+to the PR3 plain-text path: one dim ``Text`` per source line inside a
+plain ``Box``. The ``code_block_theme`` knob is forwarded verbatim to
+:func:`HighlightedCode`'s ``theme=`` prop so callers can override the
+Pygments token colours used inside Markdown code blocks.
 
 Link rendering: links are wrapped in OSC 8 sequences via the
 :func:`pyink.externals.link._wrap_osc8` helper so a Markdown link
@@ -66,8 +71,8 @@ behaves identically to a hand-written :func:`Link`. We import the
 helper rather than reimplementing it so the wrapping contract lives in
 one place (per the code-reuse guide).
 
-PR3 scope: ships ``Markdown`` only. ``HighlightedCode`` integration is
-PR4, ``StructuredDiff`` is PR5, examples are PR6.
+PR4 scope: this PR layers HighlightedCode integration on top of PR3.
+``StructuredDiff`` is PR5, examples are PR6.
 """
 
 from __future__ import annotations
@@ -119,6 +124,24 @@ DEFAULT_MARKDOWN_THEME: dict[str, Any] = {
     "quote_color": "gray",
     "code_block_lang_color": "gray",
     "hr_color": None,
+    # ---- PR4: HighlightedCode integration knobs -------------------------
+    # ``code_block_theme`` is forwarded verbatim to ``HighlightedCode``'s
+    # ``theme=`` prop (a Pygments token → colour mapping). ``None`` lets
+    # ``HighlightedCode`` use its own :data:`DEFAULT_THEME`.
+    "code_block_theme": None,
+    # Border colour of the code-block wrapper Box (only applied when
+    # ``code_block_show_border`` is true and pygments is available so
+    # HighlightedCode is in use). Default dim gray matches the visual
+    # treatment of the language header / quote colour.
+    "code_block_border_color": "gray",
+    # Whether to draw a single-line border around the code block when
+    # HighlightedCode is in use. When ``False``, the block sits inline
+    # without a frame (the PR3 fallback path always omits the frame).
+    "code_block_show_border": True,
+    # Whether to surface the language label as a dim header line above
+    # the highlighted code. Forwarded to both paths so the header stays
+    # consistent between highlighted and fallback rendering.
+    "code_block_show_language": True,
 }
 
 
@@ -455,13 +478,25 @@ def _render_fence(
     token: Token,
     theme: dict[str, Any],
 ) -> Element:
-    """Render a fenced code block as a plain ``Box`` of ``Text`` rows.
+    """Render a fenced / indented code block.
 
-    Per the PR3 scope, code blocks are rendered as plain text with
-    ``dimColor=True``; the :func:`HighlightedCode` integration lands in
-    PR4. The language label (``token.info``, e.g. ``"python"``) is
-    surfaced as a dim header line when present so the reader knows what
-    they're looking at.
+    Two paths:
+
+    * **Highlighted (PR4)** — when :mod:`pygments` is importable, the
+      block renders via :func:`HighlightedCode` so the syntax is
+      colourised. The language label (``token.info``, e.g. ``"python"``)
+      is surfaced as a dim header line above the block when
+      ``code_block_show_language`` is true, and the whole block is
+      wrapped in a single-line bordered ``Box`` when
+      ``code_block_show_border`` is true. ``code_block_theme`` is
+      forwarded to :func:`HighlightedCode`'s ``theme=`` prop.
+    * **Fallback (PR3)** — when :mod:`pygments` is missing, each source
+      line becomes a single dim ``Text`` row inside a plain ``Box``.
+      This keeps code blocks readable without the optional dependency.
+
+    A trailing newline in ``token.content`` is stripped in both paths so
+    the block doesn't render a blank bottom row (markdown_it emits the
+    source verbatim including the newline before the closing fence).
     """
     code = token.content
     # Drop a single trailing newline so a fenced block doesn't render a
@@ -469,18 +504,57 @@ def _render_fence(
     # including the trailing newline before the closing fence.
     if code.endswith("\n"):
         code = code[:-1]
-    header: list[Element] = []
     info = token.info.strip() if token.info else ""
+    show_language = _theme_bool(theme.get("code_block_show_language", True))
+
+    # Build the optional language header up front — both paths share it
+    # so the header stays visually consistent regardless of which
+    # rendering path is taken.
+    header: list[Element] = []
     lang_color = theme.get("code_block_lang_color")
-    if info:
+    if info and show_language:
         header_props: dict[str, Any] = {"dimColor": True}
         if lang_color is not None:
             header_props["color"] = lang_color
         header.append(Text(info, **header_props))
-    # Code rows are dimmed uniformly; the future HighlightedCode
-    # integration (PR4) will replace this branch.
-    body = [Text(line, dimColor=True) for line in code.split("\n")]
-    return Box(*header, *body, flexDirection="column")
+
+    # Try the highlighted path first. If pygments isn't installed
+    # (ImportError on the lazy import inside HighlightedCode), fall back
+    # to the plain-text path. HighlightedCode is the single source of
+    # truth for "is pygments available" — we don't duplicate the check
+    # here, we just observe whatever it decides. This means a future
+    # change to HighlightedCode's availability logic propagates for
+    # free (per the code-reuse guide's "single source of truth" rule).
+    try:
+        from pyink.externals.highlighted_code import HighlightedCode
+        highlighted = HighlightedCode(
+            code,
+            language=info or "text",
+            theme=theme.get("code_block_theme"),
+        )
+    except ImportError:
+        # PR3 fallback: plain dim Text per line. HighlightedCode raises
+        # ImportError specifically when pygments is missing, which is
+        # the only condition we want to catch here — any other error
+        # from HighlightedCode should propagate.
+        body = [Text(line, dimColor=True) for line in code.split("\n")]
+        return Box(*header, *body, flexDirection="column")
+
+    # Wrap the highlighted code in a bordered Box when the theme asks
+    # for one. The header (if any) sits above the border so the language
+    # label reads as a title rather than a content row.
+    show_border = _theme_bool(theme.get("code_block_show_border", True))
+    if show_border:
+        border_color = theme.get("code_block_border_color")
+        border_props: dict[str, Any] = {"borderStyle": "single"}
+        if border_color is not None:
+            border_props["borderColor"] = border_color
+        return Box(
+            *header,
+            Box(highlighted, **border_props),
+            flexDirection="column",
+        )
+    return Box(*header, highlighted, flexDirection="column")
 
 
 def _render_blockquote(
@@ -905,8 +979,13 @@ def Markdown(
     * Links (rendered via OSC 8 hyperlinks; see
       :func:`pyink.externals.link._wrap_osc8`).
     * Ordered / unordered lists (with nesting and per-item markers).
-    * Code blocks (plain ``Text`` rows in PR3; HighlightedCode lands
-      in PR4).
+    * Code blocks (rendered via :func:`HighlightedCode` when
+      :mod:`pygments` is installed; plain dim ``Text`` rows otherwise).
+      The code-block frame, language header, and Pygments theme are
+      tunable via the ``code_block_show_border`` /
+      ``code_block_show_language`` / ``code_block_theme`` /
+      ``code_block_border_color`` / ``code_block_lang_color`` theme
+      knobs.
     * Blockquotes (indented + dim).
     * Horizontal rules (via :func:`Divider`).
     * Tables (basic column alignment, no inline styling).
