@@ -12,10 +12,16 @@ application-level threads.
 
 ## Status
 
-MVP complete. The reactive core, layout engine, built-in components,
-hooks, live render pipeline and examples all ship in this repository.
-See the project PRD (`.trellis/tasks/06-19-pyink-mvp/prd.md`) for the
-full roadmap and design decisions.
+MVP + Phase 2 complete. The reactive core, layout engine, built-in
+components, hooks, live render pipeline and examples all ship in this
+repository. Phase 2 layers on the high-frequency Jarvis / Claude Code
+TUI building blocks — animated spinners, OSC 8 hyperlinks, focusable
+inputs (via a real `use_focus` / `use_focus_manager` pair backed by a
+Context system), section dividers and a `measure_element` API for
+dynamic, measurement-driven layout. See the project PRDs
+(`.trellis/tasks/06-19-pyink-mvp/prd.md`,
+`.trellis/tasks/06-20-pyink-phase2/prd.md`) for the full roadmap and
+design decisions.
 
 ## Install (editable)
 
@@ -88,7 +94,7 @@ The six built-in host components map 1:1 to ink's primitives:
 
 ### Hooks (`pyink.hooks`)
 
-All three must be called from inside a function-component body mounted
+All hooks must be called from inside a function-component body mounted
 via `pyink.render.render`:
 
 | Name | Description |
@@ -96,6 +102,44 @@ via `pyink.render.render`:
 | `use_input(handler, *, is_active=True)` | Subscribe `handler(key: Key)` to keyboard events. Returns a dispose callable. |
 | `use_app()` | Returns an `AppHandle` with `exit(code)` and `wait_until_render_flush()`. |
 | `use_window_size()` | Returns the current terminal size as a `WindowSize(columns, rows)` snapshot. |
+| `use_interval(callback, interval_ms, *, is_active=True)` | Periodically invoke `callback` on a daemon thread (Phase 2). Returns a dispose callable; auto-disposed on unmount. |
+| `use_context(ctx)` | Read the nearest Provider's value for `ctx` (Phase 2). Returns the context's default when no Provider is mounted. |
+| `use_focus(options=None) -> FocusHandle` | Subscribe the calling component to the nearest focus manager (Phase 2). Returns `{id, is_focused (Signal[bool]), is_active, focus_self(), blur()}`. |
+| `use_focus_manager() -> FocusManagerHandle` | Create a focus manager for the current subtree (Phase 2). The handle exposes `focus_next` / `focus_previous` / `focus(id)` / `enable` / `disable` / `active_id` and a `wrap(*children)` that builds the Provider injecting the manager. |
+| `use_box_metrics(ref) -> Computed[BoxMetrics]` | Subscribe to measurements of the element `ref` points at (Phase 2). Refreshes after every layout pass; `BoxMetrics.has_measured` is `False` until the first layout. |
+
+### Context (`pyink.core.context`)
+
+Phase 2 ships a Context system backed by a `ContextVar` stack. Provider
+mount pushes `(id, value)`; unmount pops it. `use_context(ctx)` reads
+the nearest matching entry, falling back to the context's default.
+
+| Name | Description |
+| --- | --- |
+| `create_context(default) -> Context[T]` | Create a new Context with the given default value. |
+| `Context[T]` | The context object — carry it around (e.g. module-level) and pass to `Provider` / `use_context`. |
+| `Provider(ctx, value, *children)` | Host element that pushes `value` onto the context's stack for its subtree. |
+
+### Externals (`pyink.externals`)
+
+Opt-in components — import them explicitly
+(`from pyink.externals import Spinner, Link, Divider`). Phase 2:
+
+| Name | Description |
+| --- | --- |
+| `Spinner(*, type="dots", color=None, interval_ms=80)` | Animated loading indicator driven by `use_interval`. `type` selects a frame sequence from `SPINNERS`; unknown names fall back to `"dots"`. |
+| `Link(*children, url, **text_props)` | Wrap children in an OSC 8 terminal hyperlink. Style props (`color`, `bold`, `underline`, …) are forwarded to the emitted `Text` leaf. |
+| `Divider(*, label=None, direction="horizontal", border_style="single", color=None, width=None, height=None, padding=0)` | Single-line section separator, optionally carrying a centred label. Vertical mode (`direction="vertical"`) renders a column inside a row container. |
+
+### Imperative API (`measure_element`)
+
+| Name | Description |
+| --- | --- |
+| `measure_element(ref) -> BoxMetrics` | Read the current `{width, height, left, top, has_measured}` snapshot of the element `ref` points at. Returns `UNMEASURED` (all `None`, `has_measured=False`) before the first layout pass or after unmount. Safe to call from any thread. |
+
+Pair `measure_element` with the `ref` prop on `Box` (any
+`Ref[LayoutNode | None]` passed as `ref=` is back-filled by the layout
+pass) and with `use_box_metrics` for reactive updates.
 
 ### Render (`pyink.render`)
 
@@ -121,14 +165,14 @@ PyInk is **not** a line-for-line port. The major API deltas:
 | Children | JSX `<Box><Text/></Box>` | Positional args: `Box(Text("a"), Text("b"), padding=1)`. Strings are only allowed inside `Text`. |
 | Async | First-class (Suspense, transitions) | Sync-only. Threads handle concurrency. |
 | Yoga layout | C++ via `yoga-layout-prebuilt` | Pure-Python flex subset (column/row, padding/margin/gap, justifyContent/alignItems, basic wrap, width/height). |
-| Hooks | `useInput`, `useApp`, `useFocus`, `useInterval`, … | `use_input`, `use_app`, `use_window_size`. (No `use_focus` / `use_interval` yet — see examples for hand-rolled equivalents.) |
+| Hooks | `useInput`, `useApp`, `useFocus`, `useInterval`, … | `use_input`, `use_app`, `use_window_size`, `use_interval`, `use_focus`, `use_focus_manager`, `use_context`, `use_box_metrics`. (Phase 2 lands the full ink-equivalent hook surface.) |
 
 See the PRD (`.trellis/tasks/06-19-pyink-mvp/prd.md`) for the design
 decisions behind each delta.
 
 ## Examples
 
-Thirteen runnable examples live under [`examples/`](./examples), each
+Eighteen runnable examples live under [`examples/`](./examples), each
 modelled after ink's own examples:
 
 | Example | What it demonstrates | Run |
@@ -138,7 +182,7 @@ modelled after ink's own examples:
 | [`borders`](./examples/borders/borders.py) | All four `borderStyle` values side by side. | `python examples/borders/borders.py` |
 | [`static`](./examples/static/static.py) | `Static` permanent-output region coexisting with a live counter. | `python examples/static/static.py` |
 | [`use-input`](./examples/use-input/use_input_demo.py) | Captures every keystroke and shows the parsed flag set. | `python examples/use-input/use_input_demo.py` |
-| [`use-focus`](./examples/use-focus/use_focus_demo.py) | Tab-driven focus between two boxes using `signal` directly. | `python examples/use-focus/use_focus_demo.py` |
+| [`use-focus`](./examples/use-focus/use_focus_demo.py) | Tab-driven focus between two boxes using `signal` directly (MVP-era hand-rolled version). | `python examples/use-focus/use_focus_demo.py` |
 | [`debug-input`](./examples/debug-input/debug_input.py) | Diagnostic tool that echoes every received key + parsed flags. | `python examples/debug-input/debug_input.py` |
 | [`alternate-screen`](./examples/alternate-screen/alternate_screen.py) | `render(tree, alternate_screen=True)` — full-screen UI with scrollback preserved on exit. | `python examples/alternate-screen/alternate_screen.py` |
 | [`transform`](./examples/transform/transform_demo.py) | `Transform` component — uppercase, hanging indent, line numbering. | `python examples/transform/transform_demo.py` |
@@ -146,15 +190,20 @@ modelled after ink's own examples:
 | [`nested-layout`](./examples/nested-layout/nested_layout.py) | Outer column → row → inner columns with `flexGrow` (sidebar + main content). | `python examples/nested-layout/nested_layout.py` |
 | [`ansi-colors`](./examples/ansi-colors/ansi_colors.py) | Every named colour + hex/rgb/ansi256 + every text style (bold/italic/underline/...). | `python examples/ansi-colors/ansi_colors.py` |
 | [`use-window-size`](./examples/use-window-size/use_window_size.py) | `use_window_size` reacting to terminal resize, with width-driven layout switch. | `python examples/use-window-size/use_window_size.py` |
+| [`spinner`](./examples/spinner/spinner_demo.py) | `Spinner` external — a gallery of frame sequences (dots / line / arc / moon / star) each in a different colour. | `python examples/spinner/spinner_demo.py` |
+| [`link`](./examples/link/link_demo.py) | `Link` external — OSC 8 hyperlinks (URL + `file://`), with colour + underline styling. | `python examples/link/link_demo.py` |
+| [`divider`](./examples/divider/divider_demo.py) | `Divider` external — horizontal lines, labelled sections, multiple border styles, vertical divider inside a row. | `python examples/divider/divider_demo.py` |
+| [`use-focus-real`](./examples/use-focus-real/use_focus_real_demo.py) | The real `use_focus` + `use_focus_manager` hooks — Tab / Shift+Tab cycle + digit-key jumps between three focusable boxes. | `python examples/use-focus-real/use_focus_real_demo.py` |
+| [`measure-element`](./examples/measure-element/measure_demo.py) | `measure_element` API + `use_box_metrics` hook — live `Width × Height` and width-driven content switch on terminal resize. | `python examples/measure-element/measure_demo.py` |
 
 Most examples wait for `Ctrl+C` (the default `exit_on_ctrl_c=True`).
-Press `Ctrl+C` to quit any of them. The `alternate-screen` example
-additionally accepts `Esc`.
+Press `Ctrl+C` to quit any of them. The Phase 2 examples additionally
+accept `Esc`.
 
 ## Development
 
 ```bash
-python -m pytest tests -v          # ~530 tests (unit + integration)
+python -m pytest tests -v          # ~693 tests (unit + integration)
 python -m mypy src/pyink tests examples
 python -m ruff check src/pyink tests examples
 ```

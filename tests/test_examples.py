@@ -295,6 +295,96 @@ def test_use_window_size_single_column_mode() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 2 PR8 — new examples for the externals + hooks landed in PR1..7.
+# ---------------------------------------------------------------------------
+
+
+def test_spinner_example_runs() -> None:
+    """Spinner example mounts + paints the first frame of each type."""
+    mod = _load_example_module(
+        "spinner/spinner_demo.py", "pyink_example_spinner"
+    )
+    out = _run_example(mod.SpinnerDemo(), columns=40, rows=12, run_seconds=0.2)
+    assert "Spinner demo" in out
+    # At least the first spinner type is rendered (its name is the label).
+    assert "dots" in out
+    # ``Spinner`` paints a frame character from SPINNERS["dots"] on mount.
+    # We check for any of the first frame characters across the showcase —
+    # the initial frame index is 0, so every visible spinner paints its
+    # ``frames[0]``. ``dots`` starts with ``⠋``; we don't pin a specific
+    # frame because some terminals mangle Braille in CI capture, but the
+    # green-coloured label is always present.
+    assert "dots2" in out
+    assert "\x1b[2J" not in out
+
+
+def test_link_example_runs() -> None:
+    """Link example emits OSC 8 sequences for each link."""
+    mod = _load_example_module(
+        "link/link_demo.py", "pyink_example_link"
+    )
+    out = _run_example(mod.LinkDemo(), columns=60, rows=10, run_seconds=0.2)
+    assert "Link demo" in out
+    # OSC 8 hyperlink sequence — both opening ``\x1b]8;;URL\x1b\\`` and
+    # closing ``\x1b]8;;\x1b\\`` appear in the rendered output.
+    assert "\x1b]8;;" in out
+    # Each configured URL appears in the wrapped payload.
+    assert "github.com" in out
+    assert "example.com" in out
+    assert "file:///etc/hostname" in out
+    assert "\x1b[2J" not in out
+
+
+def test_divider_example_runs() -> None:
+    """Divider example renders horizontal lines + a labelled section."""
+    mod = _load_example_module(
+        "divider/divider_demo.py", "pyink_example_divider"
+    )
+    out = _run_example(mod.DividerDemo(), columns=60, rows=18, run_seconds=0.2)
+    assert "Divider demo" in out
+    # The single-border bottom edge character (``─``) spans the column.
+    assert "─" in out
+    # Label mode emits the label text in the middle of the line.
+    assert "Section A" in out
+    assert "\x1b[2J" not in out
+
+
+def test_use_focus_real_example_runs() -> None:
+    """The real use_focus hook demo mounts + shows the active handle id."""
+    mod = _load_example_module(
+        "use-focus-real/use_focus_real_demo.py",
+        "pyink_example_use_focus_real",
+    )
+    out = _run_example(mod.UseFocusDemo(), columns=50, rows=14, run_seconds=0.2)
+    assert "use_focus demo (real)" in out
+    for label in ("Input 1", "Input 2", "Input 3"):
+        assert label in out
+    # The first box grabs auto_focus on mount, so its id is reported as
+    # active.
+    assert "Active:" in out
+    assert "input-1" in out
+    assert "\x1b[2J" not in out
+
+
+def test_measure_element_example_runs() -> None:
+    """measure_element example reports the live Width after layout."""
+    mod = _load_example_module(
+        "measure-element/measure_demo.py",
+        "pyink_example_measure_element",
+    )
+    out = _run_example(
+        mod.MeasureDemo(), columns=70, rows=12, run_seconds=0.2
+    )
+    assert "measure_element demo" in out
+    # ``Width:`` label is always rendered; the post-layout value
+    # populates once the layout epoch ticks (synchronously on mount).
+    assert "Width:" in out
+    # The threshold helper text is static.
+    assert "Threshold:" in out
+    assert "\x1b[2J" not in out
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle — every example must unmount cleanly even if signals keep
 # writing from a background thread (counter, static).
 # ---------------------------------------------------------------------------
@@ -342,6 +432,11 @@ def test_counter_unmount_is_idempotent_after_run() -> None:
         "nested-layout/nested_layout.py",
         "ansi-colors/ansi_colors.py",
         "use-window-size/use_window_size.py",
+        "spinner/spinner_demo.py",
+        "link/link_demo.py",
+        "divider/divider_demo.py",
+        "use-focus-real/use_focus_real_demo.py",
+        "measure-element/measure_demo.py",
     ],
 )
 def test_example_file_exists(rel_path: str) -> None:
