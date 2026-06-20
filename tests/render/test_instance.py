@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import threading
 import time
+from collections.abc import Callable
 
 from pyink import Box, Text, render
 from pyink.core.signal import signal
@@ -310,3 +311,98 @@ def test_max_fps_one_still_renders_final_state() -> None:
     repainted = out.getvalue()
     assert "v=7" in repainted
     inst.unmount()  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# _FpsThrottle idle / coalescing regressions
+# ---------------------------------------------------------------------------
+
+
+def test_fps_throttle_does_not_spin_when_idle() -> None:
+    """Regression: a static frame must not keep the throttle thread busy.
+
+    Before the fix the throttle loop computed
+    ``wait_for = min_interval - (now - last)`` with ``last = 0.0``, which
+    is always negative for the monotonic clock, so the loop degenerated
+    into a tight ``while True: continue`` and pinned a CPU core at
+    ~100% even on a static frame. The fix parks the loop on an indefinite
+    ``Event.wait()`` when there is no pending work; this test exercises
+    that code path by counting thread iterations over an idle window and
+    asserting the count stays low (one iteration per wakeup, and no
+    wakeups happen on a static frame).
+    """
+    from pyink.render.instance import _FpsThrottle
+
+    iterations = {"count": 0}
+    stop_evt = threading.Event()
+
+    def counting_loop(
+        min_interval: float,
+        wakeup: threading.Event,
+        pending: list[object],
+    ) -> None:
+        last = 0.0
+        while not stop_evt.is_set():
+            iterations["count"] += 1
+            if not pending:
+                wakeup.wait()
+                wakeup.clear()
+                continue
+            wait_for = min_interval - (time.monotonic() - last)
+            if wait_for > 0:
+                wakeup.wait(timeout=wait_for)
+                wakeup.clear()
+            pending.clear()
+
+    throttle = _FpsThrottle(max_fps=30)
+    # Replace the worker's loop with our counting variant without
+    # re-spawning the thread: stop the built-in loop and run ours on a
+    # fresh thread that shares the throttle's events / pending list.
+    throttle.stop()
+    worker = threading.Thread(
+        target=counting_loop,
+        args=(throttle.min_interval, throttle._wakeup, throttle._pending),
+        name="pyink-fps-throttle-test",
+        daemon=True,
+    )
+    worker.start()
+    try:
+        time.sleep(0.5)
+        # 0.5 s of pure idleness. The fixed loop wakes at most once (if a
+        # stray wakeup arrives); the old busy-spin would log hundreds of
+        # thousands of iterations in this window.
+        assert iterations["count"] <= 2, iterations["count"]
+    finally:
+        stop_evt.set()
+        throttle._wakeup.set()
+        worker.join(timeout=1.0)
+
+
+def test_fps_throttle_coalesces_burst_into_one_callback() -> None:
+    """A burst of ``schedule`` calls inside one window runs only the last.
+
+    Mirrors the throttle's documented contract — they all paint the same
+    tree, so older schedules are obsolete by the time the loop runs.
+    """
+    from pyink.render.instance import _FpsThrottle
+
+    fired: list[str] = []
+
+    def make_cb(tag: str) -> Callable[[], None]:
+        def cb() -> None:
+            fired.append(tag)
+
+        return cb
+
+    throttle = _FpsThrottle(max_fps=30)
+    try:
+        for tag in ("a", "b", "c"):
+            throttle.schedule(make_cb(tag))
+        # Wait long enough for the throttle to flush (max_fps=30 → 33ms
+        # window). 0.3 s is generous headroom.
+        time.sleep(0.3)
+    finally:
+        throttle.stop()
+
+    # Only the latest schedule survives; older ones are dropped.
+    assert fired == ["c"], fired

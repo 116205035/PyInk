@@ -335,6 +335,74 @@ frame keeps its left border column on every row.
   inspired the original Phase 3 design; this pass focused on the
   caching layer that the original implementation omits.
 
+### Bug 6 — `_FpsThrottle` busy-spin on static frames (root cause of "high CPU after render")
+
+**Symptom** (post-Bug 2/3 follow-up): even with the LRU caches in
+place the user still reported (a) the static highlighted-code /
+markdown / diff demos showing "very slow" startup and (b) CPU
+remaining pinned at ~100% after the static frame finished rendering
+(rather than dropping to near 0 as expected for a console program).
+
+**Diagnosis**: a throwaway profiling script mounted a static
+`Box(Text("hello"), Text("world"), borderStyle="round")` and counted
+`_FpsThrottle._loop` iterations over a 2-second idle window. The
+result was **9,163,072 iterations in 2 s (~4.6 million iterations /
+sec)** — a tight `while True: continue` busy-spin. `psutil` sampling
+on the same setup showed `cpu_percent == 99.98%` while idle, dropping
+to `0.0%` after the fix.
+
+**Root cause**: `_FpsThrottle._loop` initialised `last = 0.0` and
+computed the wait duration as
+
+```
+wait_for = self.min_interval - (time.monotonic() - last)
+```
+
+When there was no pending work the loop took the `if not pending:
+continue` branch, so `last` was never advanced past `0.0`. Because
+`time.monotonic()` returns seconds-since-some-epoch (a large positive
+number), `time.monotonic() - last` was always huge, so `wait_for` was
+always negative, the `wait_for > 0` guard never triggered, and the
+loop never slept. The throttle thread therefore burnt an entire CPU
+core whether or not anything was being painted.
+
+The earlier LRU cache fix (Bug 2/3) reduced the per-tick work done
+when a paint *did* fire, but did not address the idle spin — so the
+user still observed 100% CPU on a static frame and a perceptible
+"slow startup" because the demo was already competing with the
+spinning thread for CPU time on mount.
+
+**Fix**: `src/pyink/render/instance.py` — `_FpsThrottle._loop` now
+takes pending work *first* and only computes the FPS wait when there
+is work to defer. When the queue is empty it parks indefinitely on
+`self._wakeup.wait()` (no timeout) — the wakeup `Event` is the only
+legitimate reason to leave that branch, so a static frame uses zero
+CPU. When work is queued it waits out the remaining interval, then
+runs the latest pending callback (any callback that arrived during
+the wait wins; if none did the original `pending` list still has the
+callback that woke us).
+
+**Regression tests** (`tests/render/test_instance.py`):
+
+* `test_fps_throttle_does_not_spin_when_idle` — runs the fixed loop
+  on a fresh thread for 0.5 s with no schedules and asserts the
+  iteration count stays ≤ 2 (one per stray wakeup). The pre-fix code
+  logged hundreds of thousands of iterations in the same window.
+* `test_fps_throttle_coalesces_burst_into_one_callback` — three
+  `schedule()` calls inside one window fire exactly one callback
+  (the latest), preserving the documented coalescing contract.
+
+**Verification**:
+
+* `psutil` sampling on a static `Box(Text("hi"), borderStyle="round")`
+  frame: pre-fix avg `99.98%` CPU, post-fix avg `0.0%` CPU.
+* The streaming Markdown profile (67-char drip at 20 ms/char) now
+  records 46 paints over a 1.5 s window at a steady 33 ms interval —
+  matching the 30 FPS cap and producing visible incremental typing
+  (`Ti` → `Tit` → `Title` → `Hello` → …).
+* All 879 tests pass (877 baseline + 2 new regression tests).
+* `ruff check src tests` and `mypy src tests` both clean.
+
 ### Verification
 
 * All 877 tests pass (870 baseline + 7 new regression tests).

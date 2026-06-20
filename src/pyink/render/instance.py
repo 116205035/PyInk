@@ -483,6 +483,16 @@ class _FpsThrottle:
     out the remaining interval. If multiple callbacks arrive within the
     same window only the *last* one runs (callers all paint the same
     tree, so this is correct).
+
+    Idle behaviour: when there is nothing to run the loop parks on
+    ``_wakeup.wait()`` *without* a timeout. This is essential — earlier
+    revisions computed a ``wait_for`` based on ``last = 0.0`` and the
+    monotonic clock, which made ``wait_for`` negative whenever the loop
+    had nothing to do, so the loop degenerated into a tight
+    ``while True: continue`` that pinned a CPU core at 100% on static
+    frames. The previous "fix" (the LRU cache in the markdown / code
+    externals) reduced the per-tick cost but did not address the busy
+    spin itself.
     """
 
     __slots__ = ("min_interval", "_stop", "_wakeup", "_thread", "_pending")
@@ -516,13 +526,33 @@ class _FpsThrottle:
     def _loop(self) -> None:
         last = 0.0
         while not self._stop.is_set():
-            wait_for = self.min_interval - (time.monotonic() - last)
-            if wait_for > 0:
-                self._wakeup.wait(timeout=wait_for)
-                self._wakeup.clear()
             pending = self._take_pending()
             if not pending:
+                # Park indefinitely until ``schedule`` wakes us. A short
+                # timeout would re-introduce the busy spin; the wakeup
+                # event is the only legitimate reason to leave this
+                # branch.
+                self._wakeup.wait()
+                self._wakeup.clear()
+                if self._stop.is_set():
+                    return
                 continue
+            # We have work. Wait out the remaining interval since the last
+            # execution so we honour the FPS cap, then run the latest
+            # callback (which may be one that arrived during the wait).
+            wait_for = self.min_interval - (time.monotonic() - last)
+            if wait_for > 0:
+                # ``schedule`` may queue more work while we wait; the
+                # extra wakeup shortens the wait so the new callback is
+                # observed promptly. ``last`` is the time of the *next*
+                # execution, not the time we entered the wait.
+                self._wakeup.wait(timeout=wait_for)
+                self._wakeup.clear()
+                if self._stop.is_set():
+                    return
+                late = self._take_pending()
+                if late:
+                    pending = late
             # Only the most recent callback survives — they all paint the
             # same tree, so older ones are obsolete by the time we run.
             cb = pending[-1]
