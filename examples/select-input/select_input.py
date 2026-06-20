@@ -66,12 +66,12 @@ def SelectInput() -> Element:
         use_input(on_key)
 
         def render_item(idx: int, label: str) -> Element:
-            prefix = "> " if idx == selected.value else "  "
-            is_active = idx == selected.value
             return Text(
-                f"{prefix}{label}",
-                color="green" if is_active else None,
-                bold=is_active,
+                # Content + style props accept callables (PRD Decision 13) so
+                # they re-evaluate at render time when ``selected`` changes.
+                lambda: f"{'> ' if selected.value == idx else '  '}{label}",
+                color=lambda: "green" if selected.value == idx else None,
+                bold=lambda: selected.value == idx,
             )
 
         return Box(

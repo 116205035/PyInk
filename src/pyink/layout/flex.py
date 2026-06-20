@@ -16,14 +16,37 @@ This is intentionally a *subset* of Yoga that covers the cases exercised
 by ``ink``'s ``flex-*.tsx`` test suite. Out-of-scope (percentages,
 ``aspectRatio``, absolute positioning, ``order``) raise or are silently
 ignored depending on what makes the call site safe.
+
+PRD Decision 13 — style props accept ``T | Callable[[], T]``: the helper
+:func:`_resolve` evaluates a prop value at layout time. ``build_flex_tree``
+runs inside the render-loop effect's tracking context, so callable props
+that read ``signal.value`` here establish the subscription.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from pyink.layout.measure import string_width, wrap_text
+
+_T = TypeVar("_T")
+
+
+def _resolve(prop: _T | Callable[[], _T]) -> _T:
+    """Evaluate ``prop`` if it's a callable, otherwise return it unchanged.
+
+    Per PRD Decision 13, every style prop (``color`` / ``bold`` /
+    ``borderStyle`` / …) accepts a ``Callable[[], T]`` in addition to a
+    plain ``T``. The callable is invoked **here** — at layout time — so
+    when the layout pass runs inside the render-loop effect's tracking
+    context, any ``signal.value`` reads inside the callable establish
+    subscriptions.
+    """
+    if callable(prop):
+        return prop()
+    return prop
 
 __all__ = [
     "AlignContent",
@@ -145,12 +168,15 @@ class FlexStyle:
         # cells the renderer later fills with border characters. Per ink
         # semantics, an explicit ``borderTop=False`` etc. removes only
         # that one side. ``borderStyle`` may be a string or a dict.
-        if props.get("borderStyle") is not None:
+        # PRD Decision 13: ``borderStyle`` and the per-side booleans may
+        # be callables — evaluate them here so the layout effect
+        # subscribes to any signals read inside.
+        if _resolve(props.get("borderStyle")) is not None:
             s.has_border = True
-            s.border_top = props.get("borderTop", True) is not False
-            s.border_right = props.get("borderRight", True) is not False
-            s.border_bottom = props.get("borderBottom", True) is not False
-            s.border_left = props.get("borderLeft", True) is not False
+            s.border_top = _resolve(props.get("borderTop", True)) is not False
+            s.border_right = _resolve(props.get("borderRight", True)) is not False
+            s.border_bottom = _resolve(props.get("borderBottom", True)) is not False
+            s.border_left = _resolve(props.get("borderLeft", True)) is not False
             s.padding = Edges(
                 top=s.padding.top + (1 if s.border_top else 0),
                 right=s.padding.right + (1 if s.border_right else 0),
@@ -386,6 +412,62 @@ def _inline_text_element(element: Any) -> str | None:
     return "".join(parts)
 
 
+#: Style props consumed by the renderer (:mod:`pyink.layout.render_layout`)
+#: that accept ``T | Callable[[], T]`` (PRD Decision 13). Layout-affecting
+#: props (``borderStyle`` / ``borderTop`` / …) are also resolved inside
+#: :meth:`FlexStyle.from_props`; we re-list the booleans here so the
+#: snapshot ``node.props`` carries the resolved values too.
+_DECORATION_PROPS: tuple[str, ...] = (
+    # Text style
+    "color",
+    "backgroundColor",
+    "bold",
+    "italic",
+    "underline",
+    "strikethrough",
+    "inverse",
+    "dimColor",
+    "wrap",
+    # Box border style + colours
+    "borderStyle",
+    "borderColor",
+    "borderTopColor",
+    "borderRightColor",
+    "borderBottomColor",
+    "borderLeftColor",
+    "borderBackgroundColor",
+    "borderTopBackgroundColor",
+    "borderRightBackgroundColor",
+    "borderBottomBackgroundColor",
+    "borderLeftBackgroundColor",
+    "borderDimColor",
+    "borderTopDimColor",
+    "borderRightDimColor",
+    "borderBottomDimColor",
+    "borderLeftDimColor",
+    # Per-edge visibility flags
+    "borderTop",
+    "borderRight",
+    "borderBottom",
+    "borderLeft",
+)
+
+
+def _resolve_decoration_props(props: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``props`` with every callable decoration prop resolved.
+
+    Per PRD Decision 13 the renderer reads resolved (non-callable) values
+    from ``node.props``. We invoke each callable here — at layout time —
+    so when the layout pass runs inside the render-loop effect's tracking
+    context the signal reads establish subscriptions.
+    """
+    out = dict(props)
+    for key in _DECORATION_PROPS:
+        if key in out:
+            out[key] = _resolve(out[key])
+    return out
+
+
 def _build_host_node(instance: Any) -> FlexNode:
     from pyink.core.component import HostInstance
 
@@ -396,11 +478,18 @@ def _build_host_node(instance: Any) -> FlexNode:
     # wider ``ElementType`` alias — narrow explicitly.
     assert isinstance(element_type, str)
     style = FlexStyle.from_props(instance.element.props)
+    # PRD Decision 13 — resolve callable style props at layout time so the
+    # render-loop effect subscribes to any signals they read. We resolve
+    # only the decoration props the renderer reads downstream; layout
+    # props (flexDirection / padding / …) are still considered plain
+    # values (those that *do* affect layout — borderStyle / borderTop /
+    # etc. — are resolved inside :meth:`FlexStyle.from_props`).
+    resolved_props = _resolve_decoration_props(instance.element.props)
     node = FlexNode(
         kind=element_type,
         style=style,
         source=instance,
-        props=dict(instance.element.props),
+        props=resolved_props,
     )
     if element_type == "text":
         # Resolve text leaves immediately (callables evaluated once).

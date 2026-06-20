@@ -42,11 +42,16 @@ def FocusDemo() -> Element:
         use_input(on_key)
 
         def make_box(label: str, idx: int) -> Element:
-            is_active = focused.value == idx
+            # ``idx`` is a function parameter — bound at call time, so each
+            # callable reads the right value (PRD Decision 13).
             return Box(
-                Text(label, color="green" if is_active else None, bold=is_active),
-                borderStyle="round" if is_active else "single",
-                borderColor="green" if is_active else None,
+                Text(
+                    label,
+                    color=lambda: "green" if focused.value == idx else None,
+                    bold=lambda: focused.value == idx,
+                ),
+                borderStyle=lambda: "round" if focused.value == idx else "single",
+                borderColor=lambda: "green" if focused.value == idx else None,
                 paddingX=1,
             )
 

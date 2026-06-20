@@ -79,8 +79,8 @@ The six built-in host components map 1:1 to ink's primitives:
 
 | Name | Description |
 | --- | --- |
-| `Box(*children, **props)` | Flex container. Accepts layout props (`flexDirection`, `padding`, `margin`, `gap`, `width`, `height`, `flexGrow`, …) and decoration props (`borderStyle`, `borderColor`, `backgroundColor`, …). |
-| `Text(*children, **props)` | Text leaf. Accepts strings / callables as children. Style props: `color`, `backgroundColor`, `bold`, `italic`, `underline`, `strikethrough`, `dimColor`, `inverse`, `wrap`. |
+| `Box(*children, **props)` | Flex container. Accepts layout props (`flexDirection`, `padding`, `margin`, `gap`, `width`, `height`, `flexGrow`, …) and decoration props (`borderStyle`, `borderColor`, `backgroundColor`, …). All decoration props accept `T \| Callable[[], T]` (PRD Decision 13) — callables are evaluated at render time inside the render-loop effect's tracking context. |
+| `Text(*children, **props)` | Text leaf. Accepts strings / callables as children. Style props (`color`, `backgroundColor`, `bold`, `italic`, `underline`, `strikethrough`, `dimColor`, `inverse`, `wrap`) all accept `T \| Callable[[], T]` (PRD Decision 13). |
 | `Newline()` | Convenience `Text("\n")`. |
 | `Spacer(size=None)` | Flex spacer. With `size=N` it has a fixed width; otherwise `flexGrow=1`. |
 | `Static(items, render_item)` | Permanently render a list of items above the live frame. `items` may be a plain list, a `Signal[list]`, or a `Callable[[], list]`. |
