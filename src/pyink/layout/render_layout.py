@@ -251,14 +251,22 @@ def _paint_text(
     :func:`apply_style` before being painted. The inherited Box
     ``backgroundColor`` (if any) is applied unless the Text declares its
     own ``backgroundColor``.
+
+    Styling is applied **per line** rather than over the whole multi-line
+    string. A whole-string wrap would put the SGR opener on the first
+    line and the reset on the last line; the renderer writes each line
+    into a separate grid row, so middle lines would carry no opener and
+    the first line would carry no reset — letting the foreground colour
+    / dim / bold run leak past the text into adjacent cells (border
+    edges, background fill, padding) on that row.
     """
     text = node.content or ""
-    styled = _apply_text_style(text, node.props, inherited_bg=inherited_bg)
-    lines = styled.split("\n")
+    raw_lines = text.split("\n")
     if node.height > 0:
-        lines = lines[: node.height]
-    for i, line in enumerate(lines):
-        grid.put(abs_x, abs_y + i, line)
+        raw_lines = raw_lines[: node.height]
+    for i, raw_line in enumerate(raw_lines):
+        styled = _apply_text_style(raw_line, node.props, inherited_bg=inherited_bg)
+        grid.put(abs_x, abs_y + i, styled)
 
 
 def _apply_text_style(

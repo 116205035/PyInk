@@ -257,6 +257,71 @@ def test_text_wrap_truncate_start() -> None:
     assert out == "… World"
 
 
+def test_text_wrapped_with_style_resets_each_line() -> None:
+    """Regression: a styled Text that wraps to multiple lines must emit a
+    balanced SGR open/reset pair on *each* output line.
+
+    Before the fix, ``apply_style`` wrapped the whole multi-line string,
+    placing the opener on the first line and the lone reset on the last
+    line. ``_paint_text`` then split that styled string on ``\\n`` and
+    wrote each line into its own grid row, so:
+
+    * The first row carried the opener with no reset — letting the
+      foreground colour / dim / bold run leak past the text into
+      adjacent cells (border edges, background fill, padding) on that
+      row (the "background colour overflow" reported against the
+      nested-layout example).
+    * Middle rows carried neither opener nor reset, so they lost the
+      style entirely.
+    """
+    out = render_to_string(Box(Text("Hello World Foo", color="green"), width=7))
+    lines = out.split("\n")
+    assert len(lines) == 3, f"expected 3 wrapped lines, got {lines!r}"
+    green_open = f"{ESC}[32m"
+    reset = f"{ESC}[0m"
+    for line in lines:
+        assert line.startswith(green_open), (
+            f"line {line!r} missing the green opener — style did not re-open per line"
+        )
+        assert line.endswith(reset), (
+            f"line {line!r} missing the SGR reset — style leaks past the text"
+        )
+
+
+def test_text_wrapped_with_dim_does_not_styling_leak_into_sibling_border() -> None:
+    """Regression: when a styled wrapped Text sits inside a bordered box,
+    the trailing cells (padding, the right border edge) on the *first*
+    wrapped row must not inherit the text's foreground style.
+
+    Reproduces the nested-layout bug: dim text wrapped inside an inner
+    round box painted its dim run across the inner right border ``│``
+    on the first row because the reset lived on the last wrapped row.
+    """
+    long_text = "This is a long paragraph that wraps inside the box."
+    out = render_to_string(
+        Box(
+            Box(Text(long_text, dimColor=True), padding=1, borderStyle="single"),
+            width=20,
+        )
+    )
+    # Find the first wrapped text line — it starts with the dim opener.
+    dim_open = f"{ESC}[2m"
+    reset = f"{ESC}[0m"
+    text_lines = [ln for ln in out.split("\n") if dim_open in ln]
+    assert text_lines, "expected at least one dim-styled wrapped row"
+    first = text_lines[0]
+    # The dim opener must be paired with a reset on the *same* line,
+    # before the trailing " │" border edge — otherwise the dim run
+    # leaks across the border on this row.
+    open_idx = first.index(dim_open)
+    reset_idx = first.index(reset)
+    assert reset_idx > open_idx, "reset must follow the opener"
+    # And nothing styled should appear after the reset on this row.
+    assert reset not in first[reset_idx + len(reset) :], (
+        "unexpected second SGR run after reset — style leaks past text"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Nested Text — colour overlay via sibling Text nodes
 # ---------------------------------------------------------------------------
