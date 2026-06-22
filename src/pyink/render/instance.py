@@ -136,6 +136,14 @@ class Instance:
         ``current_frame`` is preserved so the diff against the new tree
         emits only the changed rows (rather than a full repaint).
         """
+        # Atomicity: the entire mount → paint → effect-rebind must hold
+        # ``self._lock`` so a concurrent ``unmount()`` cannot observe a
+        # half-mounted tree (mounted_tree set but render_dispose not yet
+        # re-bound, or vice versa). ``self._lock`` is an ``RLock`` so
+        # ``_paint_now`` re-entering it from the same thread is safe —
+        # and we deliberately do *not* release the lock between mount
+        # and paint (the previous code did), which was the window where
+        # state could be observed inconsistently.
         with self._lock:
             if self._unmounted:
                 raise RuntimeError("Cannot rerender an unmounted Instance")
@@ -147,11 +155,11 @@ class Instance:
                 self.mounted_tree = None
             mounted = self.reconciler.mount(tree)
             self.mounted_tree = cast("HostInstance", mounted) if mounted is not None else None
-        # Run a synchronous paint so callers see the new frame before
-        # ``rerender`` returns.
-        self._paint_now()
-        # Re-bind the render-loop effect against the new tree.
-        with self._lock:
+            # Run a synchronous paint so callers see the new frame before
+            # ``rerender`` returns. Called inside the lock — see the
+            # rationale above.
+            self._paint_now()
+            # Re-bind the render-loop effect against the new tree.
             if not self._unmounted:
                 self.render_dispose = effect(self._effect_body)
 

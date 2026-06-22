@@ -292,6 +292,89 @@ def test_unmount_during_throttled_paint_does_not_crash() -> None:
     time.sleep(0.1)
 
 
+def test_rerender_concurrent_with_unmount_is_atomic() -> None:
+    """Rerender holds its lock across mount→paint→rebind so a racing
+    unmount either runs entirely before (rerender raises) or entirely
+    after (rerender completes, then unmount tears it down).
+
+    Regression for audit Bug 7: previously rerender released the lock
+    between mount and paint and again between paint and effect rebind.
+    A concurrent unmount in those windows could leave the Instance with
+    a half-mounted tree and no render_dispose, or mark itself unmounted
+    while rerender still tried to paint. The fix wraps the whole body
+    in a single ``with self._lock`` block.
+    """
+    import contextlib
+
+    errors: list[BaseException] = []
+
+    for _ in range(10):
+        inst, _ = _make_instance(Text("root"))
+        stop = threading.Event()
+        # Bind loop locals as default args so the worker closures
+        # capture ``inst``/``stop`` by value (ruff B023).
+        rerenderer = _make_rerenderer(inst, stop, errors)
+        unmounter = _make_unmounter(inst, stop, errors)
+
+        t1 = threading.Thread(target=rerenderer)
+        t2 = threading.Thread(target=unmounter)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5.0)
+        t2.join(timeout=5.0)
+        # Force-stop if a thread is somehow still alive (would indicate
+        # a deadlock — surfaced by the join timeout above).
+        stop.set()
+        # Ensure the unmount path ran to completion.
+        with contextlib.suppress(BaseException):
+            inst.unmount()  # type: ignore[attr-defined]
+
+    assert not errors, f"unexpected errors during concurrent rerender/unmount: {errors!r}"
+
+
+def _make_rerenderer(
+    inst: object,
+    stop: threading.Event,
+    errors: list[BaseException],
+) -> Callable[[], None]:
+    """Build a worker that hammers ``inst.rerender`` until ``stop`` flips."""
+
+    def worker() -> None:
+        i = 0
+        while not stop.is_set():
+            try:
+                inst.rerender(Text(f"v{i % 5}"))  # type: ignore[attr-defined]
+            except RuntimeError:
+                # Instance unmounted under us — expected race outcome.
+                return
+            except BaseException as exc:  # pragma: no cover
+                errors.append(exc)
+                return
+            i += 1
+
+    return worker
+
+
+def _make_unmounter(
+    inst: object,
+    stop: threading.Event,
+    errors: list[BaseException],
+) -> Callable[[], None]:
+    """Build a worker that unmounts ``inst`` after a brief delay."""
+
+    def worker() -> None:
+        # Give the rerenderer a head start, then pull the rug.
+        time.sleep(0.01)
+        try:
+            inst.unmount()  # type: ignore[attr-defined]
+        except BaseException as exc:  # pragma: no cover
+            errors.append(exc)
+        finally:
+            stop.set()
+
+    return worker
+
+
 def test_max_fps_one_still_renders_final_state() -> None:
     """max_fps=1 (extreme throttle) collapses many writes to <=1 paint/sec."""
     counter = signal(0)

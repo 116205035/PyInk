@@ -1299,3 +1299,83 @@ def test_row_min_content_is_max_child_width() -> None:
         )
     finally:
         Reconciler().unmount(reconciled)
+
+
+# ---------------------------------------------------------------------------
+# Bug 6 (PR4 audit): flex_shrink must keep measured_width consistent
+# ---------------------------------------------------------------------------
+
+
+def test_flex_shrink_syncs_measured_width() -> None:
+    """A shrunk child's ``measured_width`` must match its post-shrink width.
+
+    Regression for audit Bug 6: the force-clamp
+    ``child.layout_width = allocated_w`` after a shrink pass must keep
+    ``measured_width`` in lock-step. The text-leaf re-layout path
+    happens to keep them aligned today, but a future reader that
+    consults ``measured_width`` after shrink would otherwise see a
+    stale intrinsic value. The fix makes the invariant explicit.
+    """
+    from pyink.core.reconciler import Reconciler
+    from pyink.layout.flex import build_flex_tree, layout_root
+
+    # Two wide text leaves forced to share a narrow row container.
+    # Each child is itself a text leaf — the shrink pass re-runs the
+    # measurement at the allocated width and the fix ensures the
+    # ``measured_width`` field agrees with the final ``layout_width``.
+    tree = box(
+        text("AAAAAA", flexShrink=1),
+        text("BBBBBB", flexShrink=1),
+        width=6,
+    )
+    reconciled = Reconciler().mount(tree, parent=None)
+    try:
+        flex_root = build_flex_tree(reconciled)
+        assert flex_root is not None
+        layout_root(flex_root, columns=10)
+        assert len(flex_root.children) == 2
+        for child in flex_root.children:
+            # Both children are shrunk below their natural 6-cell width.
+            assert child.layout_width < 6, (
+                f"expected child to be shrunk below 6; got "
+                f"layout_width={child.layout_width}"
+            )
+            # After shrink, both fields must agree.
+            assert child.measured_width == child.layout_width, (
+                f"measured_width {child.measured_width} != layout_width "
+                f"{child.layout_width} after shrink"
+            )
+    finally:
+        Reconciler().unmount(reconciled)
+
+
+def test_flex_shrink_syncs_measured_height_column() -> None:
+    """A shrunk child's ``measured_height`` must match its post-shrink height.
+
+    Same regression as the row case but for the column main axis (height).
+    """
+    from pyink.core.reconciler import Reconciler
+    from pyink.layout.flex import build_flex_tree, layout_root
+
+    tree = box(
+        box(text("aaaa\nbbbb\ncccc"), flexShrink=1),
+        box(text("dddd\neeee\nffff"), flexShrink=1),
+        flexDirection="column",
+        height=4,
+    )
+    reconciled = Reconciler().mount(tree, parent=None)
+    try:
+        flex_root = build_flex_tree(reconciled)
+        assert flex_root is not None
+        layout_root(flex_root, columns=10)
+        for child in flex_root.children:
+            assert child.layout_height < 3, (
+                f"expected child to be shrunk below 3; got "
+                f"layout_height={child.layout_height}"
+            )
+            assert child.measured_height == child.layout_height, (
+                f"measured_height {child.measured_height} != layout_height "
+                f"{child.layout_height} after shrink"
+            )
+    finally:
+        Reconciler().unmount(reconciled)

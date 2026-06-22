@@ -1147,8 +1147,12 @@ def _layout_row(
                          "exactly", "exactly" if own_h >= 0 else "at-most")
             child.style.width = saved_width
             # Force the layout_width to the allocated size — re-layout
-            # may re-measure content and keep natural width.
+            # may re-measure content and keep natural width. Keep
+            # ``measured_width`` in sync so any downstream reader (e.g.
+            # a future cross-axis measurement or border drawer) sees the
+            # post-shrink width rather than the stale intrinsic value.
             child.layout_width = allocated_w
+            child.measured_width = allocated_w
 
     # Stretch align for cross axis: re-layout children that were stretched.
     for i, child in enumerate(children):
@@ -1264,6 +1268,10 @@ def _layout_column(
                          "exactly")
             child.style.height = saved_height
             child.layout_height = allocated_h
+            # Mirror the row-pass fix: keep ``measured_height`` in sync
+            # with the shrunk allocation so downstream readers don't see
+            # a stale intrinsic value.
+            child.measured_height = allocated_h
 
     for i, child in enumerate(children):
         align = _resolve_align(child.style.align_self, style.align_items)
