@@ -113,6 +113,17 @@ def _LabeledInput(
             borderStyle=border_style,
             borderColor=border_color,
             paddingX=1,
+            # A form field must never be compressed below its natural
+            # height: when the column runs out of vertical budget the
+            # flex shrink pass would otherwise steal rows from whichever
+            # field is tallest (the multi-line input), collapsing it back
+            # to a single visible row even as the user keeps pressing
+            # Enter. Pinning ``flexShrink=0`` keeps every field at its
+            # content height (the multi-line input grows up to its
+            # ``rows`` cap); any genuine over-budget overflow is absorbed
+            # by clipping the lowest-priority trailing status lines, not
+            # by silently swallowing the field the user is typing into.
+            flexShrink=0,
         )
 
     return create_element(Impl)
