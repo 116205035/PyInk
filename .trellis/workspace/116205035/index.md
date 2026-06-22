@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 8
+- **Total Sessions**: 9
 - **Last Active**: 2026-06-22
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~317 | Active |
+| `journal-1.md` | ~350 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 9 | 2026-06-22 | render() clamps frame to terminal size (root cause of cursor-up chaos) | `4f3375a` | `main` |
 | 8 | 2026-06-22 | PyInk Phase 5: scroll_offset + reactive dims (VirtualList deleted as wrong abstraction) | `9c419c0`, `b623969`, `cbb319c`, `25addcb` | `main` |
 | 7 | 2026-06-22 | PyInk layout hardening (Bug 1 + 4 + 6) | `a3ffb03`, `56c788f`, `c938b27` | `main` |
 | 6 | 2026-06-22 | PyInk TextInput cursor + is_active + overflow cascade fixes | `0e61b97`, `1ba5576`, `d507af6`, `bf34457`, `5f59462`, `49a54a9`, `c3c77e6`, `2096035` | `main` |

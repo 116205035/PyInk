@@ -315,3 +315,36 @@ Phase 5 re-focused after discovering VirtualList was wrong abstraction. PR1: Tex
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: render() clamps frame to terminal size (root cause of cursor-up chaos)
+
+**Date**: 2026-06-22
+**Task**: render() clamps frame to terminal size (root cause of cursor-up chaos)
+**Branch**: `main`
+
+### Summary
+
+Fixed PyInk's long-standing inline-mode bug: when user passed rows/columns exceeding actual terminal size, frame overflowed screen, terminal scrolled, cursor-up math landed in scrollback → garbled rendering. Fix mirrors Claude Code's ink (ink.tsx:191 reads stdout.rows directly, never lets user override to bigger). pipeline.py adds _clamp_dimension(override, actual, *, is_tty): TTY-gated — clamps only when stdout is real terminal AND override > actual. Non-TTY (test capture, piped output) honors user's value unchanged. Caught during impl: unconditional clamp broke test_text_input_example_runs which runs on non-TTY StringIO with rows=30 and asserts bottom status line renders — clamping to 80x24 default truncated the frame. Demo reverted from auto-detect to fixed columns=72, rows=30 (auto-detect was masking the bug on tall terminals). Now safe on short terminals: frame silently shrinks to fit, cursor-up stays in viewport, no corruption. Final state: 1172 passed + 22 xfailed, mypy strict + ruff green across 128 source files. Content that doesn't fit is correctly clipped (matches Claude Code behavior — use Static to push overflow to scrollback).
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4f3375a` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
