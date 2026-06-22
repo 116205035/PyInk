@@ -1,14 +1,13 @@
 """Text.scroll_offset example — public scroll API (Phase 5 PR3).
 
-Demonstrates the public ``scroll_offset`` prop on :func:`pyink.Text`,
-which is the low-level hook that :func:`pyink.externals.VirtualList`
-builds on. A long multi-line Text (50 numbered lines) is mounted inside
-a fixed-height Box; arrow keys advance / retreat the scroll offset by
+Demonstrates the public ``scroll_offset`` prop on :func:`pyink.Text`:
+a long multi-line Text (50 numbered lines) is mounted inside a
+fixed-height Box; arrow keys advance / retreat the scroll offset by
 one line, and a status line reports the current offset.
 
-This is the "manual" counterpart to ``virtual_list_demo``: callers who
-only need scrolling over a single text payload (without the
-virtualisation win) can reach for ``scroll_offset`` directly.
+Callers who only need scrolling over a single text payload can reach
+for ``scroll_offset`` directly — no external list virtualisation
+needed.
 
 Run::
 

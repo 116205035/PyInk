@@ -23,8 +23,9 @@ Supported ``props``:
   time so signal reads inside it establish subscriptions). ``None``
   (default) keeps the leading rows — matching ink's
   ``<Box height={n}>`` truncation behaviour. This is the public hook
-  the Phase 5 :func:`pyink.externals.VirtualList` and the multi-line
-  :func:`pyink.externals.TextInput` cursor-follow viewport drive.
+  the multi-line :func:`pyink.externals.TextInput` cursor-follow
+  viewport drives, and application code can use it directly to scroll
+  any oversized text payload inside a height-constrained Box.
 """
 
 from __future__ import annotations

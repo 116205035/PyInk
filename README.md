@@ -25,10 +25,10 @@ Pygments-driven syntax highlighting and structured file diffs. Phase 4
 rounds out the input surface with three externals — `TextInput`
 (single-line + multi-line editing, selection, paste, password masking),
 `SelectInput` (single- and multi-select option lists) and `ConfirmInput`
-(Y/N confirmation prompts). Phase 5 delivers virtualised long-list
-rendering (`VirtualList` external — 1000+ rows render as cheaply as 20)
-plus a public `Text.scroll_offset` prop for manual scroll control over
-multi-line content. See the project PRDs
+(Y/N confirmation prompts). Phase 5 delivers a public
+`Text.scroll_offset` prop for manual scroll control over multi-line
+content, plus the reactive-dimension primitives (`Signal`/`Callable`
+support on layout props) that back it. See the project PRDs
 (`.trellis/tasks/06-19-pyink-mvp/prd.md`,
 `.trellis/tasks/06-20-pyink-phase2/prd.md`,
 `.trellis/tasks/06-20-pyink-phase3/prd.md`,
@@ -118,7 +118,7 @@ The six built-in host components map 1:1 to ink's primitives:
 | Name | Description |
 | --- | --- |
 | `Box(*children, **props)` | Flex container. Accepts layout props (`flexDirection`, `padding`, `margin`, `gap`, `width`, `height`, `flexGrow`, …) and decoration props (`borderStyle`, `borderColor`, `backgroundColor`, …). All decoration props accept `T \| Callable[[], T]` (PRD Decision 13) — callables are evaluated at render time inside the render-loop effect's tracking context. |
-| `Text(*children, **props)` | Text leaf. Accepts strings / callables as children. Style props (`color`, `backgroundColor`, `bold`, `italic`, `underline`, `strikethrough`, `dimColor`, `inverse`, `wrap`) all accept `T \| Callable[[], T]` (PRD Decision 13). The Phase 5 `scroll_offset` prop (`int \| Signal[int] \| Callable[[], int] \| None`) slides a `height`-row window down a multi-line payload so a later portion becomes visible — the low-level hook that `VirtualList` builds on. |
+| `Text(*children, **props)` | Text leaf. Accepts strings / callables as children. Style props (`color`, `backgroundColor`, `bold`, `italic`, `underline`, `strikethrough`, `dimColor`, `inverse`, `wrap`) all accept `T \| Callable[[], T]` (PRD Decision 13). The Phase 5 `scroll_offset` prop (`int \| Signal[int] \| Callable[[], int] \| None`) slides a `height`-row window down a multi-line payload so a later portion becomes visible. |
 | `Newline()` | Convenience `Text("\n")`. |
 | `Spacer(size=None)` | Flex spacer. With `size=N` it has a fixed width; otherwise `flexGrow=1`. |
 | `Static(items, render_item)` | Permanently render a list of items above the live frame. `items` may be a plain list, a `Signal[list]`, or a `Callable[[], list]`. |
@@ -170,7 +170,6 @@ Phase 3 + Phase 4:
 | `TextInput(*, initial_value="", placeholder=None, on_change=None, on_submit=None, on_cursor_change=None, multiline=False, mask=None, max_length=None, color=None, cursor_color=None, cursor_style="block", is_active=True, **box_props)` | Single-line or multi-line text input. Owns three writable signals (`value` / `cursor` / `selection`); Emacs-style editing (Ctrl+A/E/K/U/W), Shift-arrow selection, bracketed-paste, password `mask`, `max_length` truncation. `on_cursor_change(offset)` fires on every cursor move (arrows / typing / edits / programmatic). `cursor_style` defaults to `"block"` (Claude Code feel); `"bar"` / `"underline"` also supported. Phase 4. |
 | `SelectInput(items, *, initial_index=0, on_select=None, on_change=None, multi_select=False, indicator="❯", selected_indicator="✓", unselected_indicator=" ", color=None, selected_color="green", is_active=True, **box_props)` | Keyboard-navigable option list. `ArrowUp`/`Down` or `j`/`k` move the focus; `1`..`9` jump to an index; `Enter` confirms (single-select fires `on_select(value)`, multi-select fires `on_select(list[value])`); `Space` toggles (multi-select only). Phase 4. |
 | `ConfirmInput(on_confirm, on_cancel=None, *, prompt="Confirm?", confirm_key="y", cancel_key="n", require_enter=False, default=None, confirm_label=None, cancel_label=None, color=None, selected_color="green", is_active=True, **box_props)` | Y/N confirmation prompt. Single-key mode (default) fires the callback on the keystroke; `require_enter=True` highlights first, then Enter confirms. Custom `confirm_key` / `cancel_key` (e.g. `q` / `a`) are supported. Phase 4. |
-| `VirtualList(items, *, render_item, viewport_height, item_height=None, overscan=3, on_scroll=None, key=None, initial_scroll=0, scroll_signal=None, **box_props)` | Virtualised / windowed list — only the visible slice of `items` is rendered. Accepts `list \| Signal[list] \| Callable[[], list]` so reactive sources (log tailing, async appends) plug in directly. `item_height=int` selects the fixed-height fast path (the only path implemented in Phase 5 PR2); `None` (dynamic measurement) raises `NotImplementedError` at mount. Pass an external `scroll_signal` to wire keyboard shortcuts (arrows / PageUp / PageDown / Home / End) from outside the component. Phase 5. |
 
 ### Imperative API (`measure_element`)
 
@@ -246,8 +245,6 @@ modelled after ink's own examples:
 | [`select-input-real`](./examples/select-input-real/select_input_demo.py) | The real `SelectInput` external — `ArrowUp`/`Down` + `j`/`k` + digit-key jumps; Enter confirms. Contrasts with the hand-rolled `examples/select-input`. | `python examples/select-input-real/select_input_demo.py` |
 | [`select-input-multi`](./examples/select-input-multi/multi_select_demo.py) | `SelectInput(multi_select=True)` — Space toggles items in/out of a selection set; Enter confirms the whole list. | `python examples/select-input-multi/multi_select_demo.py` |
 | [`confirm-input`](./examples/confirm-input/confirm_demo.py) | `ConfirmInput` external — three Y/N prompts side by side: single-key (default), `require_enter=True`, and custom keys (`q`/`a`). | `python examples/confirm-input/confirm_demo.py` |
-| [`virtual-list`](./examples/virtual-list/virtual_list_demo.py) | `VirtualList` external — 1000-row windowed list with `scroll_signal` driven by external `use_input` (Up/Down scroll, PageUp/PageDown page, Home/End jump). | `python examples/virtual-list/virtual_list_demo.py` |
-| [`virtual-list-dynamic`](./examples/virtual-list-dynamic/dynamic_demo.py) | `VirtualList` external — `Signal[list]`-driven log tailing: a background thread appends a row every 200 ms and the demo auto-follows to the tail via `scroll_signal`. | `python examples/virtual-list-dynamic/dynamic_demo.py` |
 | [`scroll-text`](./examples/scroll-text/scroll_text_demo.py) | `Text.scroll_offset` public prop — manual scroll over a 50-line payload inside a fixed-height Box (Up/Down / PageUp / PageDown / Home / End). | `python examples/scroll-text/scroll_text_demo.py` |
 
 Most examples wait for `Ctrl+C` (the default `exit_on_ctrl_c=True`).
