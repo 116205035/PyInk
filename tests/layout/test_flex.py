@@ -9,6 +9,7 @@ an algorithm bug or a feature we deliberately leave out of scope
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -22,7 +23,7 @@ def box(*children: Any, **props: Any) -> Element:
     return create_element("box", *children, **props)
 
 
-def text(content: str, **props: Any) -> Element:
+def text(content: str | Callable[[], str], **props: Any) -> Element:
     return create_element("text", content, **props)
 
 
