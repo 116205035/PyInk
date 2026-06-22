@@ -384,3 +384,36 @@ Full code audit by 6 parallel Explore agents surfaced 7 Critical findings. 4-PR 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 11: Fix TextInput rows should grow not pin (maxHeight)
+
+**Date**: 2026-06-23
+**Task**: Fix TextInput rows should grow not pin (maxHeight)
+**Branch**: `main`
+
+### Summary
+
+User-reported bug: multi-line TextInput with rows=N didn't grow from 1 to N rows on Enter. Root cause: c3c77e6 commit's own comment said 'grows from one row up to rows rows' but implementation pinned Box height=N (fixed) instead of maxHeight=N (upper bound). One-line fix: height → maxHeight in resolved_box_props assignment. flex.py already supported maxHeight (line 198/858-874 via min(own_h, max_height-padding)). Box now grows naturally with Text leaf height (1 row empty → 2 after Enter → ... → maxHeight → scroll_offset_sig takes over). Added maxHeight-not-in-resolved_box_props guard so caller-explicit maxHeight wins over rows. 2 regression tests: test_multiline_grows_from_1_to_rows_max (6 Enters with rows=5 never exceeds 5 rows) + test_multiline_rows_grows_to_two_after_first_enter (isolates 1→2 transition). Final state: 1184 passed + 22 xfailed, mypy strict + ruff green across 128 source files.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f5f4044` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

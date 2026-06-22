@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 10
-- **Last Active**: 2026-06-22
+- **Total Sessions**: 11
+- **Last Active**: 2026-06-23
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~386 | Active |
+| `journal-1.md` | ~419 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 11 | 2026-06-23 | Fix TextInput rows should grow not pin (maxHeight) | `f5f4044` | `main` |
 | 10 | 2026-06-22 | PyInk audit critical fixes (7 Critical findings, 4 PRs) | `a3af670`, `126e5eb`, `5b8932b`, `94b0694` | `main` |
 | 9 | 2026-06-22 | render() clamps frame to terminal size (root cause of cursor-up chaos) | `4f3375a` | `main` |
 | 8 | 2026-06-22 | PyInk Phase 5: scroll_offset + reactive dims (VirtualList deleted as wrong abstraction) | `9c419c0`, `b623969`, `cbb319c`, `25addcb` | `main` |
