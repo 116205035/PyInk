@@ -10,6 +10,19 @@ PyInk targets Python 3.11+, has a single runtime dependency
 width), and is fully synchronous — concurrency is handled by
 application-level threads.
 
+## Documentation
+
+- [Architecture](docs/architecture.md) — reactive model, reconciler,
+  layout engine, render pipeline, hooks, threading.
+- [Design Decisions](docs/design-decisions.md) — ADR-lite catalogue of
+  the API-shaping trade-offs.
+- [API Reference](docs/api-reference.md) — every exported name with
+  signatures and prop tables.
+- [Migrating from Textual](docs/migration-from-textual.md) — concept
+  mapping, mode choice, common pitfalls.
+- [Layout Audit](docs/layout-audit.md) — known flex-engine
+  limitations and residual issues.
+
 ## Status
 
 MVP + Phase 2 + Phase 3 + Phase 4 + Phase 5 complete. The reactive core,
