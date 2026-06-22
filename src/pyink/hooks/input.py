@@ -90,8 +90,23 @@ def use_input(
     # ``effect`` already ran _setup once synchronously, registering the
     # dispose on the component instance. We return a manual dispose that
     # both unsubscribes and tears down the effect binding.
+    #
+    # A ``_disposed`` flag guards against double-invocation: the manual
+    # dispose is meant to be called by the caller *and* is registered on
+    # the component instance for unmount. Without the guard, calling the
+    # manual dispose and then unmounting would invoke ``dispose_subscribe``
+    # twice (once directly, once via the effect cleanup) and re-enter
+    # ``effect_dispose`` on an already-disposed Effect. The flag makes the
+    # second call a no-op so both entry points are truly idempotent.
+    _disposed = False
+
     def dispose() -> None:
+        nonlocal _disposed
+        if _disposed:
+            return
+        _disposed = True
         dispose_subscribe()
-        effect_dispose()
+        if effect_dispose is not None:
+            effect_dispose()
 
     return dispose

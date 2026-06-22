@@ -195,8 +195,21 @@ def use_focus(options: FocusOptions | None = None) -> FocusHandle:
     # invokes ``unregister``. Mirrors the pattern used by ``use_input``
     # and ``use_interval``: ``effect`` is the cheapest way to register a
     # dispose with the active ComponentInstance.
+    #
+    # The cleanup guards against double-invocation with a ``_cleaned``
+    # flag: a manual dispose of the effect followed by component unmount
+    # would otherwise call ``unregister`` twice. The underlying
+    # ``FocusManager._unregister`` is already tolerant of a missing
+    # handle, but the flag keeps the contract explicit and avoids
+    # surprising a future custom manager that isn't as defensive.
+    _cleaned = False
+
     def _setup() -> Any:
         def cleanup() -> None:
+            nonlocal _cleaned
+            if _cleaned:
+                return
+            _cleaned = True
             unregister()
 
         return cleanup

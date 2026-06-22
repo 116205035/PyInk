@@ -248,3 +248,63 @@ def test_use_input_dispose_manual(monkeypatch: pytest.MonkeyPatch) -> None:
     time.sleep(0.1)
     assert received == []
     inst.unmount()
+
+
+def test_use_input_manual_dispose_then_effect_cleanup_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling manual dispose before component unmount must be a no-op on
+    the second invocation (no double-unsubscribe, no exception). This
+    guards against the double-dispose regression where ``dispose()`` and
+    the effect-cleanup path both invoke the same underlying
+    ``dispose_subscribe`` + ``effect_dispose``.
+    """
+    received: list[Key] = []
+    bag: dict[str, object] = {}
+
+    def Counter() -> Element:
+        def on_key(key: Key) -> None:
+            received.append(key)
+
+        def setup() -> None:
+            bag["dispose"] = use_input(on_key)
+
+        effect(setup)
+        return Text("hi")
+
+    def stream() -> Iterator[bytes]:
+        while True:
+            time.sleep(0.02)
+            yield b"z"
+
+    _patch_input(stream(), monkeypatch)
+    stdout = _FakeTTY()
+    stdin = _FakeTTY()
+    inst = render(
+        create_element(Counter),
+        stdout=stdout,
+        stdin=stdin,
+        columns=40,
+        rows=3,
+        exit_on_ctrl_c=False,
+    )
+    # Wait for the subscription to register + deliver at least one key.
+    for _ in range(40):
+        if received:
+            break
+        time.sleep(0.025)
+    assert received, "handler never fired before dispose"
+    received.clear()
+
+    dispose = cast("Callable[[], None]", bag["dispose"])
+    # First call tears down the subscription + the effect binding.
+    dispose()
+    # Second manual call must be a no-op (guard flag is set).
+    dispose()
+    # Wait to confirm no further keys arrive.
+    time.sleep(0.1)
+    assert received == [], "handler still firing after manual dispose"
+
+    # Unmount triggers the effect-cleanup path; because dispose already
+    # ran, this must also be a no-op (no error, no warning).
+    inst.unmount()

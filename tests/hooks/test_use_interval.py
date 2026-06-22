@@ -193,6 +193,40 @@ def test_use_interval_unmount_auto_cleans_up() -> None:
     assert fired == [], "callback fired after unmount"
 
 
+def test_use_interval_manual_dispose_then_effect_cleanup_is_idempotent() -> None:
+    """Calling manual dispose before component unmount must be a no-op on
+    the second invocation. Guards the double-dispose regression where
+    ``combined_dispose`` and the effect-cleanup path both invoke the
+    same underlying ``dispose`` + ``effect_dispose``.
+    """
+    fired: list[int] = []
+    bag: dict[str, object] = {}
+
+    def Comp() -> Element:
+        def setup() -> None:
+            bag["dispose"] = use_interval(lambda: fired.append(1), 20)
+
+        effect(setup)
+        return Text("hi")
+
+    inst = _render_comp(Comp)
+    assert _wait_for(lambda: bool(fired)), "interval never fired before dispose"
+    fired.clear()
+
+    dispose = cast("Callable[[], None]", bag["dispose"])
+    # First call tears down the worker + the effect binding.
+    dispose()
+    # Second manual call must be a no-op (guard flag is already set).
+    dispose()
+    # No more ticks after dispose.
+    time.sleep(0.15)
+    assert fired == [], "callback fired after manual dispose"
+
+    # Unmount triggers the effect-cleanup path; since dispose already ran
+    # this must also be a no-op.
+    inst.unmount()
+
+
 def test_use_interval_multiple_coexist() -> None:
     """Two concurrent intervals each fire independently."""
     a: list[int] = []

@@ -477,6 +477,71 @@ def test_unmount_auto_unregisters_handle() -> None:
     inst2.unmount()
 
 
+def test_use_focus_remount_does_not_leak_original_handle() -> None:
+    """When a focusable component unmounts and a fresh component re-uses
+    the same focus id, the new handle must be the one that receives
+    focus — not a stale handle retained from the first mount.
+
+    Regression guard for the double-dispose / cleanup-overwrite class of
+    bugs: if the first mount's cleanup failed to unregister (or the
+    second mount's register returned a no-op while the first handle
+    lingered), ``focus_next`` would either skip the new handle entirely
+    or land on a detached handle whose ``is_focused`` signal no longer
+    drives any render.
+    """
+    manager_box: dict[str, Any] = {}
+    handle_box: dict[str, Any] = {}
+
+    def Focusable(hid: str) -> Element:
+        def Impl() -> Element:
+            h = use_focus({"id": hid})
+            handle_box[hid] = h
+            return Text(hid)
+
+        return create_element(Impl)
+
+    def App() -> Element:
+        focus = use_focus_manager()
+        manager_box["mgr"] = focus.manager
+        return focus.wrap(Focusable("x"))
+
+    # First mount: registers handle "x" (instance 1).
+    inst = _render_comp(App)
+    _settle()
+    mgr: FocusManager = manager_box["mgr"]
+    first_handle: FocusHandle = handle_box["x"]
+    assert len(mgr.handles.value) == 1
+    assert mgr.handles.value[0] is first_handle
+
+    # Focus it to prove the signal works on the original handle.
+    mgr.focus("x")
+    assert mgr.active_id == "x"
+    assert first_handle.is_focused.value is True
+
+    # Unmount; cleanup must remove the handle.
+    inst.unmount()
+    _settle()
+    assert len(mgr.handles.value) == 0
+
+    # Remount a fresh tree — a brand-new FocusHandle with the same id.
+    inst2 = _render_comp(App)
+    _settle()
+    mgr2: FocusManager = manager_box["mgr"]
+    second_handle: FocusHandle = handle_box["x"]
+    assert second_handle is not first_handle, "expected a fresh FocusHandle on remount"
+    assert len(mgr2.handles.value) == 1
+    assert mgr2.handles.value[0] is second_handle
+
+    # The new handle must be reachable via focus navigation.
+    mgr2.focus_next()
+    assert mgr2.active_id == "x"
+    assert second_handle.is_focused.value is True
+    # The stale handle must NOT have been touched by the second mount's
+    # focus call (its signal is detached from any live render).
+    assert first_handle.is_focused.value is False
+    inst2.unmount()
+
+
 def test_focus_handle_unmount_via_subtree_replacement() -> None:
     """When the active handle is removed, focus clears (no implicit jump)."""
     # We exercise this by directly manipulating the runtime objects —

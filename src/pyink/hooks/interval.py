@@ -140,9 +140,23 @@ def use_interval(
 
     effect_dispose = effect(_setup)
 
+    # A ``_disposed`` flag guards against double-invocation: the returned
+    # dispose is meant to be called manually by the caller *and* is
+    # registered on the component instance for unmount (via the effect
+    # cleanup, which is ``dispose`` itself). Without the guard, calling
+    # the manual dispose and then unmounting would re-enter ``dispose``
+    # and ``effect_dispose`` on already-torn-down state. The flag makes
+    # both entry points truly idempotent — the second call is a no-op.
+    _disposed = False
+
     def combined_dispose() -> None:
+        nonlocal _disposed
+        if _disposed:
+            return
+        _disposed = True
         dispose()
-        effect_dispose()
+        if effect_dispose is not None:
+            effect_dispose()
 
     # The effect already invoked ``_setup`` once synchronously, so
     # ``dispose`` is registered on the ComponentInstance. We also return a
