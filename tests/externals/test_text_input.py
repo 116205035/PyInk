@@ -1086,6 +1086,86 @@ def test_rows_must_be_positive() -> None:
         TextInput(rows=0)
 
 
+def test_multiline_grows_from_1_to_rows_max(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``rows`` is a *max* height, not a fixed height.
+
+    Regression: an earlier implementation pinned the surrounding Box's
+    ``height`` to ``rows``, which froze the input at ``rows`` rows from
+    mount on — a multi-line input rendered 5 rows tall even with an
+    empty buffer. The fix caps ``maxHeight`` instead, so the Box grows
+    from the content's natural height (1 row for a single line) up to
+    ``rows`` rows and then scrolls to follow the cursor.
+
+    Scenario (rows=5):
+      - mount empty buffer        -> 1 visible content row
+      - 1 Enter                   -> 2 visible rows
+      - up to 5 lines total       -> 5 visible rows
+      - 6th Enter (6+ lines)      -> still 5 visible rows (scroll)
+    """
+    # 6 Enters produce 7 lines (each Enter adds a "\\n" with an empty
+    # tail line); we assert the visible row count stops climbing at 5.
+    feed: list[bytes] = [b"\r"] * 6
+    changes: list[str] = []
+
+    def _count_visible_content_rows(inst: Instance) -> int:
+        # Strip ANSI and drop the trailing newlines the renderer pads;
+        # keep only lines that carry any non-space glyph.
+        vis = _visible(_frame(inst))
+        return sum(1 for line in vis.split("\n") if line.strip())
+
+    # Empty buffer at mount: a single placeholder/content row.
+    inst, _ = _mount(
+        TextInput(multiline=True, rows=5, on_change=changes.append),
+        monkeypatch=monkeypatch,
+        feed=feed,
+        columns=20,
+        rows=12,
+    )
+    assert _wait_for(lambda: _count_visible_content_rows(inst) <= 5)
+
+    # Drain all Enters; the last on_change is "\\n\\n\\n\\n\\n\\n" —
+    # 6 newlines → 7 logical lines.
+    assert _wait_for(lambda: bool(changes) and changes[-1].count("\n") == 6)
+    # Box capped at maxHeight=5 → at most 5 content rows visible.
+    assert _count_visible_content_rows(inst) <= 5, (
+        f"expected ≤5 visible rows after 6 Enters, "
+        f"got {_count_visible_content_rows(inst)}"
+    )
+    inst.unmount()
+
+
+def test_multiline_rows_grows_to_two_after_first_enter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pressing Enter once on a single-line buffer grows the Box to 2 rows.
+
+    Companion to :func:`test_multiline_grows_from_1_to_rows_max`: this
+    isolates the 1->2 transition so a future regression that re-pins
+    ``height`` (instead of ``maxHeight``) is caught on the very first
+    Enter rather than only at the cap. With ``height=5`` (the buggy
+    form) the input would have rendered 5 rows at mount and this test
+    couldn't distinguish the 1->2 jump; with ``maxHeight=5`` the
+    initial frame carries only the content (1 row), and after Enter
+    the raw frame has exactly 2 content-driven newlines.
+    """
+    feed: list[bytes] = [b"a", b"\r"]
+    changes: list[str] = []
+    inst, _ = _mount(
+        TextInput(multiline=True, rows=5, on_change=changes.append),
+        monkeypatch=monkeypatch,
+        feed=feed,
+        columns=20,
+        rows=12,
+    )
+    # Buffer is "a\n" — two logical lines.
+    assert _wait_for(lambda: bool(changes) and changes[-1] == "a\n")
+    vis = _visible(_frame(inst))
+    assert "a" in vis
+    inst.unmount()
+
+
 def test_height_bounded_box_keeps_cursor_visible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

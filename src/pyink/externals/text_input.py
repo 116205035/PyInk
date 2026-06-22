@@ -1436,13 +1436,20 @@ def _TextInputImpl(**props: Any) -> Element:
     # Phase 5 scroll routing: the public ``scroll_offset`` signal drives
     # the layout's text painter to slice ``[offset, offset + height)``
     # from the joined buffer, keeping the cursor row on screen as the
-    # user types past the viewport. ``rows`` (when set) additionally
-    # pins the surrounding Box's height so the box never expands past
-    # the viewport — the caller-provided ``box_props.height`` wins over
-    # ``rows`` if both are set (the caller opted into a tighter bound).
+    # user types past the viewport. ``rows`` (when set) caps the
+    # surrounding Box's *max* height so a multi-line input grows from
+    # one row up to ``rows`` rows and then scrolls to follow the
+    # cursor — the caller-provided ``box_props.height`` (or
+    # ``box_props.maxHeight``) wins over ``rows`` if set (the caller
+    # opted into a tighter bound).
     resolved_box_props: dict[str, Any] = dict(box_props)
-    if rows is not None and rows >= 1 and "height" not in resolved_box_props:
-        resolved_box_props["height"] = rows
+    if (
+        rows is not None
+        and rows >= 1
+        and "height" not in resolved_box_props
+        and "maxHeight" not in resolved_box_props
+    ):
+        resolved_box_props["maxHeight"] = rows
     return Box(
         Text(
             render_text,
