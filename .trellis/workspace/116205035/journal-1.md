@@ -204,3 +204,43 @@ Phase 4 complete: 5 PRs adding 3 input externals (TextInput with single+multi-li
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: PyInk TextInput cursor + is_active + overflow cascade fixes
+
+**Date**: 2026-06-22
+**Task**: PyInk TextInput cursor + is_active + overflow cascade fixes
+**Branch**: `main`
+
+### Summary
+
+8-commit bugfix pass on Phase 4 TextInput: (1) cursor_style default bar→block + on_cursor_change API; (2) truncate-end on single-line + multi-line Text leaves + demo viewport rows=30; (3) multi-line height frozen at mount fix (single Text + callable re-evaluates full buffer); (4) cursor SGR leak covering multiple chars (pending_trailing.clear() bug); (5) cursor-aware per-line truncation helpers; (6) is_active reactive (bool|Signal|Callable) + demo focus-gated inputs (root cause: all 4 inputs received every keystroke); (7) submitted overflow root cause via Cursor agent — flex.py _wrapped_width stale after callable renderer re-runs at different measurement width; also added TextInput rows viewport prop + cursor-aware _pyink_scroll vertical clip; (8) mypy/ruff cleanup of test helper signature. Final state: 1134 passed + 22 xfailed, mypy strict + ruff green across 125 source files.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0e61b97` | (see git log) |
+| `1ba5576` | (see git log) |
+| `d507af6` | (see git log) |
+| `bf34457` | (see git log) |
+| `5f59462` | (see git log) |
+| `49a54a9` | (see git log) |
+| `c3c77e6` | (see git log) |
+| `2096035` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
