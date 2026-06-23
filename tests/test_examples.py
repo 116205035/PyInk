@@ -448,6 +448,11 @@ def test_counter_unmount_is_idempotent_after_run() -> None:
         "select-input-multi/multi_select_demo.py",
         "confirm-input/confirm_demo.py",
         "scroll-text/scroll_text_demo.py",
+        "task-list/task_list_demo.py",
+        "gradient/gradient_demo.py",
+        "progress-bar/progress_bar_demo.py",
+        "table/table_demo.py",
+        "big-text/big_text_demo.py",
     ],
 )
 def test_example_file_exists(rel_path: str) -> None:
@@ -733,4 +738,117 @@ def test_scroll_text_example_runs() -> None:
     assert "Line 00" in out
     # The status line reports the current offset; initial value is 0.
     assert "scroll_offset: 0/" in out
+    assert "\x1b[2J" not in out
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 PR1/PR2 — examples for TaskList / Gradient / ProgressBar / Table /
+# BigText externals (animated task list, multi-colour text, looping progress
+# bars, positional + dict-mode tables, ASCII art banners).
+# ---------------------------------------------------------------------------
+
+
+def test_task_list_example_runs() -> None:
+    """TaskList example mounts + paints the done-row checkmarks + spinner."""
+    mod = _load_example_module(
+        "task-list/task_list_demo.py",
+        "pyink_example_task_list",
+    )
+    out = _run_example(
+        mod.TaskListDemo(), columns=48, rows=12, run_seconds=0.3
+    )
+    assert "TaskList demo" in out
+    # The three initial ``done`` rows paint green ``✓`` glyphs on mount.
+    assert "✓" in out
+    # The ``running`` row's label is visible (the spinner animates next to
+    # it on later frames).
+    assert "Run migrations" in out
+    # The pending row's label is also visible.
+    assert "Seed demo data" in out
+    assert "\x1b[2J" not in out
+
+
+def test_gradient_example_runs() -> None:
+    """Gradient example mounts + emits truecolor SGR sequences per character."""
+    mod = _load_example_module(
+        "gradient/gradient_demo.py",
+        "pyink_example_gradient",
+    )
+    out = _run_example(
+        mod.GradientDemo(), columns=60, rows=14, run_seconds=0.2
+    )
+    assert "Gradient demo" in out
+    # The ``Gradient`` external emits a per-character SGR ``38;2;r;g;b``
+    # sequence for truecolour endpoints (``red`` / ``yellow`` / ``green``
+    # all resolve to RGB triples via the named-colour table). Each
+    # character lands inside its own SGR run, so we cannot assert on the
+    # literal ``"PyInk"`` substring (it's split by escape sequences); we
+    # assert on the first endpoint's RGB triple (red = 205, 0, 0) and on
+    # a letter from the headline banner instead.
+    assert "38;2;205;0;0" in out
+    assert "P\x1b[0m\x1b[38;2;" in out or "P\x1b[0m\x1b[1m\x1b[38;2;" in out
+    assert "\x1b[2J" not in out
+
+
+def test_progress_bar_example_runs() -> None:
+    """ProgressBar example mounts + paints the filled character glyph."""
+    mod = _load_example_module(
+        "progress-bar/progress_bar_demo.py",
+        "pyink_example_progress_bar",
+    )
+    out = _run_example(
+        mod.ProgressBarDemo(), columns=48, rows=14, run_seconds=0.3
+    )
+    assert "ProgressBar demo" in out
+    # The default filled character is ``█`` (U+2588 FULL BLOCK); by the
+    # first paint at least one bar should show a non-zero filled cell,
+    # and within a few hundred ms every bar will have swept through
+    # enough values that the glyph appears.
+    assert "█" in out
+    # The ASCII-style bar uses ``=`` as its filled character.
+    assert "=" in out
+    assert "\x1b[2J" not in out
+
+
+def test_table_example_runs() -> None:
+    """Table example mounts + paints both list-mode and dict-mode headers."""
+    mod = _load_example_module(
+        "table/table_demo.py",
+        "pyink_example_table",
+    )
+    out = _run_example(
+        mod.TableDemo(), columns=64, rows=18, run_seconds=0.2
+    )
+    assert "Table demo" in out
+    # ``columns=["Name", "Age", "Role", "Email"]`` headers render bold
+    # in the positional-mode table.
+    assert "Name" in out
+    assert "Email" in out
+    # The dict-mode table resolves the column union (``team`` is only
+    # present on some rows) — its header appears too.
+    assert "team" in out
+    # A data cell value from the positional rows.
+    assert "Samantha" in out
+    assert "\x1b[2J" not in out
+
+
+def test_big_text_example_runs() -> None:
+    """BigText example mounts + paints the block-font banner glyphs."""
+    mod = _load_example_module(
+        "big-text/big_text_demo.py",
+        "pyink_example_big_text",
+    )
+    out = _run_example(
+        mod.BigTextDemo(), columns=44, rows=16, run_seconds=0.2
+    )
+    assert "BigText demo" in out
+    # The ``block`` font uses U+2580-U+259F Unicode block elements; the
+    # ``█`` (U+2588) full-block appears as part of the ``PyInk`` banner
+    # glyphs on at least one row.
+    assert "█" in out
+    # The ``simple`` font banner text (``HELLO``) renders as plain ASCII
+    # — its visible body lands as underscores / pipes. We assert the
+    # banner label appears instead of the literal ``HELLO`` (which is
+    # rendered as glyphs, not as a literal string).
+    assert "simple font" in out
     assert "\x1b[2J" not in out

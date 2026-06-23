@@ -183,6 +183,11 @@ Phase 3 + Phase 4:
 | `TextInput(*, initial_value="", placeholder=None, on_change=None, on_submit=None, on_cursor_change=None, multiline=False, mask=None, max_length=None, color=None, cursor_color=None, cursor_style="block", is_active=True, **box_props)` | Single-line or multi-line text input. Owns three writable signals (`value` / `cursor` / `selection`); Emacs-style editing (Ctrl+A/E/K/U/W), Shift-arrow selection, bracketed-paste, password `mask`, `max_length` truncation. `on_cursor_change(offset)` fires on every cursor move (arrows / typing / edits / programmatic). `cursor_style` defaults to `"block"` (Claude Code feel); `"bar"` / `"underline"` also supported. Phase 4. |
 | `SelectInput(items, *, initial_index=0, on_select=None, on_change=None, multi_select=False, indicator="❯", selected_indicator="✓", unselected_indicator=" ", color=None, selected_color="green", is_active=True, **box_props)` | Keyboard-navigable option list. `ArrowUp`/`Down` or `j`/`k` move the focus; `1`..`9` jump to an index; `Enter` confirms (single-select fires `on_select(value)`, multi-select fires `on_select(list[value])`); `Space` toggles (multi-select only). Phase 4. |
 | `ConfirmInput(on_confirm, on_cancel=None, *, prompt="Confirm?", confirm_key="y", cancel_key="n", require_enter=False, default=None, confirm_label=None, cancel_label=None, color=None, selected_color="green", is_active=True, **box_props)` | Y/N confirmation prompt. Single-key mode (default) fires the callback on the keystroke; `require_enter=True` highlights first, then Enter confirms. Custom `confirm_key` / `cancel_key` (e.g. `q` / `a`) are supported. Phase 4. |
+| `TaskList(tasks, *, spinner_type="dots", spinner_color=None, on_complete=None, **box_props)` | Column of tasks with per-task state icons. `tasks` is `list[TaskItem]` / `Signal[list[TaskItem]]` / `Callable[[], list[TaskItem]]`; per-row icon tracks state (`○` pending, animated `Spinner` running, `✓` done, `✗` error, `⚠` warning). `on_complete(list[TaskItem])` fires once when every task reaches a terminal state. Phase 6. |
+| `Gradient(*children, colors, **text_props)` | Multi-colour truecolor text. Each character of the rendered children is painted with a colour interpolated linearly in RGB space between adjacent `colors` endpoints (named / hex / `rgb(...)` specs; `ansi256(N)` is silently dropped). Style props forwarded to the emitted `Text` leaf. Phase 6. |
+| `ProgressBar(*, value, width=30, character="█", remaining_character="░", color=None, show_percentage=True, **text_props)` | Horizontal progress bar. `value` is `float` / `Signal[float]` / `Callable[[], float]` clamped to `[0.0, 1.0]`; the bar always occupies exactly `width` cells, with `show_percentage=True` appending a fixed-width ` NN%` suffix. Phase 6. |
+| `Table(*, data, columns=None, padding=1, **_props)` | Column-aligned data table. `data` accepts `list[list[str]]` (positional rows; `columns` defaults to `Column 1` / `Column 2` / ...) or `list[dict[str, str]]` (keyed rows; `columns` defaults to the union of keys). Header row is bold. Phase 6. |
+| `BigText(text, *, font="block", align="left", color=None, **_props)` | ASCII art banner text. Two shipped fonts (`block` / `simple`) each cover A-Z + 0-9 + space; lowercase input is auto-uppercased. `align` controls justification within the parent's main axis. Phase 6. |
 
 ### Imperative API (`measure_element`)
 
@@ -225,7 +230,7 @@ decisions behind each delta.
 
 ## Examples
 
-Thirty-one runnable examples live under [`examples/`](./examples), each
+Thirty-six runnable examples live under [`examples/`](./examples), each
 modelled after ink's own examples:
 
 | Example | What it demonstrates | Run |
@@ -259,6 +264,11 @@ modelled after ink's own examples:
 | [`select-input-multi`](./examples/select-input-multi/multi_select_demo.py) | `SelectInput(multi_select=True)` — Space toggles items in/out of a selection set; Enter confirms the whole list. | `python examples/select-input-multi/multi_select_demo.py` |
 | [`confirm-input`](./examples/confirm-input/confirm_demo.py) | `ConfirmInput` external — three Y/N prompts side by side: single-key (default), `require_enter=True`, and custom keys (`q`/`a`). | `python examples/confirm-input/confirm_demo.py` |
 | [`scroll-text`](./examples/scroll-text/scroll_text_demo.py) | `Text.scroll_offset` public prop — manual scroll over a 50-line payload inside a fixed-height Box (Up/Down / PageUp / PageDown / Home / End). | `python examples/scroll-text/scroll_text_demo.py` |
+| [`task-list`](./examples/task-list/task_list_demo.py) | `TaskList` external — 5-task pipeline (3 done + 1 running + 1 pending) advanced by a background thread every 2 s; `on_complete` flips the header to "All tasks complete!". | `python examples/task-list/task_list_demo.py` |
+| [`gradient`](./examples/gradient/gradient_demo.py) | `Gradient` external — `PyInk` headline painted red → yellow → green, plus named / hex / bright-variant multi-colour ramps. | `python examples/gradient/gradient_demo.py` |
+| [`progress-bar`](./examples/progress-bar/progress_bar_demo.py) | `ProgressBar` external — three looping bars at different speeds (slow / slower / fast ASCII-style `=`/`-`), each driven by its own background thread. | `python examples/progress-bar/progress_bar_demo.py` |
+| [`table`](./examples/table/table_demo.py) | `Table` external — positional (`list[list[str]]`) and keyed (`list[dict[str, str]]`) modes side by side, with mixed-key row coverage. | `python examples/table/table_demo.py` |
+| [`big-text`](./examples/big-text/big_text_demo.py) | `BigText` external — `PyInk` rendered in the `block` font (Unicode block elements, green) and `HELLO` in the `simple` font (ASCII, cyan). | `python examples/big-text/big_text_demo.py` |
 
 Most examples wait for `Ctrl+C` (the default `exit_on_ctrl_c=True`).
 Press `Ctrl+C` to quit any of them. The Phase 2 / Phase 3 / Phase 4
