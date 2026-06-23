@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 12
+- **Total Sessions**: 13
 - **Last Active**: 2026-06-23
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~453 | Active |
+| `journal-1.md` | ~487 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 13 | 2026-06-23 | Docs + PyPI 0.1.0 release | `6c508cf`, `db49376` | `main` |
 | 12 | 2026-06-23 | maxHeight content-driven + flexShrink=0 (two-layer fix) | `afe506e`, `15a2a8e` | `main` |
 | 11 | 2026-06-23 | Fix TextInput rows should grow not pin (maxHeight) | `f5f4044` | `main` |
 | 10 | 2026-06-22 | PyInk audit critical fixes (7 Critical findings, 4 PRs) | `a3af670`, `126e5eb`, `5b8932b`, `94b0694` | `main` |

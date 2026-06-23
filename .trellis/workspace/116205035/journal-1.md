@@ -451,3 +451,37 @@ Two-layer fix for multi-line TextInput not growing on Enter. Layer 1 (afe506e): 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 13: Docs + PyPI 0.1.0 release
+
+**Date**: 2026-06-23
+**Task**: Docs + PyPI 0.1.0 release
+**Branch**: `main`
+
+### Summary
+
+PyInk 0.1.0 published to PyPI. Created 4 documentation files (architecture 729 lines, design-decisions 521 lines, api-reference 501 lines, migration-from-textual 545 lines) + moved LAYOUT_ANALYSIS.md to docs/layout-audit.md. README updated with doc links. pyproject.toml expanded with 12 classifiers + project URLs. Build verified (wheel 208KB + sdist 639KB, twine check passed). Published via twine upload — first attempt succeeded despite Windows GBK display crash in twine's rich progress bar; second attempt got 403 (already uploaded). pip install pyink verified working. PyInk is now publicly available at pypi.org/project/pyink.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6c508cf` | (see git log) |
+| `db49376` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
