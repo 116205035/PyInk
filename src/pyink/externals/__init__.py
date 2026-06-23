@@ -15,6 +15,7 @@ from pyink.externals.markdown import DEFAULT_MARKDOWN_THEME, Markdown
 from pyink.externals.select_input import SelectInput
 from pyink.externals.spinner import SPINNERS, Spinner
 from pyink.externals.streaming_text import StreamingText
+from pyink.externals.task_list import TaskItem, TaskList
 from pyink.externals.text_input import TextInput
 
 __all__ = [
@@ -30,5 +31,7 @@ __all__ = [
     "Spinner",
     "StreamingText",
     "StructuredDiff",
+    "TaskItem",
+    "TaskList",
     "TextInput",
 ]
