@@ -28,10 +28,10 @@ classifiers = [
 dependencies = ["wcwidth>=0.2.0"]
 
 [project.urls]
-Homepage = "https://github.com/116205035/PyInk"
-Documentation = "https://github.com/116205035/PyInk#readme"
-Repository = "https://github.com/116205035/PyInk"
-Issues = "https://github.com/116205035/PyInk/issues"
+Homepage = "https://github.com/116205035/ink-python"
+Documentation = "https://github.com/116205035/ink-python#readme"
+Repository = "https://github.com/116205035/ink-python"
+Issues = "https://github.com/116205035/ink-python/issues"
 
 [project.optional-dependencies]
 highlight = ["pygments>=2.14"]
