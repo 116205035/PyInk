@@ -519,3 +519,36 @@ Phase 6 adds 5 externals: TaskList (task status machine pending/running/done/err
 ### Next Steps
 
 - None - task complete
+
+
+## Session 15: Phase 6 examples: 5 demos for task-list/gradient/progress-bar/table/big-text
+
+**Date**: 2026-06-23
+**Task**: Phase 6 examples: 5 demos for task-list/gradient/progress-bar/table/big-text
+**Branch**: `main`
+
+### Summary
+
+5 new examples for Phase 6 externals: task-list (5-task pipeline with state transitions + on_complete), gradient (multi-color RGB interpolation title), progress-bar (3 concurrent animated bars), table (list+dict dual mode), big-text (block+simple font logos). Integration tests: +5 run tests + 5 parametrize entries. README: Externals table +5, Examples index 31→36. Final state: 1347 passed + 22 xfailed, mypy strict + ruff green across 143 source files.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3b0f4ff4` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
