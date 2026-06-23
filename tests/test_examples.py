@@ -833,22 +833,28 @@ def test_table_example_runs() -> None:
 
 
 def test_big_text_example_runs() -> None:
-    """BigText example mounts + paints the block-font banner glyphs."""
+    """BigText example mounts + paints the pyfiglet-rendered banners."""
     mod = _load_example_module(
         "big-text/big_text_demo.py",
         "pyink_example_big_text",
     )
     out = _run_example(
-        mod.BigTextDemo(), columns=44, rows=16, run_seconds=0.2
+        mod.BigTextDemo(), columns=100, rows=40, run_seconds=0.2
     )
     assert "BigText demo" in out
-    # The ``block`` font uses U+2580-U+259F Unicode block elements; the
-    # ``█`` (U+2588) full-block appears as part of the ``PyInk`` banner
-    # glyphs on at least one row.
-    assert "█" in out
-    # The ``simple`` font banner text (``HELLO``) renders as plain ASCII
-    # — its visible body lands as underscores / pipes. We assert the
-    # banner label appears instead of the literal ``HELLO`` (which is
-    # rendered as glyphs, not as a literal string).
-    assert "simple font" in out
+    # The ``block`` font (pyfiglet) renders ``PyInk`` as ASCII art
+    # strokes using ``_|`` characters — assert the signature stroke
+    # pair appears on at least one row.
+    assert "_|" in out
+    # The ``standard`` font banner text (``HELLO``) renders as plain
+    # ASCII — its visible body lands as underscores / pipes. We
+    # assert the banner label appears instead of the literal
+    # ``HELLO`` (which is rendered as glyphs, not as a literal
+    # string).
+    assert "standard font" in out
+    # The ``colors`` cycle on the ``PyInk`` banner paints rows red /
+    # yellow alternately — SGR red (``\x1b[31m``) and yellow
+    # (``\x1b[33m``) should both be present.
+    assert "\x1b[31m" in out
+    assert "\x1b[33m" in out
     assert "\x1b[2J" not in out

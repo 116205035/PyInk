@@ -6,7 +6,6 @@ externals carry heavier dependencies / non-essential surface area and
 stay out of the default namespace).
 """
 
-from pyink.externals.big_text import FONTS as BIG_TEXT_FONTS
 from pyink.externals.big_text import BigText
 from pyink.externals.confirm_input import ConfirmInput
 from pyink.externals.diff import StructuredDiff
@@ -24,7 +23,6 @@ from pyink.externals.task_list import TaskItem, TaskList
 from pyink.externals.text_input import TextInput
 
 __all__ = [
-    "BIG_TEXT_FONTS",
     "BigText",
     "ConfirmInput",
     "DEFAULT_MARKDOWN_THEME",

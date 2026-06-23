@@ -36,7 +36,8 @@ Issues = "https://github.com/116205035/PyInk/issues"
 [project.optional-dependencies]
 highlight = ["pygments>=2.14"]
 markdown = ["markdown-it-py>=3.0"]
-all = ["pyink[highlight,markdown]"]
+big-text = ["pyfiglet>=1.0"]
+all = ["pyink[highlight,markdown,big-text]"]
 dev = [
     "pytest>=7.0",
     "pytest-cov",

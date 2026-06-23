@@ -1,25 +1,24 @@
 """BigText example — ASCII art banner text (Phase 6 PR2).
 
-Reference: ink-big-text's CLI demo. PyInk's ``BigText`` renders
-multi-row ASCII art banners from a small built-in font registry (no
-``cfonts`` / ``pyfiglet`` dependency). Two fonts ship out of the box:
+Reference: ink-big-text's CLI demo. PyInk's ``BigText`` delegates to
+:mod:`pyfiglet` for the glyph data — 300+ FIGlet fonts, multi-row
+output, and full Unicode / ASCII coverage out of the box. The
+hand-rolled font registry that shipped in earlier PRs is gone;
+``pyfiglet`` covers strictly more glyphs and fonts than we could
+ship inline.
 
-* ``"block"`` — chunky Unicode block-element glyphs (``█`` / ``▄`` /
-  ``▀``), 3 rows × 6 cells per glyph,
-* ``"simple"`` — plain ASCII pipes / slashes / underscores, for
-  terminals that mangle Unicode block elements.
+This demo mounts several banners in a column:
 
-Each glyph is rendered as three :func:`Text` leaves stacked in a
-column; multi-character strings are drawn by concatenating glyphs
-horizontally per row.
+* ``"PyInk"`` rendered in the ``block`` font with a two-colour
+  ``colors=["red", "yellow"]`` cycle (matches the ink-big-text demo's
+  red/yellow gradient feel).
+* ``"HELLO"`` rendered in the ``standard`` font, no colour.
+* ``"shadow"`` / ``"digital"`` / ``"banner"`` font showcase, each
+  with a single hue.
+* ``"centered"`` rendered with ``align="center"`` so pyfiglet
+  pre-pads the rows for centring inside ``width=60``.
 
-This demo mounts two banners side by side:
-
-* ``"PyInk"`` rendered in the ``block`` font with a green hue,
-* ``"HELLO"`` rendered in the ``simple`` font with a cyan hue.
-
-Lowercase input is auto-uppercased before lookup (the shipped fonts
-cover ``A-Z`` + ``0-9`` + space).
+Requires ``pip install pyink[big-text]`` (or ``pip install pyfiglet``).
 
 Run::
 
@@ -56,12 +55,20 @@ def BigTextDemo() -> Element:
         use_input(on_key)
 
         return Box(
-            Text("BigText demo", bold=True),
+            Text("BigText demo (pyfiglet)", bold=True),
             Text("Esc / Ctrl+C to quit", dimColor=True),
-            Text("block font (green):", dimColor=True),
-            BigText("PyInk", font="block", color="green"),
-            Text("simple font (cyan):", dimColor=True),
-            BigText("HELLO", font="simple", color="cyan"),
+            Text("block font, colors=['red', 'yellow']:", dimColor=True),
+            BigText("PyInk", font="block", colors=["red", "yellow"]),
+            Text("standard font:", dimColor=True),
+            BigText("HELLO", font="standard"),
+            Text("shadow font (green):", dimColor=True),
+            BigText("shadow", font="shadow", color="green"),
+            Text("digital font (cyan):", dimColor=True),
+            BigText("digital", font="digital", color="cyan"),
+            Text("banner font (magenta):", dimColor=True),
+            BigText("banner", font="banner", color="magenta"),
+            Text("centered, width=60:", dimColor=True),
+            BigText("centered", font="small", align="center", width=60),
             flexDirection="column",
             padding=1,
             borderStyle="round",
@@ -71,7 +78,7 @@ def BigTextDemo() -> Element:
 
 
 def main() -> int:
-    inst = render(BigTextDemo(), columns=44, rows=16)
+    inst = render(BigTextDemo(), columns=100, rows=40)
     try:
         inst.wait_until_exit()
     except KeyboardInterrupt:

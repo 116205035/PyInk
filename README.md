@@ -65,7 +65,8 @@ libraries. Install only what you need:
 pip install pyink                     # core only (no extra deps)
 pip install pyink[highlight]          # + HighlightedCode / StructuredDiff highlighting (Pygments)
 pip install pyink[markdown]           # + Markdown rendering (markdown-it-py)
-pip install pyink[all]                # both — full Phase 3 content surface
+pip install pyink[big-text]           # + BigText ASCII art banners (pyfiglet)
+pip install pyink[all]                # everything — full content surface
 ```
 
 Externals are imported explicitly (`from pyink.externals import
@@ -187,7 +188,7 @@ Phase 3 + Phase 4:
 | `Gradient(*children, colors, **text_props)` | Multi-colour truecolor text. Each character of the rendered children is painted with a colour interpolated linearly in RGB space between adjacent `colors` endpoints (named / hex / `rgb(...)` specs; `ansi256(N)` is silently dropped). Style props forwarded to the emitted `Text` leaf. Phase 6. |
 | `ProgressBar(*, value, width=30, character="█", remaining_character="░", color=None, show_percentage=True, **text_props)` | Horizontal progress bar. `value` is `float` / `Signal[float]` / `Callable[[], float]` clamped to `[0.0, 1.0]`; the bar always occupies exactly `width` cells, with `show_percentage=True` appending a fixed-width ` NN%` suffix. Phase 6. |
 | `Table(*, data, columns=None, padding=1, **_props)` | Column-aligned data table. `data` accepts `list[list[str]]` (positional rows; `columns` defaults to `Column 1` / `Column 2` / ...) or `list[dict[str, str]]` (keyed rows; `columns` defaults to the union of keys). Header row is bold. Phase 6. |
-| `BigText(text, *, font="block", align="left", color=None, **_props)` | ASCII art banner text. Two shipped fonts (`block` / `simple`) each cover A-Z + 0-9 + space; lowercase input is auto-uppercased. `align` controls justification within the parent's main axis. Phase 6. |
+| `BigText(text, *, font="standard", colors=None, align="left", width=None, color=None, **box_props)` | ASCII art banner text via `pyfiglet` (300+ FIGlet fonts). `colors` cycles per-row (e.g. `["red", "yellow"]` paints alternating rows); `align` is pyfiglet's justify; `width` is the render column budget. Lazy-imports `pyfiglet`; raises `ImportError("pip install pyink[big-text]")` without the extra. Phase 6. |
 
 ### Imperative API (`measure_element`)
 
@@ -268,7 +269,7 @@ modelled after ink's own examples:
 | [`gradient`](./examples/gradient/gradient_demo.py) | `Gradient` external — `PyInk` headline painted red → yellow → green, plus named / hex / bright-variant multi-colour ramps. | `python examples/gradient/gradient_demo.py` |
 | [`progress-bar`](./examples/progress-bar/progress_bar_demo.py) | `ProgressBar` external — three looping bars at different speeds (slow / slower / fast ASCII-style `=`/`-`), each driven by its own background thread. | `python examples/progress-bar/progress_bar_demo.py` |
 | [`table`](./examples/table/table_demo.py) | `Table` external — positional (`list[list[str]]`) and keyed (`list[dict[str, str]]`) modes side by side, with mixed-key row coverage. | `python examples/table/table_demo.py` |
-| [`big-text`](./examples/big-text/big_text_demo.py) | `BigText` external — `PyInk` rendered in the `block` font (Unicode block elements, green) and `HELLO` in the `simple` font (ASCII, cyan). | `python examples/big-text/big_text_demo.py` |
+| [`big-text`](./examples/big-text/big_text_demo.py) | `BigText` external — `PyInk` in the `block` font with a red/yellow colour cycle, plus `standard` / `shadow` / `digital` / `banner` font showcase and a centred banner. Requires `pip install pyink[big-text]`. | `python examples/big-text/big_text_demo.py` |
 
 Most examples wait for `Ctrl+C` (the default `exit_on_ctrl_c=True`).
 Press `Ctrl+C` to quit any of them. The Phase 2 / Phase 3 / Phase 4
