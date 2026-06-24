@@ -716,7 +716,24 @@ def layout_root(
     columns: int = 80,
     rows: int | None = None,
 ) -> LayoutNode:
-    """Top-level entry point — lays out ``root`` against the viewport."""
+    """Top-level entry point — lays out ``root`` against the viewport.
+
+    ``rows`` is treated as a **max-rows upper bound**, not a forced
+    height. The root box auto-sizes to its content and only clips when
+    content actually exceeds the cap. This matches the CSS
+    ``maxHeight`` semantics that inner boxes already honour (see
+    ``test_flex.py::test_max_height_allows_content_to_drive_size``) and
+    matches ink's TypeScript behaviour. Callers wanting a forced
+    height pin ``<Box height=N>`` at the root instead — ``style.height``
+    still triggers the ``exactly`` path below.
+
+    Bug context (Jarvis Phase 1): when the render pipeline auto-detected
+    ``rows=terminal.rows`` and passed it down, the old ``exactly`` mode
+    forced the frame to fill the whole screen. Static-output writes
+    above the frame then overflowed the viewport and scrolled, pushing
+    older static lines out of view. With ``at-most`` the frame only
+    claims the rows it actually needs.
+    """
     # Root: width/height defaults to the viewport.
     style = root.style
     avail_w = style.width if style.width is not None else columns
@@ -731,7 +748,10 @@ def layout_root(
         avail_w=avail_w,
         avail_h=avail_h,
         avail_w_mode="exactly",
-        avail_h_mode="exactly" if style.height is not None or rows is not None else "at-most",
+        # ``style.height`` is the only "force exactly N rows" trigger.
+        # ``rows`` (from the render pipeline) is now a max-rows cap —
+        # content fits inside it, the frame no longer stretches to fill.
+        avail_h_mode="exactly" if style.height is not None else "at-most",
     )
     # Apply the root's own margin: offset content by margin.left/top and
     # grow the outer dimensions so the renderer includes the margin band.
@@ -1041,6 +1061,15 @@ def _layout_node(
         node.layout_height = max(node.layout_height, style.min_height)
     if own_h < 0 and style.max_height is not None:
         node.layout_height = min(node.layout_height, max(0, style.max_height))
+    # ``at-most`` avail_h clamp: when the parent handed down an at-most
+    # bound (e.g. the render pipeline's ``rows=N`` max-rows) and this
+    # box auto-sized to its content, the resolved height must still
+    # respect that bound. Without this clamp ``rows=N`` would let
+    # overflowing content grow past the cap (the cap becomes a hint
+    # rather than an upper bound). Mirrors the ``max_height`` clamp
+    # above; ``avail_h > 0`` skips the indeterminate (-1) case.
+    if own_h < 0 and avail_h_mode == "at-most" and avail_h > 0:
+        node.layout_height = min(node.layout_height, max(0, int(avail_h)))
 
     # Aggregate the children's min-content (already populated by the
     # recursive calls above) into this container's ``min_content_main``

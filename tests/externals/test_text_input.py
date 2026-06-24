@@ -1072,8 +1072,12 @@ def test_multiline_renders_each_line_on_its_own_row(
         lambda: "ab" in _visible(_frame(inst))
         and "cd" in _visible(_frame(inst))
     )
-    # More than one newline in the raw frame indicates multi-row layout.
-    assert _wait_for(lambda: _frame(inst).count("\n") >= 2)
+    # At least one newline in the raw frame separates the two content
+    # rows. (Previously this asserted ``>= 2`` newlines, but that count
+    # relied on the old ``rows=N`` semantics padding the frame to N
+    # rows — the layout auto-height fix removed the padding, so the
+    # frame now contains only the content rows themselves.)
+    assert _wait_for(lambda: _frame(inst).count("\n") >= 1)
     inst.unmount()
 
 

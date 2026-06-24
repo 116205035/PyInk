@@ -345,3 +345,96 @@ def test_alt_screen_mode_also_hides_and_restores_cursor() -> None:
     full_written = out.getvalue()
     assert "\x1b[?25h" in full_written
 
+
+# ---------------------------------------------------------------------------
+# Layout auto-height (Issue 3 from Jarvis Phase 1)
+#
+# ``rows`` is now a max-rows upper bound rather than a forced height —
+# the frame fits its content and only clips when content actually
+# exceeds the cap. Lets inline-mode renders claim just the rows they
+# need instead of stretching to fill the whole viewport (which was
+# pushing Static output out of view).
+# ---------------------------------------------------------------------------
+
+
+def test_frame_fits_content_when_rows_exceeds_content() -> None:
+    """``rows=10`` with 1 row of content → frame is 1 row tall, not 10.
+
+    Regression for the "frame fills the viewport" bug: ``layout_root``
+    used to treat ``rows`` as an ``exactly`` constraint, stretching the
+    root box to ``rows`` lines regardless of content.
+    """
+    inst, _ = _render_silent(Text("hi"), columns=20, rows=10)
+    try:
+        # Wait a tick for the initial paint to land.
+        import time
+
+        time.sleep(0.05)
+        # Frame has exactly 1 row of content; no trailing blank rows.
+        frame = inst.current_frame  # type: ignore[attr-defined]
+        assert frame.rstrip() == "hi"
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_frame_fits_multi_row_content_under_rows_cap() -> None:
+    """3 rows of content under ``rows=10`` cap → frame is 3 rows tall."""
+    tree = Box(
+        Text("a"),
+        Text("b"),
+        Text("c"),
+        flexDirection="column",
+    )
+    inst, _ = _render_silent(tree, columns=20, rows=10)
+    try:
+        import time
+
+        time.sleep(0.05)
+        frame = inst.current_frame  # type: ignore[attr-defined]
+        # Frame is exactly "a\nb\nc" — no trailing blank lines padding
+        # out to the rows cap.
+        assert frame.rstrip() == "a\nb\nc"
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_frame_caps_to_rows_when_content_exceeds() -> None:
+    """``rows=2`` with 3 rows of content → frame is capped to 2 rows."""
+    tree = Box(
+        Text("a"),
+        Text("b"),
+        Text("c"),
+        flexDirection="column",
+    )
+    inst, _ = _render_silent(tree, columns=20, rows=2)
+    try:
+        import time
+
+        time.sleep(0.05)
+        frame = inst.current_frame  # type: ignore[attr-defined]
+        # Frame is capped at 2 rows — third content row is clipped.
+        rows = [ln for ln in frame.split("\n") if ln]
+        assert len(rows) == 2
+        assert rows[0] == "a"
+        assert rows[1] == "b"
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_explicit_box_height_still_pins_exactly() -> None:
+    """``<Box height=N>`` continues to pin exactly N rows — only the
+    pipeline-level ``rows`` arg changed semantics."""
+    tree = Box(Text("hi"), height=5)
+    inst, _ = _render_silent(tree, columns=20, rows=10)
+    try:
+        import time
+
+        time.sleep(0.05)
+        frame = inst.current_frame  # type: ignore[attr-defined]
+        # Box pinned to height=5: 1 row of content + 4 trailing blank
+        # rows that pad the box out to its declared height.
+        assert frame.count("\n") == 4  # 5 rows separated by 4 newlines
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
