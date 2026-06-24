@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 17
-- **Last Active**: 2026-06-23
+- **Total Sessions**: 18
+- **Last Active**: 2026-06-24
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~621 | Active |
+| `journal-1.md` | ~656 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 18 | 2026-06-24 | Fix Jarvis Phase 1 integration bugs (cursor hide / placeholder cursor / layout max-rows) | `451a8aa`, `7260276`, `3cde0cf` | `main` |
 | 17 | 2026-06-23 | Rename pyink to ink + PyPI name exploration (deferred) | `95bb1b2`, `597680c` | `main` |
 | 16 | 2026-06-23 | BigText upgrade: pyfiglet + colors prop | `5758507` | `main` |
 | 15 | 2026-06-23 | Phase 6 examples: 5 demos for task-list/gradient/progress-bar/table/big-text | `3b0f4ff4` | `main` |

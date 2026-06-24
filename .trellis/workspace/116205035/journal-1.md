@@ -619,3 +619,38 @@ Renamed Python package from pyink to ink (src/pyink/ → src/ink/, ~150 files im
 ### Next Steps
 
 - None - task complete
+
+
+## Session 18: Fix Jarvis Phase 1 integration bugs (cursor hide / placeholder cursor / layout max-rows)
+
+**Date**: 2026-06-24
+**Task**: Fix Jarvis Phase 1 integration bugs (cursor hide / placeholder cursor / layout max-rows)
+**Branch**: `main`
+
+### Summary
+
+Fixed three blockers Jarvis Phase 1 hit when integrating PyInk's inline TUI mode. (1) pipeline.render() now hides the system cursor on inline-mode mount and restores it on exit — the blinking terminal cursor used to sit on top of PyInk's own cursors because _HIDE_CURSOR only fired inside enter_alternate_screen. (2) TextInput's empty-buffer placeholder rendering now lands the block/bar/underline cursor on the placeholder's first character (column 0) instead of trailing it. (3) layout_root treats render()'s rows arg as a max-rows upper bound rather than a forced height — frame now fits its content and only clips when content exceeds the cap, so Static output above the frame no longer overflows the viewport. <Box height=N> still pins exactly. Pre-existing instance.py / session-start.py / ISSUES-from-jarvis-phase1.md changes stashed (not part of this task).
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `451a8aa` | (see git log) |
+| `7260276` | (see git log) |
+| `3cde0cf` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
