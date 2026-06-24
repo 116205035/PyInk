@@ -19,6 +19,9 @@ from io import StringIO
 from pathlib import Path
 
 
+_BACKSLASH = "\\"  # module-level so f-string expression stays backslash-free (Py<3.12)
+
+
 def _normalize_windows_shell_path(path_str: str) -> str:
     """Normalize Unix-style shell paths to real Windows paths.
 
@@ -47,19 +50,19 @@ def _normalize_windows_shell_path(path_str: str) -> str:
     m = re.match(r"^/([A-Za-z])/(.*)", p)
     if m:
         drive, rest = m.group(1).upper(), m.group(2)
-        return f"{drive}:\\{rest.replace('/', '\\')}"
+        return f"{drive}:\\{rest.replace('/', _BACKSLASH)}"
 
     # Cygwin style: /cygdrive/c/Users/...
     m = re.match(r"^/cygdrive/([A-Za-z])/(.*)", p)
     if m:
         drive, rest = m.group(1).upper(), m.group(2)
-        return f"{drive}:\\{rest.replace('/', '\\')}"
+        return f"{drive}:\\{rest.replace('/', _BACKSLASH)}"
 
     # WSL mounted drive (sometimes leaked into env): /mnt/c/Users/...
     m = re.match(r"^/mnt/([A-Za-z])/(.*)", p)
     if m:
         drive, rest = m.group(1).upper(), m.group(2)
-        return f"{drive}:\\{rest.replace('/', '\\')}"
+        return f"{drive}:\\{rest.replace('/', _BACKSLASH)}"
 
     return path_str
 
