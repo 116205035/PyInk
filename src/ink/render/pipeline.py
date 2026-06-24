@@ -34,7 +34,7 @@ from ink.hooks._runtime import (
     _set_current_instance,
 )
 from ink.render.instance import Instance, _FpsThrottle
-from ink.render.terminal import Terminal
+from ink.render.terminal import _HIDE_CURSOR, _SHOW_CURSOR, Terminal
 
 __all__ = ["RenderOptions", "render"]
 
@@ -139,6 +139,9 @@ def render(
     alternate_screen:
         Enter the terminal's alternate screen buffer on mount and exit
         it on unmount. Default ``False`` (inline mode, PRD Decision 3).
+        In both modes the system cursor is hidden on mount and restored
+        on unmount — PyInk renders its own cursors, so the terminal's
+        blinking cursor would be redundant.
     exit_on_ctrl_c:
         Treat ``SIGINT`` as a request to call :meth:`Instance.unmount`.
         Default ``True``. Disable to drive the lifecycle from Python
@@ -199,6 +202,25 @@ def render(
     # Optional alternate screen.
     if alternate_screen:
         terminal.enter_alternate_screen()
+
+    # Hide the system cursor on mount — PyInk renders its own cursors
+    # (TextInput block cursor, Spinner animation, …) so the terminal's
+    # blinking cursor is redundant and visually noisy.
+    # ``enter_alternate_screen`` already hides the cursor as part of the
+    # alt-screen swap and ``exit_alternate_screen`` restores it; inline
+    # mode (the default) never did, which left users seeing two cursors
+    # until exit. The inline-mode-only hide + restore here keeps alt
+    # mode emitting exactly one of each sequence (preserves the count
+    # contract asserted in ``test_alt_screen_emits_hide_cursor_only_once``).
+    if not alternate_screen:
+        terminal.write(_HIDE_CURSOR)
+        terminal.flush()
+
+        def _restore_cursor() -> None:
+            terminal.write(_SHOW_CURSOR)
+            terminal.flush()
+
+        inst.on_exit(_restore_cursor)
 
     # Build + start the render loop (initial paint runs synchronously).
     inst._start_render_loop()

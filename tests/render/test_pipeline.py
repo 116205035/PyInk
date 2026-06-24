@@ -297,3 +297,51 @@ def test_render_with_newline_component() -> None:
     assert "title" in written
     assert "body" in written
     inst.unmount()  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# System cursor hide / restore (Issue 1 from Jarvis Phase 1)
+# ---------------------------------------------------------------------------
+
+
+def test_inline_mode_hides_system_cursor_on_mount() -> None:
+    """Inline mode (the default) emits ``\\x1b[?25l`` so the terminal's
+    blinking cursor doesn't sit on top of PyInk's own cursors.
+
+    Regression: inline mode used to only hide the cursor when
+    ``alternate_screen=True`` because the hide sequence lived inside
+    ``enter_alternate_screen``. The cursor is now hidden unconditionally
+    on mount.
+    """
+    inst, out = _render_silent(Text("hi"), columns=20, rows=2)
+    try:
+        written = out.getvalue()
+        assert "\x1b[?25l" in written
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_cursor_restored_on_unmount_in_inline_mode() -> None:
+    """After unmount the system cursor is restored (``\\x1b[?25h``)."""
+    inst, out = _render_silent(Text("hi"), columns=20, rows=2)
+    inst.unmount()  # type: ignore[attr-defined]
+    written = out.getvalue()
+    assert "\x1b[?25h" in written
+
+
+def test_alt_screen_mode_also_hides_and_restores_cursor() -> None:
+    """Alt-screen mode continues to hide + restore the cursor (it always
+    did via ``enter_alternate_screen`` / ``exit_alternate_screen``; the
+    new inline-mode hide doesn't affect alt mode)."""
+    inst, out = _render_silent(
+        Text("hi"), columns=20, rows=2, alternate_screen=True
+    )
+    try:
+        mount_written = out.getvalue()
+        # At least one hide sequence on mount.
+        assert "\x1b[?25l" in mount_written
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+    full_written = out.getvalue()
+    assert "\x1b[?25h" in full_written
+
