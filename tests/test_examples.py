@@ -632,8 +632,19 @@ def test_text_input_example_runs() -> None:
     # in the active-focus status line.
     assert "Active: name" in out
     # The placeholder on the focused input is visible (the buffer is
-    # empty).
-    assert "Type your name" in out
+    # empty). The block cursor sits on the placeholder's first
+    # character ("T"), so the visible text after stripping ANSI is the
+    # full placeholder string — but the raw frame wraps "T" in
+    # inverse-video SGR codes, splitting the literal substring. Assert
+    # against the ANSI-stripped output.
+    import re
+
+    visible = re.sub(
+        r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)",
+        "",
+        out,
+    )
+    assert "Type your name" in visible
     assert "\x1b[2J" not in out
 
 

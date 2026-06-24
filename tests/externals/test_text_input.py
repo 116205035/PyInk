@@ -299,6 +299,86 @@ def test_placeholder_replaced_after_first_char(
     inst2.unmount()
 
 
+# ---------------------------------------------------------------------------
+# Empty-buffer placeholder cursor (Issue 2 from Jarvis Phase 1)
+#
+# Cursor must sit at column 0 of the placeholder, not at the end. For
+# block / underline the cursor lives *on* the first character of the
+# placeholder (matches ink's TypeScript behaviour); for bar the cursor
+# is its own 1-cell slot at column 0 with the placeholder trailing.
+# ---------------------------------------------------------------------------
+
+
+def test_block_cursor_lands_on_placeholder_first_char(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Block cursor at column 0 of empty buffer + placeholder: the
+    inverse-video SGR run wraps the first character of the placeholder,
+    not a trailing space. Regression for the cursor-after-placeholder bug."""
+    inst, _ = _mount(
+        TextInput(placeholder="name"), monkeypatch=monkeypatch
+    )
+    try:
+        def predicate() -> bool:
+            frame = _frame(inst)
+            # The inverse sequence (\x1b[7m) wraps the first character
+            # "n"; the rest of the placeholder ("ame") follows as dim
+            # text. Old buggy behaviour produced
+            # "name\x1b[7m \x1b[0m" (inverse space trailing the
+            # placeholder).
+            return (
+                "\x1b[7mn\x1b[0m" in frame
+                and "ame" in frame
+                and not frame.rstrip().endswith("\x1b[7m \x1b[0m")
+            )
+
+        assert _wait_for(predicate), (
+            f"expected cursor on first char of placeholder; got {_frame(inst)!r}"
+        )
+    finally:
+        inst.unmount()
+
+
+def test_bar_cursor_sits_before_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bar cursor at column 0 of empty buffer + placeholder: the bar's
+    inverse-space cell sits *before* the placeholder text, not after."""
+    inst, _ = _mount(
+        TextInput(placeholder="name", cursor_style="bar"),
+        monkeypatch=monkeypatch,
+    )
+    try:
+        def predicate() -> bool:
+            frame = _frame(inst)
+            # Bar cursor = inverse space at column 0; placeholder trails.
+            return frame.lstrip().startswith("\x1b[7m \x1b[0m")
+
+        assert _wait_for(predicate), (
+            f"expected bar cursor before placeholder; got {_frame(inst)!r}"
+        )
+    finally:
+        inst.unmount()
+
+
+def test_underline_cursor_marks_placeholder_first_char(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Underline cursor at column 0 of empty buffer + placeholder: the
+    first character of the placeholder carries the underline SGR run."""
+    inst, _ = _mount(
+        TextInput(placeholder="name", cursor_style="underline"),
+        monkeypatch=monkeypatch,
+    )
+    try:
+        def predicate() -> bool:
+            frame = _frame(inst)
+            # Underline SGR wraps the first char "n"; the rest of the
+            # placeholder follows as dim text.
+            return "\x1b[4mn\x1b[0m" in frame and "ame" in frame
+
+        assert _wait_for(predicate), (
+            f"expected underline on first char of placeholder; got {_frame(inst)!r}"
+        )
+    finally:
+        inst.unmount()
+
+
+
 def test_mask_renders_asterisks(monkeypatch: pytest.MonkeyPatch) -> None:
     inst, _ = _mount(
         TextInput(initial_value="secret", mask="*"), monkeypatch=monkeypatch

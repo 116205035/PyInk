@@ -1301,15 +1301,32 @@ def _TextInputImpl(**props: Any) -> Element:
         cur_cursor = cursor.value
         cur_sel = selection.value
 
-        # Empty buffer with placeholder: render the placeholder on the
-        # first row and the cursor at column 0, suppressing multi-line
-        # logic entirely.
+        # Empty buffer with placeholder: render the cursor at column 0
+        # (on the placeholder's first character for block/underline, or
+        # before the placeholder for bar) and the rest of the placeholder
+        # as dim text. Routing this through the same ``_cursor_cell``
+        # helper used by the editing paths keeps CJK / wide-char cursor
+        # cells aligned with their normal-editing appearance.
         if not cur_value and placeholder:
-            cursor_cell = _cursor_cell(
-                cursor_style, char="", cursor_color=cursor_color
-            )
             scroll_offset_sig.value = 0
-            return [apply_style(placeholder, dimColor=True) + cursor_cell]
+            if cursor_style == "bar":
+                # Bar cursor sits in its own 1-cell slot at column 0;
+                # placeholder trails it in dim.
+                cursor_cell = _cursor_cell(
+                    cursor_style, char="", cursor_color=cursor_color
+                )
+                return [cursor_cell + apply_style(placeholder, dimColor=True)]
+            # block / underline: cursor lives *on* the first character
+            # of the placeholder (matches ink's TypeScript behaviour).
+            # The outer ``and placeholder`` guard promises a non-empty
+            # string here, so ``placeholder[0]`` is always safe.
+            first = placeholder[0]
+            rest = placeholder[1:]
+            cursor_cell = _cursor_cell(
+                cursor_style, char=first, cursor_color=cursor_color
+            )
+            tail = apply_style(rest, dimColor=True) if rest else ""
+            return [cursor_cell + tail]
 
         # Width available for per-line truncation. We pre-truncate each
         # rendered line so the cursor cell is preserved when the line
