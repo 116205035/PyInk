@@ -299,7 +299,17 @@ class Instance:
         self.throttle.schedule(self._paint_now)
 
     def _paint_now(self) -> None:
-        """Lay out + paint + diff-write one frame immediately."""
+        """Lay out + paint + diff-write one frame immediately.
+
+        The entire body runs under ``self._lock`` so concurrent calls
+        (e.g. the kernel thread's ``write_static`` racing the throttle
+        thread's scheduled repaint) cannot interleave their stdout
+        writes. Without this serialization two ``_paint_now`` invocations
+        can each emit a ``write_diff`` based on a stale ``prev_frame``
+        while the cursor is parked at a different row, corrupting the
+        scrollback / static region — the root cause of the
+        "history disappears after streaming ends" bug.
+        """
         with self._lock:
             if self._unmounted:
                 return
@@ -309,8 +319,28 @@ class Instance:
             rows = self._resolve_rows()
             static_dirty = self._static_dirty
             static_chunks = list(self.static_lines) if static_dirty else []
-        if static_dirty and static_chunks:
-            # Compute the new frame first so we can repaint in one pass.
+            if static_dirty and static_chunks:
+                # Compute the new frame first so we can repaint in one pass.
+                if mounted is None:
+                    new_frame = ""
+                else:
+                    try:
+                        layout_tree = layout(mounted, columns=cols, rows=rows)
+                        new_frame = render_layout_to_string(layout_tree)
+                    except Exception:  # pragma: no cover
+                        return
+                # Phase 2 PR7 — bump the layout epoch so ``use_box_metrics``
+                # computeds refresh against the just-painted measurements.
+                bump_layout_epoch()
+                static_text = "".join(static_chunks)
+                self._flush_static_and_frame(prev_frame, new_frame, static_text)
+                if not self._unmounted:
+                    self.static_lines.clear()
+                    self._static_dirty = False
+                    self.current_frame = new_frame
+                    self.columns = cols
+                    self.rows = rows if rows is not None else 0
+                return
             if mounted is None:
                 new_frame = ""
             else:
@@ -318,43 +348,21 @@ class Instance:
                     layout_tree = layout(mounted, columns=cols, rows=rows)
                     new_frame = render_layout_to_string(layout_tree)
                 except Exception:  # pragma: no cover
+                    # A broken layout must not blank the screen.
                     return
-            # Phase 2 PR7 — bump the layout epoch so ``use_box_metrics``
-            # computeds refresh against the just-painted measurements.
-            bump_layout_epoch()
-            static_text = "".join(static_chunks)
-            self._flush_static_and_frame(prev_frame, new_frame, static_text)
-            with self._lock:
-                if not self._unmounted:
-                    self.static_lines.clear()
-                    self._static_dirty = False
-                    self.current_frame = new_frame
-                    self.columns = cols
-                    self.rows = rows if rows is not None else 0
-            return
-        if mounted is None:
-            new_frame = ""
-        else:
-            try:
-                layout_tree = layout(mounted, columns=cols, rows=rows)
-                new_frame = render_layout_to_string(layout_tree)
-            except Exception:  # pragma: no cover
-                # A broken layout must not blank the screen.
+                # Phase 2 PR7 — bump after the layout pass so ``use_box_metrics``
+                # computeds refresh against the just-painted measurements. We
+                # bump here (inside the ``else`` branch) so a ``mounted is None``
+                # frame doesn't perturb subscribers; the no-op frame still has
+                # measurements from the previous successful layout.
+                bump_layout_epoch()
+            if prev_frame == new_frame and prev_frame:
                 return
-            # Phase 2 PR7 — bump after the layout pass so ``use_box_metrics``
-            # computeds refresh against the just-painted measurements. We
-            # bump here (inside the ``else`` branch) so a ``mounted is None``
-            # frame doesn't perturb subscribers; the no-op frame still has
-            # measurements from the previous successful layout.
-            bump_layout_epoch()
-        if prev_frame == new_frame and prev_frame:
-            return
-        if not prev_frame:
-            write_diff(None, new_frame, self.stdout)
-        else:
-            write_diff(prev_frame, new_frame, self.stdout)
-        self.stdout.flush()
-        with self._lock:
+            if not prev_frame:
+                write_diff(None, new_frame, self.stdout)
+            else:
+                write_diff(prev_frame, new_frame, self.stdout)
+            self.stdout.flush()
             if not self._unmounted:
                 self.current_frame = new_frame
                 self.columns = cols
