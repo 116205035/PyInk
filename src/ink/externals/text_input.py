@@ -868,10 +868,22 @@ def _TextInputImpl(**props: Any) -> Element:
     multiline: bool = props["multiline"]
     rows: int | None = props["rows"]
     box_props: dict[str, Any] = props["box_props"]
+    # Optional external ``value`` signal — when supplied, the component
+    # writes its edits into this signal instead of an internal one, so
+    # the caller can clear the buffer after a submit (or otherwise
+    # mutate it programmatically). When ``None`` (default), the
+    # component owns its own internal signal — same as before.
+    value_signal: Signal[str] | None = props.get("value_signal")
 
     # Initial cursor sits at end of the initial value — matches
     # ink-text-input and the common "open input, type to append" UX.
-    value: Signal[str] = signal(initial_value)
+    # When the caller supplied an external ``value`` signal we adopt it
+    # as-is (initial_value is ignored for the buffer, but the cursor
+    # still seeds at ``len(initial_value)`` for backward compatibility).
+    if value_signal is not None:
+        value: Signal[str] = value_signal
+    else:
+        value = signal(initial_value)
     cursor: Signal[int] = signal(len(initial_value))
     selection: Signal[tuple[int, int] | None] = signal(None)
 
@@ -1493,6 +1505,7 @@ def TextInput(
     cursor_color: str | None = None,
     cursor_style: CursorStyle = "block",
     is_active: bool | Signal[bool] | Callable[[], bool] = True,
+    value_signal: Signal[str] | None = None,
     **box_props: Any,
 ) -> Element:
     """Create a single-line or multi-line text input.
@@ -1590,6 +1603,18 @@ def TextInput(
         input), use reactive props such as
         ``color=lambda: "gray" if not focused else None`` rather than
         relying on ``is_active`` to re-render the component.
+    value_signal:
+        Optional external :class:`Signal` ``[str]`` to use as the
+        component's value buffer. When supplied, the component writes
+        its edits into this signal instead of an internal one, so the
+        caller can clear the buffer after a submit (or otherwise
+        mutate it programmatically) by writing
+        ``value_signal.value = ""``. When ``None`` (default), the
+        component owns its own internal signal — same as before. The
+        cursor and selection state remain internal regardless. The
+        ``initial_value`` is honoured only when this is ``None``;
+        when ``value_signal`` is provided the buffer starts at that
+        signal's current value.
     **box_props:
         Forwarded to the wrapping :func:`Box` (``padding``,
         ``borderStyle``, ``width``, …).
@@ -1683,4 +1708,5 @@ def TextInput(
         multiline=multiline,
         rows=rows,
         box_props=box_props,
+        value_signal=value_signal,
     )
