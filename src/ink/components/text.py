@@ -26,6 +26,16 @@ Supported ``props``:
   the multi-line :func:`ink.externals.TextInput` cursor-follow
   viewport drives, and application code can use it directly to scroll
   any oversized text payload inside a height-constrained Box.
+* ``flushBackgroundToWidth`` — when ``True``, the ``backgroundColor``
+  spans the text leaf's full layout width (not just the visible text
+  cells). Default ``False`` preserves the legacy behaviour (bg only
+  covers the text). Path-A fix for the "user-message bg only covers
+  the text" / "bg SGR leaks onto sibling rows after soft-wrap" bugs.
+  Each affected row carries its own ``open + reset`` SGR pair so the
+  closing reset is never stripped by ``rstrip`` (the bug behind the
+  SGR leak). Use this for block-level surfaces that visually fill a
+  row — e.g. CC-style user-message bands — and leave it ``False`` for
+  inline coloured tokens.
 """
 
 from __future__ import annotations
@@ -52,7 +62,8 @@ def Text(*children: Any, **props: Any) -> Element:
     Recognised keyword props (all optional): ``color``,
     ``backgroundColor``, ``bold``, ``italic``, ``underline``,
     ``strikethrough``, ``inverse``, ``dimColor``, ``wrap``,
-    ``scroll_offset``. See module docstring for semantics. Unrecognised
-    props are forwarded verbatim — the renderer ignores unknown keys.
+    ``scroll_offset``, ``flushBackgroundToWidth``. See module docstring
+    for semantics. Unrecognised props are forwarded verbatim — the
+    renderer ignores unknown keys.
     """
     return create_element("text", *children, **props)

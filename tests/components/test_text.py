@@ -149,6 +149,87 @@ def test_text_background_color_ansi256() -> None:
 
 
 # ---------------------------------------------------------------------------
+# flushBackgroundToWidth (Path-A fix) — bg spans full layout width
+# ---------------------------------------------------------------------------
+
+
+def test_text_flush_background_to_width_pads_to_layout_width() -> None:
+    """``flushBackgroundToWidth=True`` pads the bg to the leaf's layout width.
+
+    Regression test for the "user-message bg only covers the text" bug:
+    legacy behaviour put the bg SGR around the visible text only, so on
+    a 30-column layout the band stopped at column 2 (the text's width).
+    Path-A fix registers a row-level bg that ``to_string`` pads to the
+    leaf's full layout width.
+    """
+    out = render_to_string(
+        Text("hi", backgroundColor="red", flushBackgroundToWidth=True)
+    )
+    # Layout width is the default 80 columns; the bg band now spans
+    # the full row. Visible width is 2 chars + 78 spaces of padding.
+    assert out.startswith(f"{ESC}[41mhi")
+    assert out.endswith(f"{ESC}[0m")
+    # The reset is anchored to the row's end — no second line, no leak.
+    assert "\n" not in out
+
+
+def test_text_flush_background_to_width_each_row_self_closes() -> None:
+    """Multi-line wrapped text self-closes each row's bg SGR.
+
+    Regression test for the "SGR leak onto sibling rows" bug: legacy
+    behaviour wrapped the whole padded string with one open + reset;
+    when the layout soft-wrapped that string the closing reset ended
+    up on a trailing-whitespace cell that ``rstrip`` then dropped,
+    leaving the bg SGR open for whatever the renderer painted next.
+    Path-A fix gives each visible row its own open + reset pair.
+    """
+    long_text = "word " * 12  # 60 chars; wraps at 20 cols
+    out = render_to_string(
+        Text(long_text, backgroundColor="red", flushBackgroundToWidth=True),
+        columns=20,
+    )
+    lines = out.split("\n")
+    # Every line carries its own open + reset pair.
+    for line in lines:
+        assert line.startswith(f"{ESC}[41m")
+        assert line.endswith(f"{ESC}[0m")
+
+
+def test_text_flush_background_to_width_preserves_foreground_color() -> None:
+    """Foreground colour survives the row-level bg wrap."""
+    out = render_to_string(
+        Text(
+            "hi",
+            color="blue",
+            backgroundColor="red",
+            flushBackgroundToWidth=True,
+        )
+    )
+    # The open sequence runs the foreground colour first, then the bg.
+    assert f"{ESC}[34m" in out  # blue foreground
+    assert f"{ESC}[41m" in out  # red background
+    assert "hi" in out
+
+
+def test_box_flush_background_to_width_spans_interior() -> None:
+    """Box with ``flushBackgroundToWidth`` paints the full interior width."""
+    tree = Box(
+        Text("child"),
+        backgroundColor="red",
+        width=10,
+        alignSelf="flex-start",
+        flushBackgroundToWidth=True,
+    )
+    out = render_to_string(tree)
+    # 10 cells of bg. The row carries open + content + reset spanning
+    # the box's interior width.
+    assert out.startswith(f"{ESC}[41m")
+    assert out.endswith(f"{ESC}[0m")
+    # No mid-row reset before the trailing one.
+    assert out.count(f"{ESC}[0m") == 1
+
+
+# ---------------------------------------------------------------------------
 # Style toggles
 # ---------------------------------------------------------------------------
 

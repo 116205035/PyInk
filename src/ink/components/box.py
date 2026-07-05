@@ -27,6 +27,15 @@ Supported ``props`` come in two groups:
   matching ``…DimColor`` family, and the four ``borderTop`` /
   ``borderRight`` / ``borderBottom`` / ``borderLeft`` visibility flags.
   ``backgroundColor`` paints the box interior.
+  ``flushBackgroundToWidth`` (Path-A fix, default ``False``) — when
+  ``True``, the ``backgroundColor`` spans the box's full layout width
+  even on rows that contain text leaves (legacy behaviour only
+  covered the text cells on those rows because the per-cell fill
+  bailed on non-empty cells). Each affected row carries its own
+  ``open + reset`` SGR pair so the closing reset is never stripped by
+  ``rstrip`` (the bug behind the SGR leak onto sibling rows after a
+  soft-wrap). Block-level surfaces (CC-style user-message bands) opt
+  in; inline coloured tokens leave it ``False``.
 """
 
 from __future__ import annotations

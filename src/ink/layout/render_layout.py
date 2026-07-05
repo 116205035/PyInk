@@ -89,6 +89,13 @@ class _Grid:
         # min-contents > container main axis — see
         # :func:`_distribute_main`'s overflow escape hatch).
         self._clip_stack: list[tuple[int, int, int, int]] = []
+        # Row-level background fills (Path-A fix). Maps a row index to
+        # ``(x1, x2, bg_open_sgr, bg_reset_sgr)``; :meth:`to_string`
+        # applies the opener + reset around the row's visible content
+        # so the bg spans the full layout width without leaking to
+        # sibling rows. See :meth:`mark_row_background` for the
+        # rationale (single open+reset per row vs. cell-level chaining).
+        self._row_backgrounds: dict[int, tuple[int, int, str, str]] = {}
 
     @property
     def width(self) -> int:
@@ -211,13 +218,15 @@ class _Grid:
                     cursor += 2
 
     def fill_row(self, x: int, y: int, width: int, payload: str) -> None:
-        """Fill ``width`` cells of row ``y`` starting at column ``x``.
+        """Fill ``width`` empty cells of row ``y`` starting at column ``x``.
 
-        Used by the background painter. The payload is expected to span
-        exactly ``width`` visible cells (one ANSI open + ``width``
+        Used by the background painter for the *empty-cell* region of a
+        Box's interior — text leaves and border edges already carry their
+        own colours via :func:`apply_style`. The payload is expected to
+        span exactly ``width`` visible cells (one ANSI open + ``width``
         spaces + reset). If any cell in the span was already written to
-        (text leaf or border), the fill is skipped — the inheriting
-        text already carries the background colour via ``apply_style``.
+        (text leaf or border), the fill is skipped — the inheriting text
+        already carries the background colour via ``apply_style``.
         """
         if width <= 0:
             return
@@ -243,6 +252,58 @@ class _Grid:
         for i in range(1, width):
             row[x + i] = ""
 
+    def mark_row_background(
+        self,
+        x: int,
+        y: int,
+        width: int,
+        bg_open: str,
+        bg_reset: str,
+    ) -> None:
+        """Mark ``width`` cells of row ``y`` as carrying a background fill.
+
+        Path-A fix for the "background only covers text width" /
+        "background leaks to next line" bugs. Instead of relying on
+        :func:`apply_style` to wrap each cell's text with the bg SGR
+        (which breaks when the layout soft-wraps the styled string
+        and the closing reset ends up on a wrapped trailing-whitespace
+        line that ``rstrip`` then drops), the box / text-leaf background
+        painter records a *row-level* bg that :meth:`to_string` applies
+        when serialising each row.
+
+        The bg is applied as: ``bg_open`` + the row's existing visible
+        content (cells ``x..x+width-1``) padded to ``width`` visible
+        cells + ``bg_reset``. Each visible row thus carries its own
+        open + reset pair, so:
+
+        * the bg spans the full layout width (not just the text width);
+        * a wrapped trailing-whitespace line cannot lose its reset
+          (the reset is anchored to the row's last byte, not to a
+          cell that ``rstrip`` might erase);
+        * sibling rows painted afterwards never inherit the bg SGR
+          because each row's reset lives at the row's end.
+
+        ``bg_open`` is the full SGR opener (e.g. ``\\x1b[48;2;r;g;bm``)
+        and ``bg_reset`` is the full reset (``\\x1b[0m``). The caller
+        pre-computes both so this method is a pure bookkeeping write.
+        """
+        if width <= 0 or not bg_open:
+            return
+        clip = self._active_clip()
+        if clip is not None:
+            cx1, cy1, cx2, cy2 = clip
+            if y < cy1 or y > cy2 or (x + width - 1) < cx1 or x > cx2:
+                return
+        # Ensure capacity so the painter can read existing cells when
+        # it later decides whether a span already has visible content.
+        self._ensure_capacity(y, x + width)
+        # Multiple backgrounds on the same row (e.g. a parent Box bg
+        # plus a child Text bg) — last write wins, which matches the
+        # CSS-style "nearest ancestor" intuition: children paint after
+        # parents, so a child Text's bg supersedes the parent Box's bg
+        # for the span it actually covers.
+        self._row_backgrounds[y] = (x, x + width, bg_open, bg_reset)
+
     def to_string(self) -> str:
         if self._height == 0:
             return ""
@@ -255,7 +316,60 @@ class _Grid:
             # Drop wide-tail sentinels before joining; rstrip trailing
             # whitespace per ink behaviour.
             joined = "".join(cell for cell in row if cell != self._WIDE_TAIL)
-            lines.append(joined.rstrip())
+            bg = self._row_backgrounds.get(y)
+            if bg is not None:
+                x1, x2, bg_open, bg_reset = bg
+                # The bg band spans ``[x1, x2)`` visible cells. The
+                # opener goes right before the row's first visible
+                # byte (skipping any leading whitespace cells that sit
+                # *inside* the bg span — those keep the default bg,
+                # which the opener would otherwise stain). The reset
+                # sits at the row's end after padding the visible
+                # content to the full span width, so the bg fills the
+                # entire layout-granted width.
+                #
+                # Why row-level (not cell-level): the bg SGR is a
+                # terminal-mode switch — once ``bg_open`` runs, every
+                # subsequent byte inherits the bg until ``bg_reset``
+                # runs. Anchoring the reset to the row's last byte
+                # means neither the layout's soft-wrap nor the
+                # ``rstrip`` here can drop the reset on a different
+                # line; the band stays self-contained per row.
+                stripped = joined.rstrip()
+                if stripped:
+                    # If the bg span starts at column 0 there is no
+                    # leading-padding to preserve; otherwise preserve
+                    # any cells before the bg span as-is so a left
+                    # indent (parent padding, leading space tokens)
+                    # keeps its default bg.
+                    head = ""
+                    body = stripped
+                    if x1 > 0:
+                        # Strip up to ``x1`` leading spaces (the cells
+                        # before the bg span); preserve the rest of
+                        # the leading prefix verbatim.
+                        cut = 0
+                        while cut < x1 and cut < len(body) and body[cut] == " ":
+                            cut += 1
+                        if cut:
+                            head = body[:cut]
+                            body = body[cut:]
+                    # Pad the body to the bg span's visible width so
+                    # the bg fills the entire row, not just the text.
+                    # Visible width excludes ANSI escapes already
+                    # embedded in the body (e.g. foreground colours).
+                    body_w = string_width(body)
+                    target_w = x2 - x1
+                    if body_w < target_w:
+                        body = body + " " * (target_w - body_w)
+                    lines.append(head + bg_open + body + bg_reset)
+                else:
+                    # Row was all whitespace — emit the opener + the
+                    # row's natural width worth of spaces + reset so
+                    # the bg band still shows up.
+                    lines.append(bg_open + " " * (x2 - x1) + bg_reset)
+            else:
+                lines.append(joined.rstrip())
         return "\n".join(lines)
 
 
@@ -326,9 +440,18 @@ def _paint_node(
 
     own_bg = node.props.get("backgroundColor") if node.kind == "box" else None
     effective_bg = own_bg or inherited_bg
+    # Path-A fix: when this Box has ``flushBackgroundToWidth=True`` the
+    # bg is applied at the row level by ``_paint_box_background`` (one
+    # open + reset per interior row, spanning the full layout width).
+    # Children would otherwise inherit the bg via the legacy
+    # ``apply_style`` path and double-paint. Suppress inheritance for
+    # descendants of a flushing Box so the row-level bg is the sole
+    # source of truth.
+    flush_bg = bool(node.props.get("flushBackgroundToWidth")) if node.kind == "box" else False
+    child_inherited_bg = None if flush_bg else effective_bg
 
     if node.content is not None:
-        _paint_text(grid, node, abs_x, abs_y, inherited_bg=effective_bg)
+        _paint_text(grid, node, abs_x, abs_y, inherited_bg=child_inherited_bg)
         return
 
     # PR3 Bug 1 part 2: clip children to this Box's outer rectangle so
@@ -353,7 +476,7 @@ def _paint_node(
         # that the children have not already populated, which preserves any
         # colour / style already attached to those cells.
         for child in node.children:
-            _paint_node(grid, child, abs_x, abs_y, inherited_bg=effective_bg)
+            _paint_node(grid, child, abs_x, abs_y, inherited_bg=child_inherited_bg)
 
         if node.kind == "box":
             _paint_box_background(grid, node, abs_x, abs_y)
@@ -401,14 +524,59 @@ def _paint_text(
     the first line would carry no reset — letting the foreground colour
     / dim / bold run leak past the text into adjacent cells (border
     edges, background fill, padding) on that row.
+
+    Path-A background fix: when the text leaf carries its own
+    ``backgroundColor`` (or inherits one) AND the
+    ``flushBackgroundToWidth`` prop is set, the renderer registers a
+    row-level bg via :meth:`_Grid.mark_row_background` instead of
+    relying on :func:`apply_style` to wrap each line. The legacy
+    wrap-then-paint path put the bg open SGR before the first visible
+    cell and the reset after the last visible cell of *one logical
+    line*; when the layout soft-wrapped that line the reset ended up
+    on a trailing-whitespace cell that ``rstrip`` would erase, leaking
+    the bg SGR onto sibling rows. The row-level approach anchors the
+    reset to the row's last visible byte, so neither wrap nor rstrip
+    can drop it.
+
+    ``flushBackgroundToWidth`` defaults to ``False`` so existing
+    inline-coloured-token usage keeps the legacy "bg only covers the
+    text" behaviour. Block-level surfaces (CC-style user-message
+    bands) opt in by setting the prop to ``True``.
     """
     text = node.content or ""
     raw_lines = text.split("\n")
     if node.height > 0 and len(raw_lines) > node.height:
         raw_lines = _clip_lines_to_height(raw_lines, node.height, node.props)
+    own_bg = node.props.get("backgroundColor") if node.props else None
+    effective_bg = own_bg if own_bg is not None else inherited_bg
+    flush_bg = bool(node.props.get("flushBackgroundToWidth")) if node.props else False
+    if effective_bg and flush_bg:
+        # Strip ``backgroundColor`` from the props we hand to
+        # ``_apply_text_style`` so the legacy wrap path does not double-
+        # apply the bg SGR; the row-level painter is the sole source of
+        # truth for bg under Path-A.
+        text_props = {k: v for k, v in node.props.items() if k != "backgroundColor"}
+        ansi = _load_ansi()
+        bg_body = ansi.parse_color(effective_bg, type_="background")
+    else:
+        # Legacy path: ``_apply_text_style`` wraps each line with the
+        # bg SGR via ``apply_style`` (single open before the text,
+        # single reset after). This is fine for inline coloured tokens
+        # but breaks for block-level surfaces where the layout may
+        # soft-wrap the line and the closing reset ends up on a
+        # trailing-whitespace cell that ``rstrip`` then drops.
+        text_props = node.props
+        bg_body = None
+    leaf_w = max(1, node.width)
     for i, raw_line in enumerate(raw_lines):
-        styled = _apply_text_style(raw_line, node.props, inherited_bg=inherited_bg)
+        if bg_body is not None:
+            styled = _apply_text_style(raw_line, text_props, inherited_bg=None)
+        else:
+            styled = _apply_text_style(raw_line, text_props, inherited_bg=inherited_bg)
         grid.put(abs_x, abs_y + i, styled)
+        if bg_body is not None:
+            bg_open = f"\x1b[{bg_body}m"
+            grid.mark_row_background(abs_x, abs_y + i, leaf_w, bg_open, _SGR_RESET)
 
 
 def _clip_lines_to_height(
@@ -495,6 +663,27 @@ def _paint_box_background(grid: _Grid, node: LayoutNode, abs_x: int, abs_y: int)
 
     The fill covers the content area *inside* the border (when present)
     so the visible coloured band matches ink's behaviour.
+
+    Path-A fix (``flushBackgroundToWidth``): instead of (only)
+    stamping each empty cell with a self-closing
+    ``\\x1b[48;...m   \\x1b[0m`` payload (which worked for truly-empty
+    rows but skipped any row containing a text leaf because
+    :meth:`_Grid.fill_row` bails the moment it sees a non-empty cell),
+    the painter *also* registers a row-level bg via
+    :meth:`_Grid.mark_row_background`. :meth:`_Grid.to_string` then
+    wraps each affected row's visible content with the bg SGR open +
+    reset, so the band:
+
+    * spans the full interior width regardless of where the text cells
+      sit (the bug behind "user message bg only covers the text");
+    * never lets the closing reset be stripped by ``rstrip`` (the reset
+      is appended after the row's last visible byte, never on a
+      trailing-whitespace cell);
+    * never leaks onto sibling rows (each row carries its own open +
+      reset, so the next painted Text starts in a known-reset state).
+
+    Opt-in via the ``flushBackgroundToWidth`` prop; legacy callers see
+    no behaviour change.
     """
     bg = node.props.get("backgroundColor")
     if not bg:
@@ -514,9 +703,21 @@ def _paint_box_background(grid: _Grid, node: LayoutNode, abs_x: int, abs_y: int)
     inner_y = abs_y + top
     inner_w = max(0, node.width - left - right)
     inner_h = max(0, node.height - top - bottom)
+    # Stamp empty cells with the bg payload so rows that have no text
+    # leaf at all (e.g. a row of pure padding) still get the bg band.
     payload = _bg_payload(bg, inner_w)
     for row in range(inner_h):
         grid.fill_row(inner_x, inner_y + row, inner_w, payload)
+    # Path-A row-level bg — opt-in via ``flushBackgroundToWidth``. The
+    # row-level approach is what makes the bg span the full layout
+    # width on text-bearing rows; without it the band collapses to
+    # the text width (the legacy "bg only covers the text" bug).
+    if not node.props.get("flushBackgroundToWidth"):
+        return
+    bg_open = f"\x1b[{body}m"
+    bg_reset = _SGR_RESET
+    for row in range(inner_h):
+        grid.mark_row_background(inner_x, inner_y + row, inner_w, bg_open, bg_reset)
 
 
 def _bg_payload(color: str, width: int) -> str:
