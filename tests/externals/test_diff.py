@@ -629,3 +629,74 @@ def test_structured_diff_not_in_ink_top_level() -> None:
     assert not hasattr(ink, "StructuredDiff"), (
         "StructuredDiff must NOT be top-level"
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-line background colour (CC-style green / red band)
+# ---------------------------------------------------------------------------
+
+
+def test_add_bg_color_paints_plus_row_background() -> None:
+    """``add_bg_color`` fills ``+`` rows with the given RGB background.
+
+    The CC ``StructuredDiff`` signature is a green / red coloured band
+    that fills the entire row width. We assert the SGR ``48;2;r;g;b``
+    sequence for ``rgb(30,70,32)`` is emitted on a ``+`` line.
+    """
+    before = "x = 1"
+    after = "x = 2\nprint(x)"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            add_bg_color="rgb(30,70,32)",
+        )
+    )
+    # SGR 48;2;30;70;32m = set background to rgb(30,70,32).
+    assert f"{ESC}[48;2;30;70;32m" in out
+
+
+def test_del_bg_color_paints_minus_row_background() -> None:
+    """``del_bg_color`` fills ``-`` rows with the given RGB background."""
+    before = "x = 1\nprint(x)"
+    after = "x = 1"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            del_bg_color="rgb(74,32,32)",
+        )
+    )
+    # SGR 48;2;74;32;32m = set background to rgb(74,32,32).
+    assert f"{ESC}[48;2;74;32;32m" in out
+
+
+def test_no_bg_color_by_default_keeps_legacy_behaviour() -> None:
+    """Without ``add_bg_color`` / ``del_bg_color`` no ``48;`` SGR appears."""
+    before = "x = 1"
+    after = "x = 2"
+    out = _render(StructuredDiff(before, after, show_header=False))
+    # No SGR 48;... sequence (background) on any line.
+    assert "48;2;" not in out
+
+
+def test_bg_color_persists_through_highlight_branch(
+    _restore_import: Any,
+) -> None:
+    """When highlighting is on the prefix glyph still carries the bg."""
+    if not _pygments_available():
+        pytest.skip("pygments not installed (pip install ink[highlight])")
+    before = "x = 1"
+    after = "print(x)"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            language="python",
+            show_header=False,
+            add_bg_color="rgb(30,70,32)",
+        )
+    )
+    assert f"{ESC}[48;2;30;70;32m" in out

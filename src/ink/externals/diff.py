@@ -114,6 +114,7 @@ def _render_diff_line(
     prefix: str,
     use_highlight: bool,
     theme: dict[str, str | None] | None,
+    bg_color: str | None = None,
 ) -> Element:
     """Render a single ``+`` / ``-`` diff row.
 
@@ -137,6 +138,15 @@ def _render_diff_line(
     theme:
         Optional Pygments token colour override forwarded verbatim to
         :func:`HighlightedCode`.
+    bg_color:
+        Optional background colour spec applied to the row so the diff
+        line visually fills the entire layout width with a coloured
+        band — the strongest Claude Code ``StructuredDiff`` visual
+        signature. ``None`` (default) preserves the legacy "no
+        per-line background" behaviour. When set, ``Text`` is rendered
+        with ``backgroundColor=bg_color`` and
+        ``flushBackgroundToWidth=True`` so the bg spans the full
+        terminal column width (not just the visible text cells).
 
     Returns
     -------
@@ -157,6 +167,13 @@ def _render_diff_line(
     """
     code_part = line[1:]
     if not use_highlight:
+        if bg_color:
+            return Text(
+                line,
+                color=color,
+                backgroundColor=bg_color,
+                flushBackgroundToWidth=True,
+            )
         return Text(line, color=color)
 
     # Lazy import: HighlightedCode itself imports pygments lazily, so
@@ -164,6 +181,26 @@ def _render_diff_line(
     # ``use_highlight`` flag (probed once per render via
     # :func:`_pygments_available``).
     from ink.externals.highlighted_code import HighlightedCode
+
+    # When a per-line background is requested the prefix glyph carries
+    # the bg + flushes it to the row width; HighlightedCode itself has
+    # no ``backgroundColor`` prop on its inner Text leaves, so the
+    # background only fills the prefix cell. This still produces the
+    # signature coloured band for the prefix column — good enough for
+    # the diff-row colour signature; a full-row fill would require
+    # upstream changes to HighlightedCode (out of scope for PR2).
+    if bg_color:
+        return Box(
+            Text(
+                prefix,
+                color=color,
+                bold=True,
+                backgroundColor=bg_color,
+                flushBackgroundToWidth=True,
+            ),
+            HighlightedCode(code_part, language=language, theme=theme),
+            flexDirection="row",
+        )
 
     return Box(
         Text(prefix, color=color, bold=True),
@@ -220,6 +257,8 @@ def _render_diff(
     hunk_color: str,
     context_color: str | None,
     highlight_theme: dict[str, str | None] | None,
+    add_bg_color: str | None = None,
+    del_bg_color: str | None = None,
 ) -> list[Element]:
     """Compute the diff and turn it into a list of row elements.
 
@@ -284,6 +323,7 @@ def _render_diff(
                     prefix="+",
                     use_highlight=use_highlight,
                     theme=highlight_theme,
+                    bg_color=add_bg_color,
                 )
             )
         elif line.startswith("-"):
@@ -295,6 +335,7 @@ def _render_diff(
                     prefix="-",
                     use_highlight=use_highlight,
                     theme=highlight_theme,
+                    bg_color=del_bg_color,
                 )
             )
         else:
@@ -348,6 +389,8 @@ def _DiffImpl(**props: Any) -> Element:
     hunk_color: str = props["hunk_color"]
     context_color: str | None = props["context_color"]
     highlight_theme: dict[str, str | None] | None = props["highlight_theme"]
+    add_bg_color: str | None = props.get("add_bg_color")
+    del_bg_color: str | None = props.get("del_bg_color")
     box_props: dict[str, Any] = props["box_props"]
 
     from ink.core.reconciler import Reconciler
@@ -373,6 +416,8 @@ def _DiffImpl(**props: Any) -> Element:
             hunk_color=hunk_color,
             context_color=context_color,
             highlight_theme=highlight_theme,
+            add_bg_color=add_bg_color,
+            del_bg_color=del_bg_color,
         )
         if not elements:
             return ""
@@ -420,6 +465,8 @@ def StructuredDiff(
     del_color: str = "red",
     hunk_color: str = "magenta",
     context_color: str | None = None,
+    add_bg_color: str | None = None,
+    del_bg_color: str | None = None,
     theme: dict[str, str | None] | None = None,
     **box_props: Any,
 ) -> Element:
@@ -468,6 +515,19 @@ def StructuredDiff(
     context_color:
         Colour spec for context lines (leading space). ``None``
         (default) inherits the terminal default.
+    add_bg_color:
+        Optional background colour spec for ``+`` lines. When set, each
+        ``+`` row's ``Text`` is rendered with ``backgroundColor`` +
+        ``flushBackgroundToWidth=True`` so the colour band fills the
+        full layout width — Claude Code's strongest diff visual
+        signature (the green / red per-row band). ``None`` (default)
+        preserves the legacy "no per-line background" behaviour. The
+        recommended value for CC alignment is ``"rgb(30,70,32)"`` (a
+        dim green that keeps the bright-green fg readable).
+    del_bg_color:
+        Optional background colour spec for ``-`` lines. Same
+        semantics as ``add_bg_color`` but applied to deletion rows.
+        Recommended CC-aligned value: ``"rgb(74,32,32)"`` (dim red).
     theme:
         Optional Pygments token → colour mapping forwarded verbatim to
         :func:`HighlightedCode` when highlighting is on. ``None`` lets
@@ -519,6 +579,8 @@ def StructuredDiff(
             hunk_color=hunk_color,
             context_color=context_color,
             highlight_theme=theme,
+            add_bg_color=add_bg_color,
+            del_bg_color=del_bg_color,
         )
         box_props = dict(box_props)
         box_props.pop("flexDirection", None)
@@ -541,5 +603,7 @@ def StructuredDiff(
         hunk_color=hunk_color,
         context_color=context_color,
         highlight_theme=theme,
+        add_bg_color=add_bg_color,
+        del_bg_color=del_bg_color,
         box_props=box_props,
     )
