@@ -76,6 +76,7 @@ class Instance:
         "exit_callbacks",
         "static_lines",
         "_static_dirty",
+        "_static_rows_approx",
         "_unmounted",
         "_mount_complete",
         "_exit_event",
@@ -112,6 +113,18 @@ class Instance:
         # new write and back to False once the paint loop has flushed.
         self.static_lines: list[str] = []
         self._static_dirty: bool = False
+        # Approximate count of terminal rows consumed by ALL flushed
+        # static content (cumulative, never reset). Used to compute the
+        # frame's available row budget so :func:`write_diff` can cap
+        # cursor-down movements and avoid the viewport-clamp cursor
+        # drift that wipes live content (input row, dividers) when the
+        # frame + static overflows the viewport. The count is an
+        # estimate — it tallies ``\\n`` characters in flushed static
+        # text, which under-estimates when a static line wraps (eager
+        # wrap) but that just means the cap is slightly generous; the
+        # bottom-up retreat in :func:`_repaint` stays correct because
+        # it stops at ``cur_row`` regardless.
+        self._static_rows_approx: int = 0
         self._unmounted: bool = False
         self._mount_complete: bool = False
         self._exit_event: threading.Event = threading.Event()
@@ -358,10 +371,20 @@ class Instance:
                 bump_layout_epoch()
             if prev_frame == new_frame and prev_frame:
                 return
+            # Compute the frame's available row budget so ``write_diff``
+            # can cap cursor-down movements. Without this cap, a frame
+            # taller than the viewport (after subtracting static content
+            # above) causes the cursor to clamp at the viewport bottom,
+            # which makes the final cursor-up overshoot past frame row 0
+            # and wipe live content (input row, dividers). See
+            # ``_static_rows_approx`` docstring for details.
+            available_rows: int | None = None
+            if rows is not None and rows > 0:
+                available_rows = max(1, rows - self._static_rows_approx)
             if not prev_frame:
                 write_diff(None, new_frame, self.stdout)
             else:
-                write_diff(prev_frame, new_frame, self.stdout)
+                write_diff(prev_frame, new_frame, self.stdout, available_rows)
             self.stdout.flush()
             if not self._unmounted:
                 self.current_frame = new_frame
@@ -402,6 +425,10 @@ class Instance:
         # so we do not need to track absolute coordinates here.
         self.stdout.write(static_text)
         self.stdout.flush()
+        # Track approximate static row count so subsequent ``_repaint``
+        # calls can cap cursor-down movements and avoid the viewport-clamp
+        # cursor drift (see ``_static_rows_approx`` docstring).
+        self._static_rows_approx += static_text.count("\n")
         # Step 3 — paint the new frame from the cursor's current position.
         if new_frame:
             write_diff(None, new_frame, self.stdout)

@@ -148,6 +148,90 @@ def test_full_clear_uses_line_clears_not_full_screen_clear() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Frame-shrink cursor retreat — viewport-clamp robustness
+#
+# When ``available_rows`` is provided, ``_repaint`` must cap cursor-down
+# movements so the cursor never reaches a row the terminal will clamp.
+# Without the cap, a clamped cursor-up at the end of the diff overshoots
+# past frame row 0 and the next paint anchors at the wrong y — wiping
+# live content (input row, dividers). See ``diff.py`` docstring for the
+# full rationale.
+# ---------------------------------------------------------------------------
+
+
+def test_frame_shrink_with_available_rows_caps_cursor_descent() -> None:
+    """When ``available_rows`` is set, the cursor never moves past that row."""
+    # Old frame is 10 rows; new is 2. Without a cap the diff would emit
+    # a ``\x1b[9B`` (down to row 9) — with ``available_rows=5`` it must
+    # stop at row 4 and clear only rows 2-4. The cursor-up at the end
+    # retreats from row 4 (not row 9), so the next paint anchors at the
+    # right y.
+    old = "\n".join(["row%d" % i for i in range(10)])
+    new = "row0\nrow1"
+    out = StringIO()
+    write_diff(old, new, out, available_rows=5)
+    diff = out.getvalue()
+    assert _CLEAR_SCREEN not in diff
+    # No cursor-down by more than 4 rows (cap - 1) — a single ``\x1b[4B``
+    # is the largest down-move we should see. ``\x1b[9B`` (the un-capped
+    # descent to the bottom of the old frame) must NOT appear.
+    assert "\x1b[9B" not in diff
+    assert "\x1b[5B" not in diff
+    # The largest down-move in the diff should be at most 4 rows.
+    import re
+    downs = [int(n) for n in re.findall(r"\x1b\[(\d+)B", diff)]
+    assert downs, "expected at least one cursor-down in frame-shrink diff"
+    assert max(downs) <= 4, f"cursor-down {max(downs)} exceeds available_rows-1=4: {diff!r}"
+
+
+def test_frame_shrink_without_available_rows_keeps_legacy_behaviour() -> None:
+    """``available_rows=None`` (default) preserves the original top-down walk."""
+    old = "\n".join(["row%d" % i for i in range(10)])
+    new = "row0\nrow1"
+    out = StringIO()
+    write_diff(old, new, out, available_rows=None)
+    diff = out.getvalue()
+    # The un-capped path reaches the bottom (row 9) of the old frame via
+    # a descent to row 2 then 7× cursor-down-by-1. The total descent
+    # equals 9 rows — backward compat with existing diff callers that
+    # don't pass viewport info.
+    import re
+    downs = [int(n) for n in re.findall(r"\x1b\[(\d+)B", diff)]
+    assert sum(downs) == 9, f"uncapped path should descend 9 rows total, got {sum(downs)}: {diff!r}"
+    assert _CLEAR_SCREEN not in diff
+
+
+def test_frame_shrink_ends_cursor_at_frame_row_zero() -> None:
+    """After a frame-shrink diff, the cursor must park at row 0 of the
+    painted region so the next paint anchors correctly. This holds whether
+    or not ``available_rows`` is provided."""
+    old = "a\nb\nc\nd\ne"
+    new = "a\nb"
+    # Without cap
+    out1 = StringIO()
+    write_diff(old, new, out1, available_rows=None)
+    diff1 = out1.getvalue()
+    # With cap
+    out2 = StringIO()
+    write_diff(old, new, out2, available_rows=4)
+    diff2 = out2.getvalue()
+    import re
+    for label, diff in [("uncapped", diff1), ("capped", diff2)]:
+        downs = [int(n) for n in re.findall(r"\x1b\[(\d+)B", diff)]
+        ups = [int(n) for n in re.findall(r"\x1b\[(\d+)A", diff)]
+        total_down = sum(downs)
+        total_up = sum(ups)
+        # After all cursor moves, the net vertical movement is 0 (cursor
+        # returns to row 0 of the frame). If this invariant breaks, the
+        # next diff anchors at the wrong y and drifts until live content
+        # is wiped.
+        assert total_down == total_up, (
+            f"{label}: cursor net drift non-zero "
+            f"(down={total_down}, up={total_up}, diff={diff!r})"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Invariant sweep — every public test path
 # ---------------------------------------------------------------------------
 
