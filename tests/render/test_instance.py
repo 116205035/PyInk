@@ -263,6 +263,195 @@ def test_multiple_signal_writes_coalesce_into_one_repaint() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Static-row budget regression — available_rows must not collapse after
+# heavy static history eager-load
+# ---------------------------------------------------------------------------
+
+
+def test_static_rows_approx_does_not_starve_available_rows_after_history_load() -> None:
+    """Regression: ``_static_rows_approx`` is cumulative and never reset,
+    so after flushing 100+ lines of static (e.g. Jarvis eager-loading
+    history on startup) it balloons past the viewport height. The naive
+    ``available_rows = rows - _static_rows_approx`` formula then
+    collapsed to ``max(1, 30 - 100) = 1``, which in turn zeroed the
+    ``row_cap`` inside :func:`write_diff` and prevented the live frame
+    from repainting more than its first row — the "framework
+    initialized but UI stuck on Initializing" bug.
+
+    The fix recognises that static content already scrolled out the top
+    of the viewport no longer occupies the frame's vertical budget, so
+    when ``_static_rows_approx >= rows`` we pass ``available_rows =
+    rows`` (the frame owns the whole viewport). This test asserts the
+    fix by spying on ``write_diff`` and checking the ``available_rows``
+    value passed after a 100-line static flush + signal repaint.
+    """
+    from ink.render import diff as diff_mod
+    from ink.render import instance as instance_mod
+
+    counter = signal(0)
+
+    def Counter() -> object:
+        # Multi-row frame so a starved available_rows would visibly
+        # prevent some rows from being repainted.
+        return Box(
+            Text(lambda: f"row0={counter.value}"),
+            Text(lambda: f"row1={counter.value}"),
+            Text(lambda: f"row2={counter.value}"),
+            flexDirection="column",
+        )
+
+    inst, out = _make_instance(Counter(), columns=40, rows=30)
+    # Sanity: initial paint has all three rows.
+    assert "row0=0" in out.getvalue()
+    assert "row2=0" in out.getvalue()
+
+    # Spy on subsequent write_diff calls to capture available_rows.
+    captured: list[tuple[int, int | None]] = []
+    real_write_diff = diff_mod.write_diff
+
+    def spy(old_frame: str | None, new_frame: str, stdout: object, available_rows: int | None = None) -> None:
+        rows_in_frame = new_frame.count("\n") + 1
+        captured.append((rows_in_frame, available_rows))
+        return real_write_diff(old_frame, new_frame, stdout, available_rows)
+
+    diff_mod.write_diff = spy
+    instance_mod.write_diff = spy
+    try:
+        # Flush 100+ lines of static — simulates history eager-load.
+        big_static = "\n".join(f"history line {i}" for i in range(100)) + "\n"
+        inst.write_static(big_static)  # type: ignore[attr-defined]
+        # Confirm the cumulative counter has ballooned past rows.
+        assert inst._static_rows_approx >= 100  # type: ignore[attr-defined]
+
+        captured.clear()
+        # Trigger a signal-driven repaint — this is the path that
+        # previously received a starved available_rows=1.
+        counter.value = 7
+        time.sleep(0.3)
+
+        # Find the most recent repaint (frame had >1 row, available_rows
+        # was passed). Frame is 3 rows after the layout settles.
+        multi_row_calls = [
+            (rows_count, ar) for rows_count, ar in captured if rows_count > 1 and ar is not None
+        ]
+        assert multi_row_calls, (
+            f"expected at least one multi-row repaint call after signal, "
+            f"got: {captured!r}"
+        )
+        rows_count, available_rows = multi_row_calls[-1]
+        # Pre-fix: available_rows collapsed to 1 (starved). Post-fix:
+        # available_rows should be >= frame height so the cap inside
+        # _repaint does not zero the row_cap.
+        assert available_rows >= rows_count, (
+            f"available_rows={available_rows} starved below frame height="
+            f"{rows_count} after 100-line static flush — live frame cannot "
+            f"repaint. Captured calls: {captured!r}"
+        )
+    finally:
+        diff_mod.write_diff = real_write_diff
+        instance_mod.write_diff = real_write_diff
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_static_rows_approx_passes_full_viewport_when_static_overflows() -> None:
+    """When static content overflows the viewport, ``available_rows``
+    should equal the viewport size (``rows``), not 1.
+
+    Rationale: once static scrolled out the top, the frame anchor sits
+    at the viewport top (from the cursor's perspective), so the frame
+    can safely use the entire viewport. The previous formula
+    ``max(1, rows - _static_rows_approx)`` collapsed to 1 here and
+    starved the frame; the fix returns ``rows`` instead.
+    """
+    from ink.render import diff as diff_mod
+    from ink.render import instance as instance_mod
+
+    counter = signal(0)
+
+    def Counter() -> object:
+        return Text(lambda: f"v={counter.value}")
+
+    inst, out = _make_instance(Counter(), columns=40, rows=30)
+
+    captured: list[int | None] = []
+    real_write_diff = diff_mod.write_diff
+
+    def spy(old_frame: str | None, new_frame: str, stdout: object, available_rows: int | None = None) -> None:
+        captured.append(available_rows)
+        return real_write_diff(old_frame, new_frame, stdout, available_rows)
+
+    diff_mod.write_diff = spy
+    instance_mod.write_diff = spy
+    try:
+        # Flush enough static to overflow the 30-row viewport.
+        big_static = "\n".join(f"line {i}" for i in range(50)) + "\n"
+        inst.write_static(big_static)  # type: ignore[attr-defined]
+        captured.clear()
+
+        counter.value = 1
+        time.sleep(0.3)
+
+        # Filter out None (initial paint / no-cap path) and confirm at
+        # least one repaint received available_rows == rows.
+        capped = [ar for ar in captured if ar is not None]
+        assert capped, f"expected at least one capped repaint call, got: {captured!r}"
+        assert capped[-1] == 30, (
+            f"available_rows should equal viewport (30) when static "
+            f"overflows, got {capped[-1]}. Captured: {captured!r}"
+        )
+    finally:
+        diff_mod.write_diff = real_write_diff
+        instance_mod.write_diff = real_write_diff
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_static_rows_within_viewport_keeps_original_pr2_formula() -> None:
+    """Sanity: when static content fits inside the viewport, the
+    original PR2 formula ``available_rows = rows - static_above`` is
+    preserved. This protects the cursor-overshoot fix for the
+    palette-Esc scenario where static is small (welcome banner ~3
+    rows) and a tall frame (palette open) needs the cap to avoid
+    cursor drift on close.
+    """
+    from ink.render import diff as diff_mod
+    from ink.render import instance as instance_mod
+
+    inst, out = _make_instance(Text("frame"), columns=40, rows=30)
+
+    captured: list[int | None] = []
+    real_write_diff = diff_mod.write_diff
+
+    def spy(old_frame: str | None, new_frame: str, stdout: object, available_rows: int | None = None) -> None:
+        captured.append(available_rows)
+        return real_write_diff(old_frame, new_frame, stdout, available_rows)
+
+    diff_mod.write_diff = spy
+    instance_mod.write_diff = spy
+    try:
+        # Flush 3 lines of static — fits inside the 30-row viewport.
+        inst.write_static("a\nb\nc\n")  # type: ignore[attr-defined]
+        assert inst._static_rows_approx == 3  # type: ignore[attr-defined]
+        captured.clear()
+
+        # Trigger a repaint by rerendering.
+        inst.rerender(Text("frame2"))  # type: ignore[attr-defined]
+        time.sleep(0.1)
+
+        capped = [ar for ar in captured if ar is not None]
+        assert capped, f"expected at least one capped repaint call, got: {captured!r}"
+        # Original formula: 30 - 3 = 27.
+        assert capped[-1] == 27, (
+            f"available_rows should equal rows - static_above = 27 when "
+            f"static fits inside viewport, got {capped[-1]}. "
+            f"Captured: {captured!r}"
+        )
+    finally:
+        diff_mod.write_diff = real_write_diff
+        instance_mod.write_diff = real_write_diff
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
 # Rapid unmount / rerender (race safety)
 # ---------------------------------------------------------------------------
 

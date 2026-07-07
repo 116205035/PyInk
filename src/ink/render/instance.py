@@ -124,6 +124,16 @@ class Instance:
         # wrap) but that just means the cap is slightly generous; the
         # bottom-up retreat in :func:`_repaint` stays correct because
         # it stops at ``cur_row`` regardless.
+        #
+        # Cumulative growth caveat: the count never decreases even
+        # after lines scroll off the top of the viewport, so in
+        # long-running sessions with heavy static output (e.g. Jarvis
+        # eager-loading hundreds of history lines) it balloons past
+        # the viewport height. :meth:`_paint_now` detects the overflow
+        # case (``_static_rows_approx >= rows``) and switches the
+        # available-row formula to ``rows`` so the cumulative value
+        # cannot starve the live frame (regression: live UI stuck on
+        # "Initializing" after history load).
         self._static_rows_approx: int = 0
         self._unmounted: bool = False
         self._mount_complete: bool = False
@@ -378,9 +388,36 @@ class Instance:
             # which makes the final cursor-up overshoot past frame row 0
             # and wipe live content (input row, dividers). See
             # ``_static_rows_approx`` docstring for details.
+            #
+            # ``available_rows`` = number of viewport rows the cursor can
+            # safely descend into starting from the frame's row 0. The
+            # frame is painted immediately after the static region, so:
+            #
+            # * When static content fits inside the viewport
+            #   (``static_total < rows``): the frame anchor sits at
+            #   viewport row ``static_total`` and ``available_rows``
+            #   equals ``rows - static_total`` (matches PR2's original
+            #   formula).
+            # * When static content overflows the viewport
+            #   (``static_total >= rows``): the static region scrolled
+            #   out the top entirely, so the frame anchor effectively
+            #   sits at the viewport top and ``available_rows`` equals
+            #   ``rows``. The previous formula ``rows - static_total``
+            #   went negative here and collapsed to ``max(1, ...)``,
+            #   starving small frames of the rows they needed to repaint
+            #   — the "live UI stuck after heavy history load" bug.
+            #
+            # ``_repaint`` already takes ``min(available_rows - 1,
+            # max_len - 1)``, so passing ``rows`` when static overflows
+            # restores the original top-down walk for in-viewport frames
+            # (no spurious cap) while still capping frames that
+            # genuinely overflow the viewport.
             available_rows: int | None = None
             if rows is not None and rows > 0:
-                available_rows = max(1, rows - self._static_rows_approx)
+                if self._static_rows_approx >= rows:
+                    available_rows = rows
+                else:
+                    available_rows = max(1, rows - self._static_rows_approx)
             if not prev_frame:
                 write_diff(None, new_frame, self.stdout)
             else:
