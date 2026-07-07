@@ -564,23 +564,37 @@ class Terminal:
         # Capture the console codepages so we can restore them on exit.
         # Done before any codepage mutation so the restore is accurate
         # even if the surrounding call fails partway through.
+        # Flip the console codepage to UTF-8 so the IME emits UTF-8
+        # bytes — but ONLY if it isn't already UTF-8. conhost
+        # re-initialises the screen buffer when the codepage changes
+        # (re-decoding the existing bytes under the new CP), which on a
+        # system already configured for UTF-8 (Windows Terminal, Win11
+        # with the "Beta: Use Unicode UTF-8..." locale setting) wipes
+        # the cmd.exe startup banner / scrollback. Skipping the
+        # SetConsole calls when the CP is already 65001 avoids that
+        # buffer reset. zh-CN GBK systems (CP=936) still get switched
+        # — the IME emits GBK bytes that the UTF-8 decoder would
+        # reject, so the switch is mandatory there.
+        TARGET_CP = 65001  # UTF-8
         try:
-            self._prev_console_input_cp = kernel32.GetConsoleCP()
-            self._prev_console_output_cp = kernel32.GetConsoleOutputCP()
+            prev_in = kernel32.GetConsoleCP()
+            prev_out = kernel32.GetConsoleOutputCP()
+            self._prev_console_input_cp = prev_in
+            self._prev_console_output_cp = prev_out
         except OSError:  # pragma: no cover
             self._prev_console_input_cp = None
             self._prev_console_output_cp = None
-        # Flip the console codepage to UTF-8 so the IME emits UTF-8
-        # bytes. No-op if the codepage is already 65001; safe to call
-        # repeatedly (Windows returns 0 on failure but the console
-        # keeps functioning on its previous codepage).
-        try:
-            kernel32.SetConsoleCP(65001)
-            kernel32.SetConsoleOutputCP(65001)
-        except OSError:  # pragma: no cover
-            # Codepage switch failed — keep going; the UTF-8 decoder
-            # will still do its best with whatever bytes arrive.
-            pass
+            prev_in = None
+            prev_out = None
+        # Each SetConsole call sits in its own suppress block so one
+        # failing doesn't skip the other. Windows returns 0 on failure
+        # but the console keeps functioning on its previous codepage.
+        if prev_in != TARGET_CP:
+            with suppress(OSError):  # pragma: no cover
+                kernel32.SetConsoleCP(TARGET_CP)
+        if prev_out != TARGET_CP:
+            with suppress(OSError):  # pragma: no cover
+                kernel32.SetConsoleOutputCP(TARGET_CP)
         ENABLE_ECHO_INPUT = 0x0004
         ENABLE_LINE_INPUT = 0x0002
         ENABLE_PROCESSED_INPUT = 0x0001

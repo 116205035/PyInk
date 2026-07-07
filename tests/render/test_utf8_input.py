@@ -615,3 +615,104 @@ def test_windows_codepage_switched_on_raw_mode_entry(
         f"locale output CP (936) not restored on exit; "
         f"current={probe.current_output_cp}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Codepage-skip optimisation: don't re-flip when already UTF-8.
+#
+# conhost re-initialises the screen buffer on a codepage switch — which
+# clears the cmd.exe startup banner / scrollback on systems that are
+# already configured for UTF-8 (Windows Terminal, Win11 with the "Beta:
+# Use Unicode UTF-8..." locale setting). The fix: only call SetConsoleCP
+# / SetConsoleOutputCP when the current CP isn't 65001. zh-CN GBK
+# systems (CP=936) still get switched — see tests above.
+# ---------------------------------------------------------------------------
+
+
+def test_no_setconsolecp_when_already_utf8(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If both codepages are already 65001, no SetConsole* call is made.
+
+    This is the regression test for the conhost buffer-reset bug: on a
+    UTF-8-configured Windows, calling ``SetConsoleCP(65001)`` when the
+    CP is already 65001 still triggers conhost's screen-buffer
+    re-decode, wiping the cmd.exe startup banner. Skipping the call
+    avoids that.
+    """
+    probe = _CodepageProbeKernel32(
+        current_input_cp=65001, current_output_cp=65001
+    )
+    _install_fake_ctypes(probe, monkeypatch)
+
+    term = Terminal(stdout=_FakeTTY(), stdin=_FakeTTY())
+    term._enter_raw_mode_windows()
+
+    assert probe.set_input_cp_calls == [], (
+        f"must NOT call SetConsoleCP when input CP is already 65001; "
+        f"calls={probe.set_input_cp_calls!r}"
+    )
+    assert probe.set_output_cp_calls == [], (
+        f"must NOT call SetConsoleOutputCP when output CP is already "
+        f"65001; calls={probe.set_output_cp_calls!r}"
+    )
+    # The original CP must still be captured for restore on exit.
+    assert term._prev_console_input_cp == 65001
+    assert term._prev_console_output_cp == 65001
+
+
+def test_setconsolecp_called_when_not_utf8(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GBK-locale (CP=936) systems must still flip both CPs to 65001.
+
+    The IME on a zh-CN Windows emits GBK bytes; the Terminal's UTF-8
+    decoder would reject them, so the switch is mandatory here. This
+    guards against the optimisation accidentally skipping real
+    codepage-mismatch cases.
+    """
+    probe = _CodepageProbeKernel32(current_input_cp=936, current_output_cp=936)
+    _install_fake_ctypes(probe, monkeypatch)
+
+    term = Terminal(stdout=_FakeTTY(), stdin=_FakeTTY())
+    term._enter_raw_mode_windows()
+
+    assert probe.set_input_cp_calls == [65001]
+    assert probe.set_output_cp_calls == [65001]
+    assert term._prev_console_input_cp == 936
+    assert term._prev_console_output_cp == 936
+
+
+def test_exit_restores_recorded_cp_when_recorded_is_utf8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restore path is unchanged: it restores whatever CP was recorded.
+
+    If the CP was already 65001 at entry (so SetConsole was skipped),
+    the recorded "previous" CP is 65001 and exit restores to 65001 —
+    which is a no-op but still exercises the restore call. This
+    confirms the restore path is independent of the entry-skip
+    optimisation.
+    """
+    probe = _CodepageProbeKernel32(
+        current_input_cp=65001, current_output_cp=65001
+    )
+    _install_fake_ctypes(probe, monkeypatch)
+
+    term = Terminal(stdout=_FakeTTY(), stdin=_FakeTTY())
+    term._enter_raw_mode_windows()
+    # Entry skipped the SetConsole calls, so probe still has no calls.
+    assert probe.set_input_cp_calls == []
+    assert probe.set_output_cp_calls == []
+    # Recorded "previous" CP is 65001.
+    assert term._prev_console_input_cp == 65001
+
+    term._exit_raw_mode_windows()
+    # Restore must still call SetConsole with the recorded value.
+    assert probe.set_input_cp_calls == [65001], (
+        f"exit must call SetConsoleCP with the recorded prev CP "
+        f"(65001); calls={probe.set_input_cp_calls!r}"
+    )
+    assert probe.set_output_cp_calls == [65001], (
+        f"exit must call SetConsoleOutputCP with the recorded prev "
+        f"CP (65001); calls={probe.set_output_cp_calls!r}"
+    )
+    # Slots cleared for idempotency.
+    assert term._prev_console_input_cp is None
+    assert term._prev_console_output_cp is None
