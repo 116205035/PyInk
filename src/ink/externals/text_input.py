@@ -868,6 +868,13 @@ def _TextInputImpl(**props: Any) -> Element:
     multiline: bool = props["multiline"]
     rows: int | None = props["rows"]
     box_props: dict[str, Any] = props["box_props"]
+    # ``ignore_arrows_when`` may be a ``bool``, a ``Signal[bool]``, or a
+    # 0-arg callable returning ``bool``. When truthy the handler skips
+    # ArrowUp / ArrowDown so an external consumer (e.g. a command palette
+    # navigated by ↑↓) can own those keys without the TextInput moving
+    # its cursor. Left / right / Home / End and editing keys are
+    # unaffected. Re-evaluated per keypress (same shape as ``is_active``).
+    ignore_arrows_when: object = props["ignore_arrows_when"]
     # Optional external ``value`` signal — when supplied, the component
     # writes its edits into this signal instead of an internal one, so
     # the caller can clear the buffer after a submit (or otherwise
@@ -1097,6 +1104,16 @@ def _TextInputImpl(**props: Any) -> Element:
             return
 
         # ----------------------------------------------------------------
+        # ``ignore_arrows_when`` lets an external consumer (e.g. a
+        # command palette) own ArrowUp / ArrowDown without the
+        # TextInput moving its cursor. We evaluate it once per
+        # keypress and short-circuit only the up / down handlers below
+        # — left / right / Home / End and editing keys still work so
+        # the user can keep typing the palette query. Shift+Up/Down
+        # selection is also skipped so the selection anchor doesn't
+        # drift while the palette owns vertical navigation.
+        ignore_arrows = _resolve_is_active(ignore_arrows_when)
+
         # Selection-extending navigation (Shift + arrows / Home / End).
         # ----------------------------------------------------------------
         if key.shift and not key.ctrl and not key.alt:
@@ -1106,13 +1123,13 @@ def _TextInputImpl(**props: Any) -> Element:
             if key.right_arrow:
                 _extend_selection(old_cursor + 1)
                 return
-            if key.up_arrow:
+            if key.up_arrow and not ignore_arrows:
                 target = _offset_above(old_value, old_cursor)
                 if target is None:
                     target = _line_start(old_value, old_cursor)
                 _extend_selection(target)
                 return
-            if key.down_arrow:
+            if key.down_arrow and not ignore_arrows:
                 target = _offset_below(old_value, old_cursor)
                 if target is None:
                     target = _line_end(old_value, old_cursor)
@@ -1146,7 +1163,7 @@ def _TextInputImpl(**props: Any) -> Element:
             _set_cursor(old_cursor + 1)
             return
 
-        if key.up_arrow and not key.ctrl and not key.alt:
+        if key.up_arrow and not key.ctrl and not key.alt and not ignore_arrows:
             target = _offset_above(old_value, old_cursor)
             if target is None:
                 _set_cursor(_line_start(old_value, old_cursor))
@@ -1154,7 +1171,7 @@ def _TextInputImpl(**props: Any) -> Element:
                 _set_cursor(target)
             return
 
-        if key.down_arrow and not key.ctrl and not key.alt:
+        if key.down_arrow and not key.ctrl and not key.alt and not ignore_arrows:
             target = _offset_below(old_value, old_cursor)
             if target is None:
                 _set_cursor(_line_end(old_value, old_cursor))
@@ -1505,6 +1522,7 @@ def TextInput(
     cursor_color: str | None = None,
     cursor_style: CursorStyle = "block",
     is_active: bool | Signal[bool] | Callable[[], bool] = True,
+    ignore_arrows_when: bool | Signal[bool] | Callable[[], bool] = False,
     value_signal: Signal[str] | None = None,
     **box_props: Any,
 ) -> Element:
@@ -1603,6 +1621,17 @@ def TextInput(
         input), use reactive props such as
         ``color=lambda: "gray" if not focused else None`` rather than
         relying on ``is_active`` to re-render the component.
+    ignore_arrows_when:
+        Controls whether :func:`handle_key` skips ArrowUp / ArrowDown.
+        Evaluated on **every keypress** (same shape dispatch as
+        ``is_active`` — ``bool`` / ``Signal[bool]`` / ``Callable[[], bool]``).
+        When truthy, vertical arrow navigation is yielded to an
+        external consumer (the canonical use case is a command palette
+        mounted alongside the input — the palette's own handler moves
+        its focus while the input's cursor stays put). Left / right /
+        Home / End and all editing keys are unaffected, so the user
+        can keep typing the palette query. Defaults to ``False``
+        (arrows always move the cursor).
     value_signal:
         Optional external :class:`Signal` ``[str]`` to use as the
         component's value buffer. When supplied, the component writes
@@ -1705,6 +1734,7 @@ def TextInput(
         cursor_color=cursor_color,
         cursor_style=cursor_style,
         is_active=is_active,
+        ignore_arrows_when=ignore_arrows_when,
         multiline=multiline,
         rows=rows,
         box_props=box_props,

@@ -3202,3 +3202,198 @@ def test_bug6_distribute_main_has_no_fixed_parameter() -> None:
     assert set(sig.parameters) == expected, (
         f"_distribute_main signature changed unexpectedly: {sig}"
     )
+
+
+# ---------------------------------------------------------------------------
+# ignore_arrows_when — let an external consumer own ArrowUp / ArrowDown
+# (e.g. a command palette navigated by ↑↓). The prop mirrors ``is_active``'s
+# shape (bool / Signal / Callable) and is re-evaluated per keypress.
+# ---------------------------------------------------------------------------
+
+
+def test_ignore_arrows_when_bool_skips_up_arrow(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ignore_arrows_when=True`` — ↑ is a no-op; the cursor stays at end.
+
+    Without the prop, single-line ↑ jumps the cursor to column 0
+    (``_line_start``). With the prop truthy, the handler skips the
+    up/down branches so an external consumer (the palette nav handler)
+    can own vertical navigation.
+    """
+    changes: list[str] = []
+    # Up arrow then type 'X'. Without ``ignore_arrows_when`` the 'X'
+    # would insert at position 0 (cursor moved to start by ↑), giving
+    # "Xab". With the prop the cursor stays at end → "abX".
+    feed: list[bytes] = [b"\x1b[A", b"X"]
+    inst, _ = _mount(
+        TextInput(
+            initial_value="ab",
+            ignore_arrows_when=True,
+            on_change=changes.append,
+        ),
+        monkeypatch=monkeypatch,
+        feed=feed,
+    )
+    assert _wait_for(lambda: _last_change_is(changes, "abX")), (
+        f"ignore_arrows_when=True should keep cursor at end; "
+        f"changes={changes}"
+    )
+    inst.unmount()
+
+
+def test_ignore_arrows_when_bool_skips_down_arrow(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ignore_arrows_when=True`` — ↓ is a no-op on a single-line buffer."""
+    changes: list[str] = []
+    # Left, Left (cursor at start), Down, then type 'X'. Without the
+    # prop, ↓ on a single line jumps to ``_line_end`` (len(value)),
+    # so 'X' would insert at end → "abX". With the prop, cursor stays
+    # at start → "Xab".
+    feed: list[bytes] = [b"\x1b[D", b"\x1b[D", b"\x1b[B", b"X"]
+    inst, _ = _mount(
+        TextInput(
+            initial_value="ab",
+            ignore_arrows_when=True,
+            on_change=changes.append,
+        ),
+        monkeypatch=monkeypatch,
+        feed=feed,
+    )
+    assert _wait_for(lambda: _last_change_is(changes, "Xab")), (
+        f"ignore_arrows_when=True should keep cursor at start after "
+        f"Left+Left+Down; changes={changes}"
+    )
+    inst.unmount()
+
+
+def test_ignore_arrows_when_callable_evaluated_per_keypress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ignore_arrows_when`` accepts a 0-arg callable re-read each key.
+
+    We flip a mutable flag between keystrokes: ↑ is ignored while the
+    flag is True, then honoured once it flips back to False.
+    """
+    state = {"ignore": True}
+    changes: list[str] = []
+
+    # Demand-driven byte source so we can flip the flag between keys.
+    pending: list[bytes] = []
+    ready = threading.Event()
+    consumed = threading.Event()
+
+    def fake_read(fd: int, n: int) -> bytes:
+        ready.wait()
+        ready.clear()
+        chunk = pending.pop(0)
+        consumed.set()
+        return chunk
+
+    def send(byte: bytes) -> None:
+        pending.append(byte)
+        ready.set()
+        consumed.wait()
+        consumed.clear()
+
+    monkeypatch.setattr(_term_mod, "_read_stdin_chunk", fake_read)
+    monkeypatch.setattr(_term_mod, "_wait_for_input", lambda fd, timeout: True)
+    monkeypatch.setattr(Terminal, "_enter_raw_mode_unix", lambda self: None)
+    monkeypatch.setattr(Terminal, "_exit_raw_mode_unix", lambda self: None)
+    monkeypatch.setattr(Terminal, "_enter_raw_mode_windows", lambda self: None)
+    monkeypatch.setattr(Terminal, "_exit_raw_mode_windows", lambda self: None)
+
+    out = io.StringIO()
+    inst = render(
+        TextInput(
+            initial_value="ab",
+            ignore_arrows_when=lambda: state["ignore"],
+            on_change=changes.append,
+        ),
+        stdout=out,
+        stdin=_FakeTTY(),
+        columns=30,
+        rows=3,
+        exit_on_ctrl_c=False,
+    )
+    time.sleep(0.05)
+
+    # ↑ while ignore=True → cursor stays at end. Type 'X' → "abX".
+    send(b"\x1b[A")
+    time.sleep(0.03)
+    send(b"X")
+    assert _wait_for(lambda: _last_change_is(changes, "abX"))
+
+    # Flip to ignore=False. ↑ now moves cursor to start; type 'Y' → "YabX".
+    state["ignore"] = False
+    send(b"\x1b[A")
+    time.sleep(0.03)
+    send(b"Y")
+    assert _wait_for(lambda: _last_change_is(changes, "YabX"))
+
+    inst.unmount()
+
+
+def test_ignore_arrows_when_left_arrow_still_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Left / right arrows are NOT affected by ``ignore_arrows_when``.
+
+    Only ↑↓ are yielded; horizontal navigation stays with the input.
+    """
+    changes: list[str] = []
+    # Left then 'X' → "aXb" even with ignore_arrows_when=True.
+    feed: list[bytes] = [b"\x1b[D", b"X"]
+    inst, _ = _mount(
+        TextInput(
+            initial_value="ab",
+            ignore_arrows_when=True,
+            on_change=changes.append,
+        ),
+        monkeypatch=monkeypatch,
+        feed=feed,
+    )
+    assert _wait_for(lambda: _last_change_is(changes, "aXb"))
+    inst.unmount()
+
+
+def test_ignore_arrows_when_default_false_keeps_arrow_behaviour(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default (``False``) — arrows behave as before (↑ → col 0)."""
+    changes: list[str] = []
+    # ↑ then 'X' on default TextInput → cursor at start → "Xab".
+    feed: list[bytes] = [b"\x1b[A", b"X"]
+    inst, _ = _mount(
+        TextInput(initial_value="ab", on_change=changes.append),
+        monkeypatch=monkeypatch,
+        feed=feed,
+    )
+    assert _wait_for(lambda: _last_change_is(changes, "Xab"))
+    inst.unmount()
+
+
+def test_ignore_arrows_when_signal_evaluates_per_keypress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ignore_arrows_when`` accepts a ``Signal[bool]`` re-read each key."""
+    flag = signal(True)
+    changes: list[str] = []
+    # ↑ (ignored, cursor at end), type 'X' → "abX".
+    feed: list[bytes] = [b"\x1b[A", b"X"]
+    inst, _ = _mount(
+        TextInput(
+            initial_value="ab",
+            ignore_arrows_when=flag,
+            on_change=changes.append,
+        ),
+        monkeypatch=monkeypatch,
+        feed=feed,
+    )
+    assert _wait_for(lambda: _last_change_is(changes, "abX"))
+
+    # Flip the signal to False; ↑ now moves cursor to start.
+    flag.value = False
+    feed2: list[bytes] = [b"\x1b[A", b"Y"]
+    _patch_input(_stream(feed2), monkeypatch)
+    time.sleep(0.05)
+    assert _wait_for(lambda: _last_change_is(changes, "YabX"))
+
+    inst.unmount()
