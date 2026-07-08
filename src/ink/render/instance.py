@@ -49,7 +49,7 @@ from ink.core.reconciler import Reconciler
 from ink.core.signal import effect
 from ink.hooks._box_metrics_runtime import bump_layout_epoch
 from ink.layout import clear_box_refs, layout, render_layout_to_string
-from ink.render.diff import write_diff
+from ink.render.diff import repaint_frame, write_diff
 from ink.render.terminal import Terminal
 
 if TYPE_CHECKING:
@@ -421,7 +421,19 @@ class Instance:
             if not prev_frame:
                 write_diff(None, new_frame, self.stdout)
             else:
-                write_diff(prev_frame, new_frame, self.stdout, available_rows)
+                prev_line_count = len(prev_frame.split("\n"))
+                new_line_count = len(new_frame.split("\n")) if new_frame else 0
+                height_delta = abs(new_line_count - prev_line_count)
+                # Palette open/close and similar UI toggles change the live
+                # frame height by several rows. Incremental diff cannot
+                # reliably erase tail rows beyond ``available_rows`` — use a
+                # full erase + repaint so the input row stays anchored.
+                if height_delta >= 1 and available_rows:
+                    repaint_frame(
+                        prev_frame, new_frame, self.stdout, available_rows,
+                    )
+                else:
+                    write_diff(prev_frame, new_frame, self.stdout, available_rows)
             self.stdout.flush()
             if not self._unmounted:
                 self.current_frame = new_frame

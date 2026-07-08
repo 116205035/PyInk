@@ -51,7 +51,7 @@ from __future__ import annotations
 
 from typing import TextIO
 
-__all__ = ["write_diff"]
+__all__ = ["write_diff", "repaint_frame"]
 
 
 def write_diff(
@@ -88,6 +88,27 @@ def write_diff(
         return
 
     _repaint(old_frame, new_frame, stdout, available_rows)
+
+
+def repaint_frame(
+    old_frame: str,
+    new_frame: str,
+    stdout: TextIO,
+    available_rows: int | None = None,
+) -> None:
+    """Erase ``old_frame`` then paint ``new_frame`` from frame row 0.
+
+    Used when the live frame height changes enough (e.g. palette open /
+    close) that incremental ``write_diff`` would leave unreachable tail
+    rows uncleared or park the cursor at the wrong y.
+    """
+    if old_frame:
+        budget = available_rows if (available_rows and available_rows > 0) else len(old_frame.split("\n"))
+        _erase_reachable_rows(old_frame.split("\n"), stdout, budget)
+    if new_frame:
+        _paint_initial(new_frame, stdout)
+    elif old_frame:
+        stdout.write("\r")
 
 
 def _paint_initial(new_frame: str, stdout: TextIO) -> None:
@@ -132,6 +153,21 @@ def _repaint(
     """
     old_lines = old_frame.split("\n")
     new_lines = new_frame.split("\n")
+
+    # When the old frame was taller than the viewport repaint budget,
+    # incremental shrink cannot reach tail rows beyond ``row_cap`` to
+    # erase them. Clear every reachable old row, then repaint the new
+    # frame from frame row 0 (palette-close / large layout-collapse).
+    if (
+        available_rows
+        and available_rows > 0
+        and len(new_lines) < len(old_lines)
+        and len(old_lines) > available_rows
+        and (len(old_lines) - len(new_lines)) >= 6
+    ):
+        _erase_reachable_rows(old_lines, stdout, available_rows)
+        _paint_initial(new_frame, stdout)
+        return
 
     out: list[str] = []
     max_len = max(len(old_lines), len(new_lines))
@@ -178,6 +214,38 @@ def _repaint(
     # a cursor-up from ``cur_row`` (which was capped above), so the
     # retreat distance matches what the terminal actually moved — never
     # overshooting past frame row 0.
+    goto(0)
+    out.append("\r")
+    stdout.write("".join(out))
+
+
+def _erase_reachable_rows(
+    old_lines: list[str],
+    stdout: TextIO,
+    available_rows: int,
+) -> None:
+    """Clear every old frame row reachable without viewport clamping."""
+    row_cap = min(available_rows - 1, len(old_lines) - 1)
+    if row_cap < 0:
+        return
+    out: list[str] = []
+    cur_row = 0
+
+    def goto(target: int) -> None:
+        nonlocal cur_row
+        target = min(target, row_cap)
+        delta = target - cur_row
+        if delta > 0:
+            out.append("\x1b[" + str(delta) + "B")
+        elif delta < 0:
+            out.append("\x1b[" + str(-delta) + "A")
+        cur_row = target
+
+    for row_idx in range(len(old_lines)):
+        if row_idx > row_cap:
+            break
+        goto(row_idx)
+        out.append("\r\x1b[2K")
     goto(0)
     out.append("\r")
     stdout.write("".join(out))
