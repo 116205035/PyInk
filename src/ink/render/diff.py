@@ -53,6 +53,35 @@ from typing import TextIO
 
 __all__ = ["write_diff", "repaint_frame"]
 
+# When the live frame shrinks by this many rows or more, Instance._paint_now
+# routes through repaint_frame() (full erase + repaint) instead of write_diff()
+# (incremental). Below this threshold the incremental path is good enough —
+# small height changes (1-5 rows) don't trigger the cursor-drift bug.
+#
+# The threshold is currently advisory: Instance._paint_now intercepts every
+# height_delta >= 1 (conservative). When a future task wants to optimize
+# small-height diff performance, raise the Instance threshold to this value.
+_SHRINK_FULL_REPAINT_THRESHOLD = 6
+
+
+def _emit_cursor_move(
+    out: list[str], target: int, cur_row: int, row_cap: int,
+) -> int:
+    """Clamp ``target`` to ``row_cap``, emit cursor-up/down into ``out``.
+
+    Returns the new ``cur_row`` (equal to the clamped target). Shared by
+    ``_repaint`` and ``_erase_reachable_rows`` so cursor-move logic lives
+    in exactly one place — duplicated cursor-drift fixes were the original
+    bug source.
+    """
+    target = min(target, row_cap)
+    delta = target - cur_row
+    if delta > 0:
+        out.append("\x1b[" + str(delta) + "B")
+    elif delta < 0:
+        out.append("\x1b[" + str(-delta) + "A")
+    return target
+
 
 def write_diff(
     old_frame: str | None,
@@ -103,8 +132,9 @@ def repaint_frame(
     rows uncleared or park the cursor at the wrong y.
     """
     if old_frame:
-        budget = available_rows if (available_rows and available_rows > 0) else len(old_frame.split("\n"))
-        _erase_reachable_rows(old_frame.split("\n"), stdout, budget)
+        old_lines = old_frame.split("\n")
+        budget = available_rows if (available_rows and available_rows > 0) else len(old_lines)
+        _erase_reachable_rows(old_lines, stdout, budget)
     if new_frame:
         _paint_initial(new_frame, stdout)
     elif old_frame:
@@ -154,20 +184,11 @@ def _repaint(
     old_lines = old_frame.split("\n")
     new_lines = new_frame.split("\n")
 
-    # When the old frame was taller than the viewport repaint budget,
-    # incremental shrink cannot reach tail rows beyond ``row_cap`` to
-    # erase them. Clear every reachable old row, then repaint the new
-    # frame from frame row 0 (palette-close / large layout-collapse).
-    if (
-        available_rows
-        and available_rows > 0
-        and len(new_lines) < len(old_lines)
-        and len(old_lines) > available_rows
-        and (len(old_lines) - len(new_lines)) >= 6
-    ):
-        _erase_reachable_rows(old_lines, stdout, available_rows)
-        _paint_initial(new_frame, stdout)
-        return
+    # Note: shrink detection (frame getting shorter) is handled by the
+    # CALLER in Instance._paint_now — it routes any height_delta >= 1 to
+    # repaint_frame() which calls _erase_reachable_rows + _paint_initial
+    # directly. So _repaint itself only needs to handle the same-height
+    # / taller-frame cases below.
 
     out: list[str] = []
     max_len = max(len(old_lines), len(new_lines))
@@ -181,18 +202,6 @@ def _repaint(
     # invent rows that don't exist.
     row_cap = min(row_cap, max_len - 1)
 
-    def goto(target: int) -> None:
-        nonlocal cur_row
-        # Clamp the target to the row cap so we never emit a cursor-down
-        # that would push past the viewport bottom.
-        target = min(target, row_cap)
-        delta = target - cur_row
-        if delta > 0:
-            out.append("\x1b[" + str(delta) + "B")
-        elif delta < 0:
-            out.append("\x1b[" + str(-delta) + "A")
-        cur_row = target
-
     for row_idx in range(max_len):
         old_row = old_lines[row_idx] if row_idx < len(old_lines) else None
         new_row = new_lines[row_idx] if row_idx < len(new_lines) else None
@@ -204,7 +213,7 @@ def _repaint(
         # do without a full repaint.
         if row_idx > row_cap:
             continue
-        goto(row_idx)
+        cur_row = _emit_cursor_move(out, row_idx, cur_row, row_cap)
         out.append("\r")
         out.append("\x1b[2K")
         if new_row is not None:
@@ -214,7 +223,7 @@ def _repaint(
     # a cursor-up from ``cur_row`` (which was capped above), so the
     # retreat distance matches what the terminal actually moved — never
     # overshooting past frame row 0.
-    goto(0)
+    cur_row = _emit_cursor_move(out, 0, cur_row, row_cap)
     out.append("\r")
     stdout.write("".join(out))
 
@@ -231,21 +240,11 @@ def _erase_reachable_rows(
     out: list[str] = []
     cur_row = 0
 
-    def goto(target: int) -> None:
-        nonlocal cur_row
-        target = min(target, row_cap)
-        delta = target - cur_row
-        if delta > 0:
-            out.append("\x1b[" + str(delta) + "B")
-        elif delta < 0:
-            out.append("\x1b[" + str(-delta) + "A")
-        cur_row = target
-
     for row_idx in range(len(old_lines)):
         if row_idx > row_cap:
             break
-        goto(row_idx)
+        cur_row = _emit_cursor_move(out, row_idx, cur_row, row_cap)
         out.append("\r\x1b[2K")
-    goto(0)
+    cur_row = _emit_cursor_move(out, 0, cur_row, row_cap)
     out.append("\r")
     stdout.write("".join(out))
