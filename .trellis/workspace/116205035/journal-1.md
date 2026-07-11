@@ -654,3 +654,39 @@ Fixed three blockers Jarvis Phase 1 hit when integrating PyInk's inline TUI mode
 ### Next Steps
 
 - None - task complete
+
+
+## Session 19: 完善 markdown 显示效果细节
+
+**Date**: 2026-07-11
+**Task**: 完善 markdown 显示效果细节
+**Branch**: `main`
+
+### Summary
+
+PyInk Markdown 渲染对标 claude-code，拆 3 个 PR 完成：PR1 基础改造（语义颜色键+inline 代码继承外层样式+heading underline/italic+blockquote 竖线+列表多级标记）、PR2 表格大改（自画边框+attrs style 对齐+inline 单元格+string_width 列宽+静态路径改 Text(callable) 响应式收缩+三段式算法+key-value 降级）、PR3 默认值改造为 claude-code 风格+14 个 spacing 键+嵌套表格 columns 透传修复+语义颜色 wire-up+CHANGELOG.md。新建 frontend/rendering-contracts.md spec 记录 2 个跨层契约（get_current_text_width 只在 Text(callable) leaf 注入 + string_width 剥 CSI）。109 markdown 测试全过，PRD 7 条 Acceptance Criteria 全部验收。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `401e17e` | (see git log) |
+| `ae477a5` | (see git log) |
+| `ba295b4` | (see git log) |
+| `529b830` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
