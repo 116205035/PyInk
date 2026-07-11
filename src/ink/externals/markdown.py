@@ -52,12 +52,13 @@ Design (per PRD scope):
   (CSI) sequences, so the extra SGR bytes do not inflate the column
   budget.
 
-Inline code colour: the PRD example theme spells it ``"red"`` (SGR 31).
-We follow that. Heading colours mirror the PRD's example theme, with
-``"gray"`` (SGR 90) used in place of ``"brightBlack"`` because PyInk's
-named-colour table (see :data:`ink.render.ansi.NAMED_COLORS`) spells
-it that way (see :mod:`ink.externals.highlighted_code` for the same
-choice).
+Inline code colour: PR3 defaults to the semantic ``"accent"`` key
+(resolved to ``"cyan"``, SGR 36). Heading colours PR3-default to
+``None`` (terminal default text colour) with h1 distinguished by
+italic + underline; pre-PR3 used a rainbow palette (magenta / yellow /
+green / cyan / blue / gray). A caller can restore the pre-PR3 look
+via ``theme={"h1_color": "magenta", "code_color": "red", ...}`` —
+see ``CHANGELOG.md`` for the full migration table.
 
 Code-block integration (PR4): fenced / indented code blocks render via
 :func:`HighlightedCode` when :mod:`pygments` is importable. The block is
@@ -180,32 +181,50 @@ def _resolve_theme_color(
     return SEMANTIC_COLORS.get(semantic_key)
 
 
-#: Default theme: per-block colour / weight hints. Keys mirror the PRD's
-#: example theme. ``None`` means "inherit the terminal default". Colour
-#: names use PyInk's :data:`ink.render.ansi.NAMED_COLORS` vocabulary
-#: (``"gray"`` instead of ``"brightBlack"`` — both spell SGR 90, but only
-#: ``"gray"`` / ``"grey"`` / ``"blackBright"`` are in the table).
+#: Default theme: per-block colour / weight hints. PR3 rewrites the
+#: defaults to claude-code style: headings use the terminal's default
+#: text colour (not the pre-PR3 rainbow palette), with h1 distinguished
+#: by italic + underline in addition to bold; inline code / links use
+#: semantic colour keys (``accent`` / ``muted``) so callers can re-skin
+#: the whole document via the semantic layer; blockquotes render with a
+#: visible left bar (``▎``) by default.
+#:
+#: ``None`` means "inherit the terminal default". Colour names use
+#: PyInk's :data:`ink.render.ansi.NAMED_COLORS` vocabulary (``"gray"``
+#: instead of ``"brightBlack"`` — both spell SGR 90, but only
+#: ``"gray"`` / ``"grey"`` / ``"blackBright"`` are in the table). A
+#: legacy colour key whose value is itself a semantic name (e.g.
+#: ``"accent"``) resolves through :data:`SEMANTIC_COLORS` via
+#: :func:`_resolve_theme_color`.
 #:
 #: ``h{n}_bold`` entries carry ``bool`` values; colour entries carry
 #: ``str | None``. The dict is typed as ``dict[str, Any]`` so callers
 #: can override any entry without hitting a union-narrowing error.
 DEFAULT_MARKDOWN_THEME: dict[str, Any] = {
-    "h1_color": "magenta",
+    # Headings — claude-code style: terminal default colour (None) +
+    # bold at every level; h1 adds italic + underline for emphasis (see
+    # the ``h{n}_underline`` / ``h{n}_italic`` knobs below).
+    "h1_color": None,
     "h1_bold": True,
-    "h2_color": "yellow",
+    "h2_color": None,
     "h2_bold": True,
-    "h3_color": "green",
+    "h3_color": None,
     "h3_bold": True,
-    "h4_color": "cyan",
+    "h4_color": None,
     "h4_bold": True,
-    "h5_color": "blue",
+    "h5_color": None,
     "h5_bold": True,
-    "h6_color": "gray",
+    "h6_color": None,
     "h6_bold": True,
-    "code_color": "red",
+    # Inline — semantic colour keys. ``code_color="accent"`` resolves to
+    # cyan (SEMANTIC_COLORS["accent"]); ``link_color="accent"`` matches
+    # so code + links read as the same semantic accent. ``quote_color``
+    # uses ``muted`` so blockquote inline text reads as dim without a
+    # hard-coded ``gray``.
+    "code_color": "accent",
     "code_bg": None,
-    "link_color": "blue",
-    "quote_color": "gray",
+    "link_color": "accent",
+    "quote_color": "muted",
     "code_block_lang_color": "gray",
     "hr_color": None,
     # ---- PR1: Semantic colour keys --------------------------------------
@@ -224,11 +243,12 @@ DEFAULT_MARKDOWN_THEME: dict[str, Any] = {
     "warning_color": "yellow",
     "info_color": "blue",
     # ---- PR1: Heading style knobs --------------------------------------
-    # ``h{n}_underline`` / ``h{n}_italic`` default to ``False`` so the
-    # existing rainbow-colour + bold heading rendering is unchanged.
-    # Callers can opt in per level (e.g. ``theme={"h1_underline": True}``).
-    "h1_underline": False,
-    "h1_italic": False,
+    # PR3 flips h1's italic + underline defaults to ``True`` so the
+    # default h1 reads as claude-code (bold + italic + underline, no
+    # rainbow colour). h2-h6 keep the pre-PR3 ``False`` defaults — bold
+    # alone is enough differentiation once colour is removed.
+    "h1_underline": True,
+    "h1_italic": True,
     "h2_underline": False,
     "h2_italic": False,
     "h3_underline": False,
@@ -240,12 +260,12 @@ DEFAULT_MARKDOWN_THEME: dict[str, Any] = {
     "h6_underline": False,
     "h6_italic": False,
     # ---- PR1: Blockquote bar -------------------------------------------
-    # ``quote_bar_char=None`` keeps the existing pure-indent (paddingLeft=2)
-    # behaviour. Setting it to a visible character (e.g. ``"▎"``) wraps
-    # the blockquote in a row Box with a coloured left bar replacing
-    # the indent.
-    "quote_bar_char": None,
-    "quote_bar_color": None,
+    # PR3 default: ``quote_bar_char="▎"`` (U+258E) draws a left bar in
+    # the ``muted`` semantic colour, matching claude-code's blockquote
+    # treatment. Setting ``quote_bar_char=None`` restores the pre-PR3
+    # pure-indent (paddingLeft=2) behaviour.
+    "quote_bar_char": "▎",
+    "quote_bar_color": "muted",
     # ---- PR1: List nested markers --------------------------------------
     # ``list_ordered_nested_style="decimal"`` keeps the existing
     # ``1. 2. 3.`` at every depth. Other values: ``"alpha"`` (a. b. c.),
@@ -308,6 +328,30 @@ DEFAULT_MARKDOWN_THEME: dict[str, Any] = {
     # Safety margin left between the table and the terminal right edge
     # to absorb resize-race measurement drift (claude-code: 4).
     "table_safety_margin": 4,
+    # ---- PR3: Block spacing ---------------------------------------------
+    # Per-block ``spacing_before_*`` / ``spacing_after_*`` knobs control
+    # the blank-row gap between adjacent top-level blocks. The actual
+    # gap inserted between two blocks is ``max(spacing_after_<prev>,
+    # spacing_before_<next>)`` so a block that wants a bigger leading
+    # gap (e.g. a heading) always wins over a preceding block's smaller
+    # trailing gap. Defaults mirror claude-code's spacing rules:
+    # headings get a leading blank row + 2 trailing blanks; paragraphs
+    # get 1 trailing blank; other blocks get 1 leading + 1 trailing so
+    # they visually separate from neighbours.
+    "spacing_before_heading": 1,
+    "spacing_after_heading": 2,
+    "spacing_before_paragraph": 0,
+    "spacing_after_paragraph": 1,
+    "spacing_before_code_block": 1,
+    "spacing_after_code_block": 1,
+    "spacing_before_blockquote": 1,
+    "spacing_after_blockquote": 1,
+    "spacing_before_list": 0,
+    "spacing_after_list": 1,
+    "spacing_before_table": 1,
+    "spacing_after_table": 1,
+    "spacing_before_hr": 1,
+    "spacing_after_hr": 1,
 }
 
 
@@ -529,7 +573,11 @@ def _render_inline(
             continue
 
         if ctype == "code_inline":
-            color = theme.get("code_color")
+            # PR3: ``code_color`` resolves through the semantic layer so
+            # the default ``"accent"`` maps to cyan (SGR 36). A concrete
+            # colour name (``"red"``) or ``None`` (terminal default) is
+            # returned verbatim.
+            color = _resolve_theme_color(theme, "accent", "code_color")
             # PR1: inline code now inherits the surrounding bold / italic /
             # strikethrough so ``**bold `code`**`` renders the code segment
             # bold too. Previously code_inline dropped the outer inline
@@ -557,6 +605,8 @@ def _render_inline(
         if ctype == "link_open":
             url = _link_url(child)
             inner, j = _collect_balanced(children, i, "link_open", "link_close")
+            # PR3: ``link_color`` resolves through the semantic layer so
+            # the default ``"accent"`` maps to cyan (SGR 36).
             inner_str = _render_inline(
                 inner,
                 theme,
@@ -564,7 +614,7 @@ def _render_inline(
                 italic=italic,
                 strikethrough=strikethrough,
                 link_url=url,
-                link_color=theme.get("link_color"),
+                link_color=_resolve_theme_color(theme, "accent", "link_color"),
             )
             out.append(inner_str)
             i = j + 1
@@ -657,7 +707,10 @@ def _render_heading(
     """
     level = token.tag  # "h1" / "h2" / … / "h6"
     suffix = level[1:]
-    color = theme.get(f"h{suffix}_color")
+    # PR3: heading colour resolves through the semantic layer so
+    # ``h1_color="accent"`` (or the semantic default) maps to a concrete
+    # SGR colour name. ``None`` stays ``None`` (inherit terminal default).
+    color = _resolve_theme_color(theme, "text", f"h{suffix}_color")
     bold = _theme_bool(theme.get(f"h{suffix}_bold", True))
     underline = _theme_bool(theme.get(f"h{suffix}_underline", False))
     italic = _theme_bool(theme.get(f"h{suffix}_italic", False))
@@ -771,6 +824,8 @@ def _render_blockquote(
     tokens: list[Token],
     start: int,
     theme: dict[str, Any],
+    *,
+    columns: int | None = None,
 ) -> tuple[Element, int]:
     """Render a ``blockquote_open`` ... ``blockquote_close`` span.
 
@@ -780,26 +835,43 @@ def _render_blockquote(
 
     Two shapes are supported:
 
-    * **Default (PR3 behaviour)** — ``quote_bar_char`` is ``None``: the
-      blockquote is wrapped in a column ``Box`` with ``paddingLeft=2``
-      for a pure-indent look. The ``quote_color`` from the theme is
-      applied to inline runs via a ``__quote__`` flag that makes each
-      inline text run pick up ``dimColor=True``.
-    * **Bar mode (PR1)** — ``quote_bar_char`` is a non-empty string
-      (e.g. ``"▎"``): the blockquote becomes a row ``Box`` with a
-      coloured left bar (``Text(quote_bar_char, color=quote_bar_color)``)
-      and a 1-space gutter replacing the ``paddingLeft=2`` indent. When
-      ``quote_bar_color`` is ``None`` the bar falls back to ``dimColor``
-      so the default (no explicit colour) still reads as muted.
+    * **Bar mode (PR3 default)** — ``quote_bar_char`` is a non-empty
+      string (default ``"▎"``): the blockquote becomes a row ``Box``
+      with a coloured left bar (``Text(quote_bar_char,
+      color=quote_bar_color)``) and a 1-space gutter replacing the
+      ``paddingLeft=2`` indent. ``quote_bar_color`` resolves through
+      the semantic layer so the default ``"muted"`` maps to gray (SGR
+      90); ``None`` falls back to ``dimColor`` for a muted look without
+      a hard-coded colour.
+    * **Pure-indent mode** — ``quote_bar_char`` is ``None``: the
+      blockquote is wrapped in a column ``Box`` with ``paddingLeft=2``.
+      The ``quote_color`` from the theme is applied to inline runs via
+      a ``__quote__`` flag that makes each inline text run pick up
+      ``dimColor=True``.
+
+    PR3: ``columns`` is threaded into the recursive :func:`_render_tokens`
+    call so a table nested inside a blockquote responsively shrinks to
+    the blockquote's available width (bar + gutter ≈ 2 cells).
     """
     inner_tokens, j = _collect_balanced(tokens, start, "blockquote_open", "blockquote_close")
     quote_theme = dict(theme)
     quote_theme["__quote__"] = True
-    inner_elements, _ = _render_tokens(inner_tokens, 0, quote_theme)
 
     bar_char = theme.get("quote_bar_char")
+    # Both modes consume 2 cells of indent: bar mode uses bar (1) +
+    # gutter (1); pure-indent mode uses paddingLeft=2. The constant lets
+    # the recursive ``_render_tokens`` call budget the inner content
+    # width so a nested table can shrink to fit the blockquote.
+    bar_indent = 2
+    inner_columns: int | None = None
+    if columns is not None and columns > bar_indent:
+        inner_columns = columns - bar_indent
+    inner_elements, _ = _render_tokens(
+        inner_tokens, 0, quote_theme, columns=inner_columns
+    )
+
     if bar_char:
-        bar_color = theme.get("quote_bar_color")
+        bar_color = _resolve_theme_color(theme, "muted", "quote_bar_color")
         bar_props: dict[str, Any] = {"dimColor": True}
         if bar_color is not None:
             bar_props = {"color": bar_color}
@@ -898,6 +970,7 @@ def _render_list(
     theme: dict[str, Any],
     *,
     depth: int = 0,
+    columns: int | None = None,
 ) -> tuple[Element, int]:
     """Render a ``bullet_list_open`` / ``ordered_list_open`` span.
 
@@ -913,6 +986,11 @@ def _render_list(
     to :func:`_render_list_item`'s recursive :func:`_render_tokens`
     call, so a list nested two levels deep picks up the right marker
     style automatically.
+
+    PR3: ``columns`` is threaded into the recursive
+    :func:`_render_list_item` call so a table nested inside a list
+    item responsively shrinks to the item's available width (the
+    marker + the nested paddingLeft=2 together consume ≈ 4 cells).
     """
     list_token = tokens[start]
     is_ordered = list_token.type == "ordered_list_open"
@@ -936,7 +1014,10 @@ def _render_list(
                 body_tokens, i, "list_item_open", "list_item_close"
             )
             rows.append(
-                _render_list_item(item_tokens, is_ordered, counter, theme, depth=depth)
+                _render_list_item(
+                    item_tokens, is_ordered, counter, theme,
+                    depth=depth, columns=columns,
+                )
             )
             if is_ordered:
                 counter += 1
@@ -954,6 +1035,7 @@ def _render_list_item(
     theme: dict[str, Any],
     *,
     depth: int = 0,
+    columns: int | None = None,
 ) -> Element:
     """Render a single list item.
 
@@ -967,6 +1049,12 @@ def _render_list_item(
     recurses into :func:`_render_list` with ``depth + 1``, picking up
     the next marker style (decimal → alpha → roman for ordered,
     cycling chars for bullet).
+
+    PR3: ``columns`` is threaded into the recursive :func:`_render_tokens`
+    call so a table nested inside a list item responsively shrinks. The
+    nested ``paddingLeft=2`` consumes 2 cells; the marker gutter consumes
+    ≈ 2 more (``"- "`` / ``"1. "``), so the inner content gets
+    ``columns - 4`` to render against.
     """
     marker = _list_marker(is_ordered, counter, depth, theme)
     if not tokens:
@@ -988,8 +1076,16 @@ def _render_list_item(
 
     rest_tokens = tokens[rest_start:]
     # Nested lists inside this item start at depth + 1 so their markers
-    # shift (decimal → alpha → roman, or cycling bullet chars).
-    rest_elements, _ = _render_tokens(rest_tokens, 0, theme, depth=depth + 1)
+    # shift (decimal → alpha → roman, or cycling bullet chars). Thread
+    # ``columns`` through so nested tables shrink to the item's width.
+    # The marker gutter (≈ 2 cells) + nested paddingLeft (2 cells) are
+    # subtracted so the inner content gets an honest width budget.
+    inner_columns: int | None = None
+    if columns is not None and columns > 4:
+        inner_columns = columns - 4
+    rest_elements, _ = _render_tokens(
+        rest_tokens, 0, theme, depth=depth + 1, columns=inner_columns
+    )
 
     head_row_children: list[Element] = [
         Text(f"{marker} ", dimColor=True),
@@ -1481,6 +1577,61 @@ def _render_table_kv(
 # ---------------------------------------------------------------------------
 
 
+#: Map a block token type to the spacing-theme-key suffix used by
+#: :func:`_render_tokens` to look up ``spacing_before_<suffix>`` /
+#: ``spacing_after_<suffix>``. ``None`` means "no spacing rule" — the
+#: block is rendered without contributing to the gap calculation (this
+#: is the case for bare inline tokens and unrecognised structural
+#: noise). Keeping the map module-level makes the walker cheap and lets
+#: callers reason about which token types participate in spacing.
+_BLOCK_TYPE_FOR_SPACING: dict[str, str] = {
+    "heading_open": "heading",
+    "paragraph_open": "paragraph",
+    "fence": "code_block",
+    "code_block": "code_block",
+    "blockquote_open": "blockquote",
+    "bullet_list_open": "list",
+    "ordered_list_open": "list",
+    "table_open": "table",
+    "hr": "hr",
+    "inline": "paragraph",  # bare inline treated as a paragraph
+}
+
+
+def _block_spacing(
+    theme: dict[str, Any], after: str | None, before: str | None
+) -> int:
+    """Return the blank-row gap to insert between two adjacent blocks.
+
+    The gap is ``max(spacing_after_<after>, spacing_before_<before>)``
+    so a block that wants a bigger leading gap (e.g. a heading's
+    ``spacing_before_heading=1``) always wins over a preceding block's
+    smaller trailing gap. ``None`` for either side means "no
+    contribution" (treated as 0). The result is clamped to be
+    non-negative; theme values are coerced to ``int`` so a stray
+    ``"1"`` from a config file still works.
+    """
+    after_val = 0
+    if after is not None:
+        after_val = int(theme.get(f"spacing_after_{after}", 0) or 0)
+    before_val = 0
+    if before is not None:
+        before_val = int(theme.get(f"spacing_before_{before}", 0) or 0)
+    return max(after_val, before_val)
+
+
+def _spacer_rows(n: int) -> list[Element]:
+    """Return ``n`` empty ``Text`` leaves to act as blank-row spacers.
+
+    A blank ``Text("")`` renders as a single empty row; stacking ``n``
+    of them inserts ``n`` blank rows between adjacent blocks. ``n<=0``
+    returns an empty list so callers can splat the result unconditionally.
+    """
+    if n <= 0:
+        return []
+    return [Text("") for _ in range(n)]
+
+
 def _render_tokens(
     tokens: list[Token],
     start: int,
@@ -1491,10 +1642,12 @@ def _render_tokens(
 ) -> tuple[list[Element], int]:
     """Walk ``tokens`` from ``start`` and render each top-level block.
 
-    Returns the list of rendered ``Element``\\ s and the index of the
-    next unprocessed token (which is ``len(tokens)`` when called at the
-    top level, or the index past the closing token of a sub-block when
-    called recursively).
+    Returns the list of rendered ``Element``\\ s (with blank-row
+    spacers already inserted between adjacent blocks per the
+    ``spacing_before_*`` / ``spacing_after_*`` theme knobs) and the
+    index of the next unprocessed token (which is ``len(tokens)`` when
+    called at the top level, or the index past the closing token of a
+    sub-block when called recursively).
 
     ``depth`` tracks the list-nesting depth so :func:`_render_list` can
     pick the right marker style (``decimal`` / ``alpha`` / ``roman`` /
@@ -1502,73 +1655,92 @@ def _render_tokens(
     recursive descent into a nested list passes ``depth + 1``.
 
     ``columns`` is the available content width for width-aware blocks
-    (currently only :func:`_render_table` consumes it for responsive
-    shrink + key-value fallback). ``None`` means "no width constraint
-    known" — tables render at their ideal widths without shrinking.
-    Both the static and reactive ``Markdown`` paths route through
+    (tables + the recursive blockquote / list paths that thread it
+    further inward). ``None`` means "no width constraint known" —
+    tables render at their ideal widths without shrinking. Both the
+    static and reactive ``Markdown`` paths route through
     :func:`_render_markdown_to_string`, which threads the layout-time
     width (or viewport fallback) here.
+
+    PR3: spacing is computed here (not via a flat ``gap=1`` on the
+    outer ``Box``) so per-block gaps can vary — a heading gets a
+    2-blank-row trailing gap, a paragraph gets 1, etc. The gap between
+    two adjacent blocks is ``max(spacing_after_<prev>,
+    spacing_before_<next>)`` so whichever block wants more space wins.
     """
     elements: list[Element] = []
+    prev_block_type: str | None = None
     i = start
     while i < len(tokens):
         token = tokens[i]
         ttype = token.type
 
+        block_type: str | None = None
+        el: Element | None = None
+
         if ttype == "heading_open":
             # heading_open / inline / heading_close
             inline = tokens[i + 1] if i + 1 < len(tokens) else None
             if inline is not None and inline.type == "inline":
-                elements.append(_render_heading(token, inline, theme))
+                el = _render_heading(token, inline, theme)
+                block_type = "heading"
             # Skip heading_open + inline + heading_close.
             i += 3
-            continue
-
-        if ttype == "paragraph_open":
+        elif ttype == "paragraph_open":
             inline = tokens[i + 1] if i + 1 < len(tokens) else None
             if inline is not None and inline.type == "inline":
-                elements.append(_render_paragraph(inline, theme))
+                el = _render_paragraph(inline, theme)
+                block_type = "paragraph"
             i += 3
-            continue
-
-        if ttype in ("fence", "code_block"):
-            elements.append(_render_fence(token, theme))
+        elif ttype in ("fence", "code_block"):
+            el = _render_fence(token, theme)
+            block_type = "code_block"
             i += 1
-            continue
-
-        if ttype == "blockquote_open":
-            el, next_i = _render_blockquote(tokens, i, theme)
-            elements.append(el)
+        elif ttype == "blockquote_open":
+            el, next_i = _render_blockquote(tokens, i, theme, columns=columns)
+            block_type = "blockquote"
             i = next_i
-            continue
-
-        if ttype in ("bullet_list_open", "ordered_list_open"):
-            el, next_i = _render_list(tokens, i, theme, depth=depth)
-            elements.append(el)
+        elif ttype in ("bullet_list_open", "ordered_list_open"):
+            el, next_i = _render_list(
+                tokens, i, theme, depth=depth, columns=columns
+            )
+            block_type = "list"
             i = next_i
-            continue
-
-        if ttype == "hr":
+        elif ttype == "hr":
             hr_color = theme.get("hr_color")
-            elements.append(Divider(color=hr_color))
+            el = Divider(color=hr_color)
+            block_type = "hr"
             i += 1
-            continue
-
-        if ttype == "table_open":
+        elif ttype == "table_open":
             el, next_i = _render_table(tokens, i, theme, columns=columns)
-            elements.append(el)
+            block_type = "table"
             i = next_i
-            continue
-
-        if ttype == "inline":
+        elif ttype == "inline":
             # A bare inline token at the top level (no paragraph wrapper).
-            elements.append(_render_paragraph(token, theme))
+            el = _render_paragraph(token, theme)
+            block_type = "paragraph"
+            i += 1
+        else:
+            # Anything else (html_block, paragraph_close, list_item_close,
+            # …) is structural noise from a sub-block — skip silently.
             i += 1
             continue
 
-        # Anything else (html_block, paragraph_close, list_item_close,
-        # …) is structural noise from a sub-block — skip silently.
-        i += 1
+        if el is None:
+            continue
+
+        # Insert the inter-block gap *before* this block based on the
+        # previous block's ``spacing_after`` + this block's
+        # ``spacing_before``. The first block (``prev_block_type is
+        # None``) gets no leading gap so documents don't start with a
+        # blank row.
+        if prev_block_type is not None and block_type is not None:
+            gap = _block_spacing(theme, prev_block_type, block_type)
+            elements.extend(_spacer_rows(gap))
+
+        elements.append(el)
+        if block_type is not None:
+            prev_block_type = block_type
 
     return elements, i
 
@@ -1598,7 +1770,11 @@ def _render_markdown_to_string(text: str, columns: int, theme: dict[str, Any]) -
 
     tokens = _parse(text)
     elements, _ = _render_tokens(tokens, 0, theme, columns=columns)
-    inner = create_element("box", *elements, flexDirection="column", gap=1)
+    # PR3: inter-block spacing is computed inside ``_render_tokens``
+    # (per-block ``spacing_before_*`` / ``spacing_after_*`` theme knobs)
+    # rather than via a flat ``gap=1`` on the outer Box, so a heading
+    # can ask for a 2-row trailing gap while a paragraph asks for 1.
+    inner = create_element("box", *elements, flexDirection="column")
     reconciler = Reconciler()
     mounted = reconciler.mount(inner)
     try:
@@ -1707,10 +1883,12 @@ def _MarkdownImpl(**props: Any) -> Element:
 
     box_props = dict(box_props)
     box_props.pop("flexDirection", None)
+    # PR3: no ``gap=1`` here — spacing is computed inside
+    # :func:`_render_tokens` via per-block ``spacing_before_*`` /
+    # ``spacing_after_*`` theme knobs (see :func:`_render_markdown_to_string`).
     return Box(
         Text(render_reactive),
         flexDirection="column",
-        gap=1,
         **box_props,
     )
 

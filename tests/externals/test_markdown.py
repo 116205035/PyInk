@@ -240,27 +240,46 @@ def test_caller_flexDirection_is_ignored() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_h1_gets_magenta_bold() -> None:
+def test_h1_gets_bold_italic_underline() -> None:
+    """PR3: default h1 is bold + italic + underline with no colour (claude-code style).
+
+    Pre-PR3 h1 was magenta (SGR 35) + bold. PR3 rewrites the default to
+    the terminal's text colour (``None``) + bold + italic + underline so
+    headings read as structural markers rather than a rainbow palette.
+    """
     out = _render(Markdown("# Title"))
-    # Magenta foreground (35) + bold (1) wraps "Title".
-    assert f"{ESC}[35m" in out
+    # Bold (1) + italic (3) + underline (4) all wrap "Title".
     assert f"{ESC}[1m" in out
+    assert f"{ESC}[3m" in out
+    assert f"{ESC}[4m" in out
     assert "Title" in out
+    # No colour SGR is emitted (h1_color=None inherits the terminal default).
+    # We check that none of the legacy rainbow colours appear.
+    for sgr in (f"{ESC}[35m", f"{ESC}[33m", f"{ESC}[32m", f"{ESC}[36m", f"{ESC}[34m"):
+        assert sgr not in out
 
 
-def test_h2_gets_yellow_bold() -> None:
+def test_h2_gets_bold_no_color() -> None:
+    """PR3: default h2 is bold only (no colour, no italic, no underline)."""
     out = _render(Markdown("## Sub"))
-    assert f"{ESC}[33m" in out
+    assert f"{ESC}[1m" in out
     assert "Sub" in out
+    # h2 has no italic / underline by default.
+    assert f"{ESC}[3m" not in out
+    assert f"{ESC}[4m" not in out
+    # No colour SGR (h2_color=None).
+    assert f"{ESC}[33m" not in out
 
 
-def test_h3_gets_green_bold() -> None:
+def test_h3_gets_bold_no_color() -> None:
+    """PR3: default h3 is bold only (no colour)."""
     out = _render(Markdown("### Deep"))
-    assert f"{ESC}[32m" in out
+    assert f"{ESC}[1m" in out
     assert "Deep" in out
+    assert f"{ESC}[32m" not in out
 
 
-def test_h4_to_h6_each_have_own_color() -> None:
+def test_h4_to_h6_each_have_bold() -> None:
     """All six heading levels render without error and produce bold."""
     out = _render(Markdown("# A\n## B\n### C\n#### D\n##### E\n###### F"))
     # All headings present and bolded.
@@ -294,15 +313,16 @@ def test_italic_inline() -> None:
 
 def test_inline_code_gets_code_color() -> None:
     out = _render(Markdown("Use `code` here."))
-    # code_color default is red (SGR 31).
-    assert f"{ESC}[31mcode{ESC}[0m" in out
+    # PR3: code_color default is "accent" → resolved to cyan (SGR 36).
+    assert f"{ESC}[36mcode{ESC}[0m" in out
 
 
 def test_combined_bold_italic_code() -> None:
     out = _render(Markdown("**a** *b* `c`"))
     assert f"{ESC}[1ma{ESC}[0m" in out
     assert f"{ESC}[3mb{ESC}[0m" in out
-    assert f"{ESC}[31mc{ESC}[0m" in out
+    # PR3: code_color default "accent" → cyan (SGR 36).
+    assert f"{ESC}[36mc{ESC}[0m" in out
 
 
 def test_softbreak_in_paragraph() -> None:
@@ -328,8 +348,8 @@ def test_link_wraps_label_in_osc8() -> None:
 
 def test_link_color_applied_to_label() -> None:
     out = _render(Markdown("[Click](https://example.com)"))
-    # Default link_color is blue (SGR 34).
-    assert f"{ESC}[34m" in out
+    # PR3: link_color default is "accent" → cyan (SGR 36).
+    assert f"{ESC}[36m" in out
 
 
 # ---------------------------------------------------------------------------
@@ -586,9 +606,12 @@ def test_table_cell_inline_bold() -> None:
 
 
 def test_table_cell_inline_code() -> None:
-    """`` `code` `` inside a cell renders with the code colour (red SGR 31)."""
+    """`` `code` `` inside a cell renders with the code colour.
+
+    PR3: code_colour default is ``"accent"`` → cyan (SGR 36).
+    """
     out = _render(Markdown("| A |\n|---|\n| `code` |\n"))
-    assert f"{ESC}[31mcode{ESC}[0m" in out
+    assert f"{ESC}[36mcode{ESC}[0m" in out
 
 
 def test_table_responsive_shrink_wide() -> None:
@@ -978,8 +1001,12 @@ def test_theme_bold_disabled_for_h1() -> None:
     out = _render(Markdown("# Title", theme={"h1_bold": False}))
     assert "Title" in out
     # With bold disabled, no SGR 1 should be applied to the heading
-    # content. The magenta colour (35) should still appear.
-    assert f"{ESC}[35m" in out
+    # content. PR3: h1_color default is None (terminal default) so no
+    # colour SGR appears either — only italic (3) + underline (4) remain.
+    assert f"{ESC}[1m" not in out
+    # Italic + underline are still on (PR3 defaults).
+    assert f"{ESC}[3m" in out
+    assert f"{ESC}[4m" in out
 
 
 # ---------------------------------------------------------------------------
@@ -1276,9 +1303,12 @@ def test_markdown_with_code_block_inside_box_border_composes() -> None:
             padding=1,
         )
     )
-    # Heading + code keyword both present.
+    # Heading present.
     assert "Title" in out
-    assert f"{ESC}[35m" in out  # keyword magenta from the code block
+    # PR3: h1 default has no colour SGR (None), so we assert the code
+    # block's syntax highlighting appears instead — Pygments maps ``=``
+    # to red (SGR 31) and the number ``1`` to cyan (SGR 36).
+    assert f"{ESC}[31m" in out or f"{ESC}[36m" in out
 
 
 def test_fenced_code_block_falls_back_to_dim_when_pygments_missing(
@@ -1471,21 +1501,16 @@ def test_inline_code_inherits_bold() -> None:
     active bold / italic / strikethrough.
     """
     out = _render(Markdown("**bold `code`**"))
-    # The code segment should carry both the code colour (default red,
-    # SGR 31) and bold (SGR 1). We check that the bold SGR appears
-    # before the code colour SGR within the same run — i.e. the code
-    # segment is wrapped with both. The exact interleaving depends on
-    # apply_style's open order (dim → fg → bg → bold → italic → …),
-    # so SGR 1 (bold) follows SGR 31 (red fg).
+    # PR3: code_color default "accent" → cyan (SGR 36). Bold SGR 1.
     assert "code" in out
-    assert f"{ESC}[31m" in out  # code_color red
+    assert f"{ESC}[36m" in out  # code_color accent → cyan
     assert f"{ESC}[1m" in out  # bold
     # The code run itself should be wrapped with both: find the
     # substring where the code text is wrapped by bold+colour.
     # apply_style emits opens in order: dim, fg, bg, bold, italic, ...
-    # so for (color=red, bold=True) we get ESC[31m ESC[1m code ESC[0m.
-    assert f"{ESC}[31m{ESC}[1mcode{ESC}[0m" in out, (
-        f"expected code segment wrapped with red+bold; got: {out!r}"
+    # so for (color=cyan, bold=True) we get ESC[36m ESC[1m code ESC[0m.
+    assert f"{ESC}[36m{ESC}[1mcode{ESC}[0m" in out, (
+        f"expected code segment wrapped with cyan+bold; got: {out!r}"
     )
 
 
@@ -1501,10 +1526,11 @@ def test_inline_code_inherits_italic_and_strikethrough() -> None:
     out = _render(Markdown("*italic `code`*"))
     assert "code" in out
     assert f"{ESC}[3m" in out  # italic
+    # PR3: code_color default "accent" → cyan (SGR 36).
     # The code run should carry both italic and the code colour.
-    # apply_style open order: fg → bold → italic, so ESC[31m ESC[3m code.
-    assert f"{ESC}[31m{ESC}[3mcode{ESC}[0m" in out, (
-        f"expected code segment wrapped with red+italic; got: {out!r}"
+    # apply_style open order: fg → bold → italic, so ESC[36m ESC[3m code.
+    assert f"{ESC}[36m{ESC}[3mcode{ESC}[0m" in out, (
+        f"expected code segment wrapped with cyan+italic; got: {out!r}"
     )
 
 
@@ -1518,8 +1544,8 @@ def test_inline_code_in_plain_paragraph_unchanged() -> None:
     semantics against drift.
     """
     out = _render(Markdown("Use `code` here."))
-    # The existing assertion still holds.
-    assert f"{ESC}[31mcode{ESC}[0m" in out
+    # PR3: code_color default "accent" → cyan (SGR 36).
+    assert f"{ESC}[36mcode{ESC}[0m" in out
     # No bold SGR should appear in the output at all.
     assert f"{ESC}[1m" not in out
 
@@ -1528,15 +1554,16 @@ def test_heading_underline_theme_key() -> None:
     """``theme={"h1_underline": True}`` adds underline SGR to h1.
 
     PR1 adds per-level ``h{n}_underline`` / ``h{n}_italic`` theme knobs.
-    Default is ``False`` so existing heading rendering is unchanged;
-    opting in layers the style on top of the existing colour + bold.
+    PR3 flips h1's default to underline=True (claude-code style); this
+    test now verifies the opt-in still works on a level whose default
+    is False (h2). Passing ``theme={"h2_underline": True}`` layers
+    underline on top of h2's default bold.
     """
-    out = _render(Markdown("# Title", theme={"h1_underline": True}))
+    out = _render(Markdown("## Sub", theme={"h2_underline": True}))
     # Underline = SGR 4.
     assert f"{ESC}[4m" in out
-    assert "Title" in out
-    # Existing defaults are preserved: magenta + bold.
-    assert f"{ESC}[35m" in out
+    assert "Sub" in out
+    # h2 default is bold (no colour PR3).
     assert f"{ESC}[1m" in out
 
 
@@ -1546,27 +1573,38 @@ def test_heading_italic_theme_key() -> None:
     # Italic = SGR 3.
     assert f"{ESC}[3m" in out
     assert "Sub" in out
-    # Existing defaults preserved: yellow + bold.
-    assert f"{ESC}[33m" in out
+    # PR3: h2 default is bold only (no colour).
     assert f"{ESC}[1m" in out
+    assert f"{ESC}[33m" not in out  # no legacy yellow
 
 
-def test_heading_underline_default_off() -> None:
-    """Default theme: headings do NOT carry underline SGR."""
+def test_heading_underline_default_on_for_h1() -> None:
+    """PR3: default theme — h1 carries underline SGR (claude-code style)."""
     out = _render(Markdown("# Title"))
-    # SGR 4 (underline) should not appear.
+    # SGR 4 (underline) should appear for h1 by default.
+    assert f"{ESC}[4m" in out
+
+
+def test_heading_underline_default_off_for_h2() -> None:
+    """PR3: default theme — h2 does NOT carry underline SGR (h1 only)."""
+    out = _render(Markdown("## Sub"))
     assert f"{ESC}[4m" not in out
 
 
-def test_blockquote_bar_char_default_off() -> None:
-    """Default theme: blockquote has no bar character (pure indent)."""
+def test_blockquote_bar_char_default_on() -> None:
+    """PR3: default theme — blockquote has the ``▎`` bar (claude-code style).
+
+    Pre-PR3 default was ``quote_bar_char=None`` (pure indent). PR3 flips
+    the default to ``"▎"`` so blockquotes render with a visible left bar
+    in the ``muted`` semantic colour (→ gray, SGR 90).
+    """
     out = _render(Markdown("> A quote"))
-    # The default quote_bar_char is None → no vertical bar char in output.
-    # Common bar chars used: ▎ (U+258E), │, ┃. None should appear.
-    for bar in ("▎", "│", "┃"):
-        assert bar not in out, f"unexpected bar char {bar!r} in default blockquote"
-    # The existing behaviour is preserved: dim SGR 2 + content.
+    # The default quote_bar_char is now "▎" — the bar should appear.
+    assert "▎" in out
     assert "A quote" in out
+    # The bar carries the muted colour (gray SGR 90) by default.
+    assert f"{ESC}[90m" in out
+    # The blockquote content is still dim (SGR 2) via __quote__ flag.
     assert f"{ESC}[2m" in out
 
 
@@ -1772,3 +1810,233 @@ def test_resolve_theme_color_resolves_semantic_name() -> None:
 
     theme = {"h1_color": "accent"}
     assert _resolve_theme_color(theme, "accent", "h1_color") == "cyan"
+
+
+# ---------------------------------------------------------------------------
+# PR3: Default-value polish — claude-code style defaults + spacing
+# ---------------------------------------------------------------------------
+
+
+def test_default_h1_has_underline_and_italic() -> None:
+    """PR3: default h1 renders with underline + italic SGR (claude-code style)."""
+    out = _render(Markdown("# Title"))
+    assert f"{ESC}[4m" in out  # underline
+    assert f"{ESC}[3m" in out  # italic
+    assert f"{ESC}[1m" in out  # bold
+    assert "Title" in out
+
+
+def test_default_h2_no_underline() -> None:
+    """PR3: default h2 has no underline (only h1 gets underline)."""
+    out = _render(Markdown("## Sub"))
+    assert f"{ESC}[1m" in out  # bold
+    assert f"{ESC}[4m" not in out  # no underline
+    assert f"{ESC}[3m" not in out  # no italic
+
+
+def test_default_code_color_accent() -> None:
+    """PR3: default ``code_color="accent"`` resolves to cyan (SGR 36)."""
+    out = _render(Markdown("Use `code` here."))
+    # "accent" → SEMANTIC_COLORS["accent"] = "cyan" → SGR 36.
+    assert f"{ESC}[36mcode{ESC}[0m" in out
+    # The pre-PR3 default red (SGR 31) should NOT appear.
+    assert f"{ESC}[31m" not in out
+
+
+def test_default_blockquote_has_bar() -> None:
+    """PR3: default blockquote renders the ``▎`` left bar (claude-code style)."""
+    out = _render(Markdown("> A quote"))
+    assert "▎" in out
+    assert "A quote" in out
+    # Bar colour resolves through "muted" → gray (SGR 90).
+    assert f"{ESC}[90m" in out
+
+
+def test_spacing_before_heading() -> None:
+    """PR3: a heading preceded by a paragraph has a blank row before it.
+
+    ``spacing_before_heading=1`` + ``spacing_after_paragraph=1`` → at
+    least one blank line between the paragraph and the heading.
+    """
+    out = _render(Markdown("Para.\n\n# Heading"))
+    lines = out.split("\n")
+    # Find the heading line (contains "Heading") and the paragraph line.
+    para_idx = next((i for i, ln in enumerate(lines) if "Para." in ln), None)
+    heading_idx = next((i for i, ln in enumerate(lines) if "Heading" in ln), None)
+    assert para_idx is not None and heading_idx is not None
+    assert heading_idx > para_idx
+    # At least one blank line between them.
+    blank_count = sum(1 for ln in lines[para_idx + 1:heading_idx] if ln.strip() == "")
+    assert blank_count >= 1, (
+        f"expected ≥1 blank line before heading; got {blank_count}: {lines!r}"
+    )
+
+
+def test_spacing_after_heading() -> None:
+    """PR3: a heading has 2 blank rows after it (claude-code style).
+
+    ``spacing_after_heading=2`` → two blank lines between the heading
+    and the following paragraph.
+    """
+    out = _render(Markdown("# Heading\n\nPara."))
+    lines = out.split("\n")
+    heading_idx = next((i for i, ln in enumerate(lines) if "Heading" in ln), None)
+    para_idx = next((i for i, ln in enumerate(lines) if "Para." in ln), None)
+    assert heading_idx is not None and para_idx is not None
+    assert para_idx > heading_idx
+    blank_count = sum(1 for ln in lines[heading_idx + 1:para_idx] if ln.strip() == "")
+    assert blank_count >= 2, (
+        f"expected ≥2 blank lines after heading; got {blank_count}: {lines!r}"
+    )
+
+
+def test_spacing_between_paragraphs() -> None:
+    """PR3: two paragraphs have a blank row between them.
+
+    ``spacing_after_paragraph=1`` → one blank line between paragraphs.
+    """
+    out = _render(Markdown("First para.\n\nSecond para."))
+    lines = out.split("\n")
+    first_idx = next((i for i, ln in enumerate(lines) if "First para." in ln), None)
+    second_idx = next((i for i, ln in enumerate(lines) if "Second para." in ln), None)
+    assert first_idx is not None and second_idx is not None
+    assert second_idx > first_idx
+    blank_count = sum(
+        1 for ln in lines[first_idx + 1:second_idx] if ln.strip() == ""
+    )
+    assert blank_count >= 1, (
+        f"expected ≥1 blank line between paragraphs; got {blank_count}: {lines!r}"
+    )
+
+
+def test_spacing_first_block_has_no_leading_blank() -> None:
+    """PR3: the first block in a document does not get a leading blank row.
+
+    ``spacing_before_*`` only applies between adjacent blocks — the
+    very first block starts at row 0.
+    """
+    out = _render(Markdown("# Title"))
+    lines = out.split("\n")
+    # The first non-empty line should be the heading, not a blank row.
+    # (The heading line contains "Title".)
+    assert lines[0].strip() != "" or "Title" in lines[0], (
+        f"first line should not be blank; got: {lines!r}"
+    )
+
+
+def test_nested_table_in_blockquote_shrinks() -> None:
+    """PR3: a table nested inside a blockquote responsively shrinks.
+
+    Regression for the PR2 known limitation: ``_render_blockquote``
+    didn't thread ``columns`` into its recursive ``_render_tokens``
+    call, so a nested table rendered at its ideal width and overflowed
+    the blockquote's content box. PR3 threads ``columns - bar_indent``
+    so the table can shrink or degrade to key-value inside a quote.
+    """
+    src = (
+        "> | Name | Age | Role |\n"
+        "> |:-----|:---:|------:|\n"
+        "> | Alice | 30 | Admin |\n"
+        "> | Bob | 25 | User |\n"
+    )
+    # Render at a narrow width so the table must shrink.
+    out = _render(Markdown(src), columns=40)
+    # The bar should be present (PR3 default).
+    assert "▎" in out
+    # Content is present (possibly in key-value fallback form).
+    for label in ("Name", "Alice", "Bob"):
+        assert label in out
+    # No line should exceed the column budget (table didn't overflow).
+    import re
+    visible = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    for line in visible.split("\n"):
+        assert len(line) <= 40, (
+            f"line overflows 40 cols: len={len(line)}: {line!r}"
+        )
+
+
+def test_nested_table_in_list_item_shrinks() -> None:
+    """PR3: a table nested inside a list item responsively shrinks.
+
+    Companion to :func:`test_nested_table_in_blockquote_shrinks`; PR3
+    threads ``columns`` through ``_render_list`` /
+    ``_render_list_item`` so the recursive ``_render_tokens`` call
+    inside a list item sees the item's available width.
+    """
+    src = (
+        "- Item with table:\n"
+        "  | Name | Age |\n"
+        "  |:-----|:---:|\n"
+        "  | Alice | 30 |\n"
+        "  | Bob | 25 |\n"
+    )
+    out = _render(Markdown(src), columns=40)
+    # Content present.
+    for label in ("Name", "Alice", "Bob"):
+        assert label in out
+    # No line should exceed the column budget.
+    import re
+    visible = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    for line in visible.split("\n"):
+        assert len(line) <= 40, (
+            f"line overflows 40 cols: len={len(line)}: {line!r}"
+        )
+
+
+def test_legacy_color_override_still_works() -> None:
+    """PR3 break-change: explicit ``theme={"h1_color": "magenta"}`` still works.
+
+    Backwards-compatibility contract: even though the default h1 colour
+    changed from ``"magenta"`` to ``None``, a caller that explicitly
+    passes the old default still gets magenta (SGR 35). This is the
+    migration path documented in the CHANGELOG.
+    """
+    out = _render(Markdown("# Title", theme={"h1_color": "magenta"}))
+    assert f"{ESC}[35m" in out
+    assert "Title" in out
+
+
+def test_legacy_code_color_override_still_works() -> None:
+    """PR3 break-change: explicit ``theme={"code_color": "red"}`` still works.
+
+    Companion to :func:`test_legacy_color_override_still_works`: the
+    default ``code_color`` changed from ``"red"`` to ``"accent"``, but
+    the old default is still reachable via an explicit theme override.
+    """
+    out = _render(Markdown("Use `x`.", theme={"code_color": "red"}))
+    assert f"{ESC}[31mx{ESC}[0m" in out
+
+
+def test_legacy_blockquote_bar_disabled_still_works() -> None:
+    """PR3 break-change: ``theme={"quote_bar_char": None}`` restores pure indent.
+
+    The default ``quote_bar_char`` changed from ``None`` to ``"▎"``.
+    A caller that wants the pre-PR3 pure-indent look can pass
+    ``theme={"quote_bar_char": None}`` to opt out.
+    """
+    out = _render(Markdown("> A quote", theme={"quote_bar_char": None}))
+    assert "▎" not in out
+    assert "A quote" in out
+
+
+def test_spacing_keys_exist_in_default_theme() -> None:
+    """PR3: all 14 spacing keys are defined in ``DEFAULT_MARKDOWN_THEME``."""
+    expected = {
+        "spacing_before_heading",
+        "spacing_after_heading",
+        "spacing_before_paragraph",
+        "spacing_after_paragraph",
+        "spacing_before_code_block",
+        "spacing_after_code_block",
+        "spacing_before_blockquote",
+        "spacing_after_blockquote",
+        "spacing_before_list",
+        "spacing_after_list",
+        "spacing_before_table",
+        "spacing_after_table",
+        "spacing_before_hr",
+        "spacing_after_hr",
+    }
+    assert expected.issubset(DEFAULT_MARKDOWN_THEME.keys()), (
+        f"missing spacing keys: {expected - set(DEFAULT_MARKDOWN_THEME.keys())}"
+    )
