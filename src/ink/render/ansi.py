@@ -154,6 +154,11 @@ BORDER_STYLES: dict[str, BorderStyle] = {
     },
 }
 
+# Alias so callers can use ``"rounded"`` (the convention in
+# ``ink.externals.markdown``'s ``table_border_style``) interchangeably with
+# ``"round"``. Both names map to the same character dict.
+BORDER_STYLES["rounded"] = BORDER_STYLES["round"]
+
 # Regexes used to parse hex / rgb / ansi256 specs. Tolerant of optional
 # whitespace inside the parentheses (matches chalk's parser).
 _RGB_RE = re.compile(r"^rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$", re.IGNORECASE)

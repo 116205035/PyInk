@@ -46,7 +46,12 @@ import pytest
 from ink import Box, render, render_to_string, signal
 from ink.core.element import Element
 from ink.externals import DEFAULT_MARKDOWN_THEME, Markdown
-from ink.externals.markdown import _MarkdownImpl
+from ink.externals.markdown import (
+    _TABLE_CROSS_CHARS,
+    _get_table_border_chars,
+    _MarkdownImpl,
+)
+from ink.render.ansi import BORDER_STYLES
 
 ESC = "\x1b"
 
@@ -425,8 +430,10 @@ def test_fenced_code_block_emits_language_header() -> None:
 def test_blockquote_indents_and_dims_content() -> None:
     out = _render(Markdown("> A quote"))
     assert "A quote" in out
-    # dimColor (SGR 2) applied to the blockquote wrapper.
-    assert f"{ESC}[2m" in out
+    # PR3 legacy-cleanup: blockquote content now carries the resolved
+    # ``quote_color`` (default ``"muted"`` → gray SGR 90) instead of the
+    # old ``__quote__`` flag's ``dimColor`` (SGR 2).
+    assert f"{ESC}[90m" in out
 
 
 def test_blockquote_with_multiple_lines() -> None:
@@ -1604,8 +1611,10 @@ def test_blockquote_bar_char_default_on() -> None:
     assert "A quote" in out
     # The bar carries the muted colour (gray SGR 90) by default.
     assert f"{ESC}[90m" in out
-    # The blockquote content is still dim (SGR 2) via __quote__ flag.
-    assert f"{ESC}[2m" in out
+    # Legacy-cleanup: the blockquote content also carries the quote colour
+    # (gray SGR 90 via ``quote_color="muted"``) — the old ``__quote__`` flag
+    # path (SGR 2 dimColor) is gone.
+    assert f"{ESC}[90mA quote" in out
 
 
 def test_blockquote_bar_char_custom() -> None:
@@ -1631,8 +1640,24 @@ def test_blockquote_bar_char_with_color() -> None:
 
 
 def test_blockquote_bar_char_dim_fallback() -> None:
-    """``quote_bar_color=None`` (default) falls back to dimColor on the bar."""
-    out = _render(Markdown("> A quote", theme={"quote_bar_char": "│"}))
+    """``quote_bar_color=None`` + ``muted_color=None`` falls back to dimColor.
+
+    The bar colour resolves through :func:`_resolve_theme_color` with the
+    ``"muted"`` semantic default. Setting both the legacy key and the
+    semantic override to ``None`` is the only way to make the resolver
+    return ``None`` and thus trigger the ``dimColor=True`` fallback on
+    the bar segment.
+    """
+    out = _render(
+        Markdown(
+            "> A quote",
+            theme={
+                "quote_bar_char": "│",
+                "quote_bar_color": None,
+                "muted_color": None,
+            },
+        )
+    )
     assert "│" in out
     # dimColor SGR 2 applied somewhere (the bar segment).
     assert f"{ESC}[2m" in out
@@ -2040,3 +2065,144 @@ def test_spacing_keys_exist_in_default_theme() -> None:
     assert expected.issubset(DEFAULT_MARKDOWN_THEME.keys()), (
         f"missing spacing keys: {expected - set(DEFAULT_MARKDOWN_THEME.keys())}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Legacy cleanup: quote_color wire-up + table border de-duplication
+# ---------------------------------------------------------------------------
+
+
+def test_quote_color_wired_up_default() -> None:
+    """Default theme — blockquote content carries gray (SGR 90).
+
+    Pre-cleanup the ``quote_color`` theme key was defined but never
+    read; the blockquote went through a ``__quote__`` boolean flag
+    that emitted ``dimColor`` (SGR 2). The cleanup wires
+    ``quote_color`` through :func:`_render_blockquote` /
+    :func:`_render_inline`, so the default ``quote_color="muted"``
+    resolves to gray (SGR 90).
+    """
+    out = _render(Markdown("> A quote"))
+    assert f"{ESC}[90mA quote{ESC}[0m" in out
+    # The legacy dimColor SGR 2 path must not appear on the content.
+    assert f"{ESC}[2mA quote" not in out
+
+
+def test_quote_color_override_red() -> None:
+    """``theme={"quote_color": "red"}`` paints the blockquote red (SGR 31)."""
+    out = _render(Markdown("> A quote", theme={"quote_color": "red"}))
+    assert f"{ESC}[31mA quote{ESC}[0m" in out
+    # Gray (default) should NOT appear on the quote content.
+    assert f"{ESC}[90mA quote" not in out
+
+
+def test_quote_color_none_disables_coloring() -> None:
+    """``theme={"quote_color": None}`` disables quote colouring.
+
+    ``None`` must short-circuit the semantic layer too — we pass both
+    ``quote_color=None`` and ``muted_color=None`` so the resolver
+    returns ``None`` instead of falling back to gray.
+    """
+    out = _render(
+        Markdown(
+            "> A quote",
+            theme={"quote_color": None, "muted_color": None},
+        )
+    )
+    assert "A quote" in out
+    # No colour SGR is emitted on the quote content (SGR 30-37 / 90-97
+    # prefix immediately followed by "A quote").
+    import re
+
+    assert re.search(r"\x1b\[\d{2,3}mA quote", out) is None, (
+        f"expected no color SGR on quote content; got: {out!r}"
+    )
+
+
+def test_quote_flag_removed() -> None:
+    """The legacy ``__quote__`` flag is no longer read by ``_render_inline``.
+
+    Passing ``theme={"__quote__": True}`` from outside
+    :func:`_render_blockquote` must NOT cause any dim/colour effect —
+    the flag is dead. Only ``__quote_color__`` carries quote context
+    now.
+    """
+    # Build a minimal inline call by rendering a paragraph with the
+    # stale flag set; the paragraph renderer forwards ``theme`` into
+    # ``_render_inline`` verbatim, so the flag would have been honoured
+    # pre-cleanup.
+    out = _render(Markdown("plain text", theme={"__quote__": True}))
+    # No dimColor SGR 2 should appear on the paragraph content.
+    assert f"{ESC}[2m" not in out
+
+
+def test_table_border_chars_from_border_styles() -> None:
+    """``_get_table_border_chars`` reads outer corners from ``BORDER_STYLES``.
+
+    The outer-corner glyphs (top_left / top_right / bottom_left /
+    bottom_right / horizontal / vertical) must match the canonical
+    definitions in :data:`ink.render.ansi.BORDER_STYLES` so there is a
+    single source of truth.
+    """
+    for style_name, ansi_chars in (
+        ("single", BORDER_STYLES["single"]),
+        ("double", BORDER_STYLES["double"]),
+        ("round", BORDER_STYLES["round"]),
+        ("bold", BORDER_STYLES["bold"]),
+    ):
+        got = _get_table_border_chars(style_name)
+        assert got["top_left"] == ansi_chars["topLeft"], style_name
+        assert got["top_right"] == ansi_chars["topRight"], style_name
+        assert got["bottom_left"] == ansi_chars["bottomLeft"], style_name
+        assert got["bottom_right"] == ansi_chars["bottomRight"], style_name
+        assert got["horizontal"] == ansi_chars["top"], style_name
+        assert got["vertical"] == ansi_chars["left"], style_name
+
+
+def test_table_border_rounded_alias_renders() -> None:
+    """``table_border_style="rounded"`` and ``"round"`` render identically.
+
+    The markdown-facing name is ``"rounded"`` (PR2 default); the
+    :data:`BORDER_STYLES` name is ``"round"``. The alias map keeps both
+    accepted so existing callers don't break.
+    """
+    src = "| A | B |\n|---|---|\n| 1 | 2 |\n"
+    out_rounded = _render(Markdown(src, theme={"table_border_style": "rounded"}))
+    out_round = _render(Markdown(src, theme={"table_border_style": "round"}))
+    # Both should produce the rounded corner glyphs.
+    for out in (out_rounded, out_round):
+        assert "╭" in out
+        assert "╮" in out
+        assert "╰" in out
+        assert "╯" in out
+    # The two outputs must be byte-identical.
+    assert out_rounded == out_round
+
+
+def test_table_cross_chars_defined() -> None:
+    """``_TABLE_CROSS_CHARS`` defines the 5 cross glyphs for 4 styles.
+
+    Each style entry must contain exactly the 5 cross keys the table
+    renderer reads (``top_cross`` / ``mid_cross`` / ``mid_left`` /
+    ``mid_right`` / ``bottom_cross``).
+    """
+    expected_keys = {
+        "top_cross",
+        "mid_cross",
+        "mid_left",
+        "mid_right",
+        "bottom_cross",
+    }
+    for style in ("single", "double", "round", "bold"):
+        assert style in _TABLE_CROSS_CHARS, f"missing cross chars for {style!r}"
+        assert set(_TABLE_CROSS_CHARS[style].keys()) == expected_keys, style
+        # All glyphs must be single-character strings.
+        for key, glyph in _TABLE_CROSS_CHARS[style].items():
+            assert isinstance(glyph, str) and len(glyph) == 1, (style, key, glyph)
+
+
+def test_border_styles_has_rounded_alias() -> None:
+    """``BORDER_STYLES["rounded"]`` is an alias for ``BORDER_STYLES["round"]``."""
+    assert "rounded" in BORDER_STYLES
+    assert BORDER_STYLES["rounded"] is BORDER_STYLES["round"]
+    assert BORDER_STYLES["rounded"]["topLeft"] == "╭"

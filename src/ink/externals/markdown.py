@@ -93,7 +93,7 @@ from ink.core.signal import Signal
 from ink.externals.divider import Divider
 from ink.externals.link import _wrap_osc8
 from ink.layout.measure import WrapMode, string_width, wrap_text
-from ink.render.ansi import apply_style
+from ink.render.ansi import BORDER_STYLES, apply_style
 
 if TYPE_CHECKING:
     # Avoid a hard runtime dependency on markdown_it's types at import
@@ -518,10 +518,12 @@ def _render_inline(
     then concatenated. The layout measure pass strips ANSI so the
     extra bytes do not affect the column budget.
 
-    The theme's ``__quote__`` flag (set by :func:`_render_blockquote`)
-    enables ``dimColor=True`` on every inline run so the whole quote
-    reads as muted text without us having to thread a parameter
-    through every recursion level.
+    The theme's ``__quote_color__`` flag (set by :func:`_render_blockquote`)
+    holds the resolved quote colour or ``None``. When set, every inline
+    text run picks up ``color=<quote_color>`` so the whole quote reads
+    as muted text without us having to thread a parameter through every
+    recursion level. ``None`` disables quote colouring (terminal default
+    text colour).
 
     Inline leaves handled here:
 
@@ -538,7 +540,14 @@ def _render_inline(
       honoured (e.g. ``**[bold link](url)**`` works).
     """
     out: list[str] = []
-    quote_dim = bool(theme.get("__quote__"))
+    # Legacy-cleanup: the ``__quote_color__`` flag (set by
+    # :func:`_render_blockquote`) carries the resolved quote colour or
+    # ``None``. Pre-cleanup this was a ``__quote__`` boolean flag that
+    # drove ``dimColor=True`` (SGR 2); now we apply the colour directly
+    # so the default ``quote_color="muted"`` resolves to gray (SGR 90).
+    # ``None`` (either outside a quote, or ``theme={"quote_color": None}``)
+    # means no colour SGR is emitted.
+    quote_color = theme.get("__quote_color__")
 
     i = 0
     while i < len(children):
@@ -556,17 +565,16 @@ def _render_inline(
                     bold=bold,
                     italic=italic,
                     strikethrough=strikethrough,
-                    dimColor=quote_dim,
                 )
                 out.append(_wrap_osc8(styled, link_url))
             else:
                 out.append(
                     apply_style(
                         text,
+                        color=quote_color,
                         bold=bold,
                         italic=italic,
                         strikethrough=strikethrough,
-                        dimColor=quote_dim,
                     )
                 )
             i += 1
@@ -582,8 +590,9 @@ def _render_inline(
             # strikethrough so ``**bold `code`**`` renders the code segment
             # bold too. Previously code_inline dropped the outer inline
             # state, which read as a typographic mismatch inside emphasised
-            # spans. ``dimColor=quote_dim`` is preserved so blockquote
-            # context still mutes the code run.
+            # spans. Inline code keeps its own ``code_color``; the quote
+            # colour does NOT apply inside the code run (code has its own
+            # colour semantic).
             out.append(
                 apply_style(
                     child.content,
@@ -591,7 +600,6 @@ def _render_inline(
                     bold=bold,
                     italic=italic,
                     strikethrough=strikethrough,
-                    dimColor=quote_dim,
                 )
             )
             i += 1
@@ -846,8 +854,10 @@ def _render_blockquote(
     * **Pure-indent mode** — ``quote_bar_char`` is ``None``: the
       blockquote is wrapped in a column ``Box`` with ``paddingLeft=2``.
       The ``quote_color`` from the theme is applied to inline runs via
-      a ``__quote__`` flag that makes each inline text run pick up
-      ``dimColor=True``.
+      the ``__quote_color__`` flag (resolved here to a concrete colour
+      name or ``None``). A non-None value paints every inline text run
+      with that colour; ``None`` leaves the terminal default text
+      colour.
 
     PR3: ``columns`` is threaded into the recursive :func:`_render_tokens`
     call so a table nested inside a blockquote responsively shrinks to
@@ -855,7 +865,12 @@ def _render_blockquote(
     """
     inner_tokens, j = _collect_balanced(tokens, start, "blockquote_open", "blockquote_close")
     quote_theme = dict(theme)
-    quote_theme["__quote__"] = True
+    # PR3 legacy-cleanup: replace the ``__quote__`` boolean flag (which only
+    # drove ``dimColor=True``) with ``__quote_color__`` carrying the resolved
+    # colour. A non-None value means "inside a quote, paint inline text with
+    # this colour"; ``None`` disables quote colouring entirely (default text
+    # colour). The default ``quote_color="muted"`` resolves to gray (SGR 90).
+    quote_theme["__quote_color__"] = _resolve_theme_color(theme, "muted", "quote_color")
 
     bar_char = theme.get("quote_bar_char")
     # Both modes consume 2 cells of indent: bar mode uses bar (1) +
@@ -1101,31 +1116,77 @@ def _render_list_item(
     return Box(*parts, flexDirection="column")
 
 
-#: Box-drawing character sets for the table frame. Each set carries the
-#: 6 glyphs a bordered table needs: outer corners + edges for top /
-#: bottom border lines, the header/body separator, and the per-column
-#: cross pieces (``top`` / ``bottom`` / ``mid`` rows all use the same
-#: horizontal fill + different cross glyphs). See :func:`_hline`.
-_TABLE_BORDER_CHARS: dict[str, dict[str, str]] = {
+#: Table-specific cross characters keyed by the same names used in
+#: :data:`ink.render.ansi.BORDER_STYLES` (``single`` / ``double`` /
+#: ``round`` / ``bold``). Each entry carries the 5 cross glyphs a
+#: bordered table needs on top of the outer-corner set already provided
+#: by ``BORDER_STYLES``: ``top_cross`` (T-down), ``bottom_cross``
+#: (T-up), ``mid_left`` (T-right), ``mid_right`` (T-left), ``mid_cross``
+#: (4-way). The horizontal fill and vertical edge come from
+#: ``BORDER_STYLES`` via :func:`_get_table_border_chars`.
+#:
+#: Rationale (``research/table-border-options.md:130``): we deliberately
+#: do NOT extend ``BORDER_STYLES`` itself with these cross keys — the
+#: layout renderer's ``_paint_box_border`` would not read them and the
+#: rework cost is out of scope. Cross characters stay a table-only
+#: concern and live here.
+_TABLE_CROSS_CHARS: dict[str, dict[str, str]] = {
     "single": {
-        "top_left": "┌", "top_right": "┐", "top_cross": "┬",
-        "bottom_left": "└", "bottom_right": "┘", "bottom_cross": "┴",
-        "mid_left": "├", "mid_right": "┤", "mid_cross": "┼",
-        "horizontal": "─", "vertical": "│",
-    },
-    "rounded": {
-        "top_left": "╭", "top_right": "╮", "top_cross": "┬",
-        "bottom_left": "╰", "bottom_right": "╯", "bottom_cross": "┴",
-        "mid_left": "├", "mid_right": "┤", "mid_cross": "┼",
-        "horizontal": "─", "vertical": "│",
+        "top_cross": "┬", "mid_cross": "┼", "mid_left": "├",
+        "mid_right": "┤", "bottom_cross": "┴",
     },
     "double": {
-        "top_left": "╔", "top_right": "╗", "top_cross": "╦",
-        "bottom_left": "╚", "bottom_right": "╝", "bottom_cross": "╩",
-        "mid_left": "╠", "mid_right": "╣", "mid_cross": "╬",
-        "horizontal": "═", "vertical": "║",
+        "top_cross": "╦", "mid_cross": "╬", "mid_left": "╠",
+        "mid_right": "╣", "bottom_cross": "╩",
+    },
+    "round": {
+        "top_cross": "┬", "mid_cross": "┼", "mid_left": "├",
+        "mid_right": "┤", "bottom_cross": "┴",
+    },
+    "bold": {
+        "top_cross": "┳", "mid_cross": "╋", "mid_left": "┣",
+        "mid_right": "┫", "bottom_cross": "┻",
     },
 }
+
+#: Alias map from the markdown-facing style name to the
+#: :data:`ink.render.ansi.BORDER_STYLES` key. ``"rounded"`` is the
+#: historical markdown name (PR2 default); ``BORDER_STYLES`` calls the
+#: same glyph set ``"round"``. The alias keeps both names accepted
+#: without duplicating the glyph dict. ``BORDER_STYLES["rounded"]`` is
+#: also defined as an alias entry so the two names are
+#: interchangeable on the ansi side too.
+_TABLE_BORDER_ALIASES: dict[str, str] = {"rounded": "round"}
+
+
+def _get_table_border_chars(style: str) -> dict[str, str]:
+    """Build the table frame glyph set for ``style``.
+
+    The outer corners / edges come from
+    :data:`ink.render.ansi.BORDER_STYLES` (single source of truth for
+    box-drawing outer-corner glyphs); the cross pieces come from
+    :data:`_TABLE_CROSS_CHARS`. The returned dict uses the
+    snake_case keys the table renderer consumes internally
+    (``top_left`` / ``top_right`` / ``bottom_left`` / ``bottom_right``
+    / ``horizontal`` / ``vertical`` + the 5 cross keys).
+
+    Unknown styles fall back to ``"single"`` so a typo in the theme
+    never crashes the renderer — the table still renders, just with the
+    default frame. Callers handling ``"none"`` short-circuit before
+    reaching this function.
+    """
+    ansi_style = _TABLE_BORDER_ALIASES.get(style, style)
+    base = BORDER_STYLES.get(ansi_style, BORDER_STYLES["single"])
+    cross = _TABLE_CROSS_CHARS.get(ansi_style, _TABLE_CROSS_CHARS["single"])
+    return {
+        "top_left": base["topLeft"],
+        "top_right": base["topRight"],
+        "bottom_left": base["bottomLeft"],
+        "bottom_right": base["bottomRight"],
+        "horizontal": base["top"],
+        "vertical": base["left"],
+        **cross,
+    }
 
 
 def _parse_table_align(token: Token) -> str:
@@ -1178,10 +1239,13 @@ def _table_border_chars(style: str) -> dict[str, str] | None:
     Returns ``None`` for ``"none"`` (no frame). Unknown styles fall
     back to ``"single"`` so a typo in the theme never crashes the
     renderer — the table still renders, just with the default frame.
+    The outer-corner glyphs are sourced from
+    :data:`ink.render.ansi.BORDER_STYLES`; only the cross pieces are
+    table-specific (see :data:`_TABLE_CROSS_CHARS`).
     """
     if style == "none":
         return None
-    return _TABLE_BORDER_CHARS.get(style, _TABLE_BORDER_CHARS["single"])
+    return _get_table_border_chars(style)
 
 
 def _hline(

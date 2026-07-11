@@ -6,6 +6,50 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — `quote_color` theme key now wired up
+
+The `quote_color` theme key (`DEFAULT_MARKDOWN_THEME["quote_color"]`)
+was defined but never read — passing `theme={"quote_color": "red"}`
+silently produced the default look. The key is now resolved through
+the semantic layer (default `"muted"` → gray, SGR 90) and applied to
+every inline text run inside a blockquote. The legacy `__quote__`
+boolean flag (which only drove `dimColor=True`, SGR 2) is removed;
+its role is folded into `__quote_color__` (a `None` value disables
+quote colouring entirely).
+
+### Changed — blockquote visual: `dimColor` (SGR 2) → gray colour (SGR 90)
+
+As a consequence of wiring `quote_color` up, the default blockquote
+inline text now carries the resolved quote colour (gray, SGR 90)
+instead of the old `dimColor` attribute (SGR 2). Both are muted
+treatments, but the SGR code differs and the terminal may render
+them slightly differently. This completes PR3's semantic-colour
+intent (the default value was already flipped from `"gray"` to
+`"muted"` but the change was a no-op because the key was unread).
+
+To opt out entirely, pass `theme={"quote_color": None,
+"muted_color": None}` (both keys must be `None` to defeat the
+semantic fallback).
+
+### Changed (internal) — table border glyphs de-duplicated
+
+The markdown-internal `_TABLE_BORDER_CHARS` dict (which carried both
+the outer corners and the cross pieces) is replaced by
+`_get_table_border_chars(style)`: outer corners are now read from
+`ink.render.ansi.BORDER_STYLES` (single source of truth), only the
+5 table-specific cross glyphs (`top_cross` / `mid_cross` /
+`mid_left` / `mid_right` / `bottom_cross`) remain markdown-side via
+`_TABLE_CROSS_CHARS`. The cross glyphs are intentionally NOT folded
+into `BORDER_STYLES` (the layout renderer's `_paint_box_border`
+would not read them and the rework cost is out of scope).
+
+`BORDER_STYLES["rounded"]` is added as an alias for
+`BORDER_STYLES["round"]` so the markdown-facing `table_border_style
+= "rounded"` (PR2 default) and the ansi-facing `"round"` are now
+interchangeable on both sides. `_TABLE_BORDER_ALIASES = {"rounded":
+"round"}` maps the markdown name to the ansi name inside
+`_get_table_border_chars`.
+
 ### Changed (breaking) — `Markdown` default theme rewrite (PR3)
 
 `DEFAULT_MARKDOWN_THEME` has been rewritten to mirror the Claude Code
