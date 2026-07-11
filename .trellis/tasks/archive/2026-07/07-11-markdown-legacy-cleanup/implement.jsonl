@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "R2 边框字符集去重的核心指导——外角字符复用 BORDER_STYLES（单一来源），cross 字符是表格专属留 markdown。避免重复定义 + 命名统一。"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "R1 quote_color wire-up 跨 _render_blockquote → quote_theme → _render_inline 层；R2 markdown → ansi 跨模块读 BORDER_STYLES。主题 flag 透传 + 外部模块 lookup 的跨层契约。"}
+{"file": ".trellis/spec/frontend/rendering-contracts.md", "reason": "R2 改 _get_table_border_chars 时确认边框字符宽度测量走 string_width（剥 CSI），与现有 _hline/_dataline 渲染一致。"}
+{"file": ".trellis/tasks/archive/2026-07/07-11-pyink-markdown-render-polish/research/table-border-options.md", "reason": "R2 关键约束来源——line 130 明确'不要扩展 BORDER_STYLES 加 cross / topMid 等 key，_paint_box_border 不读，改 layout renderer 代价太大'。本任务方案（外角从 BORDER_STYLES 读 + cross 留 markdown）正是遵循此约束。"}

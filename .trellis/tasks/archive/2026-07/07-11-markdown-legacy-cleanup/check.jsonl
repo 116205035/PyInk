@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "验证 R2 实现遵循单一来源原则——外角字符来自 BORDER_STYLES，没有重复定义；_TABLE_CROSS_CHARS 只含 cross（表格专属）。"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "验证 R1 quote_color 跨层透传一致——_render_blockquote → __quote_color__ flag → _render_inline → apply_style；R2 BORDER_STYLES 跨模块读取契约。"}
+{"file": ".trellis/spec/frontend/rendering-contracts.md", "reason": "验证 R2 边框字符宽度测量符合 string_width 契约（剥 CSI），_get_table_border_chars 返回的字符在染色后仍正确测量。"}
+{"file": ".trellis/tasks/archive/2026-07/07-11-pyink-markdown-render-polish/research/table-border-options.md", "reason": "验证 R2 不违反'不扩展 BORDER_STYLES 加 cross'约束——本任务只在 markdown 侧加 _TABLE_CROSS_CHARS，没有改 ansi.py 的 BORDER_STYLES 结构（只加 rounded 别名条目）。"}
