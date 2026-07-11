@@ -1134,3 +1134,368 @@ def test_reactive_render_cache_evicts_lru_entries() -> None:
     for i in range(md_mod._RENDER_CACHE_MAX * 2):
         md_mod._cached_render(f"# Title {i}", 80, theme)
     assert len(md_mod._render_cache) <= md_mod._RENDER_CACHE_MAX
+
+
+# ---------------------------------------------------------------------------
+# PR1: Markdown render polish — semantic theme keys + style inheritance
+# ---------------------------------------------------------------------------
+
+
+def test_semantic_color_keys_exist() -> None:
+    """``DEFAULT_MARKDOWN_THEME`` defines all 9 semantic colour keys.
+
+    PR1 introduces the semantic colour layer (``text`` / ``accent`` /
+    ``secondary`` / ``muted`` / ``border`` + ``success`` / ``error`` /
+    ``warning`` / ``info``). The keys are defined now so downstream
+    callers can opt in early; PR3 will rewire the legacy colour keys
+    to default-resolve through these.
+    """
+    expected = {
+        "text_color",
+        "accent_color",
+        "secondary_color",
+        "muted_color",
+        "border_color",
+        "success_color",
+        "error_color",
+        "warning_color",
+        "info_color",
+    }
+    assert expected.issubset(DEFAULT_MARKDOWN_THEME.keys()), (
+        f"missing semantic keys: {expected - set(DEFAULT_MARKDOWN_THEME.keys())}"
+    )
+
+
+def test_semantic_colors_dict_has_complete_mapping() -> None:
+    """``SEMANTIC_COLORS`` maps every semantic key to a colour or None."""
+    from ink.externals.markdown import SEMANTIC_COLORS
+
+    expected = {
+        "text",
+        "accent",
+        "secondary",
+        "muted",
+        "border",
+        "success",
+        "error",
+        "warning",
+        "info",
+    }
+    assert set(SEMANTIC_COLORS.keys()) == expected
+    # ``text`` is None (inherit terminal default); the rest are concrete
+    # colour names from PyInk's NAMED_COLORS vocabulary.
+    assert SEMANTIC_COLORS["text"] is None
+    assert SEMANTIC_COLORS["accent"] == "cyan"
+    assert SEMANTIC_COLORS["muted"] == "gray"
+
+
+def test_inline_code_inherits_bold() -> None:
+    """``**bold `code`**`` — inline code picks up the surrounding bold.
+
+    PR1 bug fix: previously ``code_inline`` dropped the outer inline
+    state (bold / italic / strikethrough), so a code segment inside a
+    bold span rendered without bold. Now the code run inherits the
+    active bold / italic / strikethrough.
+    """
+    out = _render(Markdown("**bold `code`**"))
+    # The code segment should carry both the code colour (default red,
+    # SGR 31) and bold (SGR 1). We check that the bold SGR appears
+    # before the code colour SGR within the same run — i.e. the code
+    # segment is wrapped with both. The exact interleaving depends on
+    # apply_style's open order (dim → fg → bg → bold → italic → …),
+    # so SGR 1 (bold) follows SGR 31 (red fg).
+    assert "code" in out
+    assert f"{ESC}[31m" in out  # code_color red
+    assert f"{ESC}[1m" in out  # bold
+    # The code run itself should be wrapped with both: find the
+    # substring where the code text is wrapped by bold+colour.
+    # apply_style emits opens in order: dim, fg, bg, bold, italic, ...
+    # so for (color=red, bold=True) we get ESC[31m ESC[1m code ESC[0m.
+    assert f"{ESC}[31m{ESC}[1mcode{ESC}[0m" in out, (
+        f"expected code segment wrapped with red+bold; got: {out!r}"
+    )
+
+
+def test_inline_code_inherits_italic_and_strikethrough() -> None:
+    """``~~strike `code`~~`` — code inherits strikethrough too.
+
+    Companion to :func:`test_inline_code_inherits_bold`; verifies the
+    fix threads all three inline states (bold / italic / strikethrough)
+    rather than just bold.
+    """
+    # markdown-it commonmark doesn't enable strikethrough by default;
+    # we test italic inheritance here (``*italic `code`*``).
+    out = _render(Markdown("*italic `code`*"))
+    assert "code" in out
+    assert f"{ESC}[3m" in out  # italic
+    # The code run should carry both italic and the code colour.
+    # apply_style open order: fg → bold → italic, so ESC[31m ESC[3m code.
+    assert f"{ESC}[31m{ESC}[3mcode{ESC}[0m" in out, (
+        f"expected code segment wrapped with red+italic; got: {out!r}"
+    )
+
+
+def test_inline_code_in_plain_paragraph_unchanged() -> None:
+    """A plain ``Use `code`.`` still emits just the colour SGR.
+
+    Regression guard for the PR1 inline-code inheritance fix: when
+    there's no surrounding bold/italic/strikethrough, the code run
+    should still render exactly as before (colour SGR only, no stray
+    bold/italic). This protects :func:`test_inline_code_gets_code_color`
+    semantics against drift.
+    """
+    out = _render(Markdown("Use `code` here."))
+    # The existing assertion still holds.
+    assert f"{ESC}[31mcode{ESC}[0m" in out
+    # No bold SGR should appear in the output at all.
+    assert f"{ESC}[1m" not in out
+
+
+def test_heading_underline_theme_key() -> None:
+    """``theme={"h1_underline": True}`` adds underline SGR to h1.
+
+    PR1 adds per-level ``h{n}_underline`` / ``h{n}_italic`` theme knobs.
+    Default is ``False`` so existing heading rendering is unchanged;
+    opting in layers the style on top of the existing colour + bold.
+    """
+    out = _render(Markdown("# Title", theme={"h1_underline": True}))
+    # Underline = SGR 4.
+    assert f"{ESC}[4m" in out
+    assert "Title" in out
+    # Existing defaults are preserved: magenta + bold.
+    assert f"{ESC}[35m" in out
+    assert f"{ESC}[1m" in out
+
+
+def test_heading_italic_theme_key() -> None:
+    """``theme={"h2_italic": True}`` adds italic SGR to h2."""
+    out = _render(Markdown("## Sub", theme={"h2_italic": True}))
+    # Italic = SGR 3.
+    assert f"{ESC}[3m" in out
+    assert "Sub" in out
+    # Existing defaults preserved: yellow + bold.
+    assert f"{ESC}[33m" in out
+    assert f"{ESC}[1m" in out
+
+
+def test_heading_underline_default_off() -> None:
+    """Default theme: headings do NOT carry underline SGR."""
+    out = _render(Markdown("# Title"))
+    # SGR 4 (underline) should not appear.
+    assert f"{ESC}[4m" not in out
+
+
+def test_blockquote_bar_char_default_off() -> None:
+    """Default theme: blockquote has no bar character (pure indent)."""
+    out = _render(Markdown("> A quote"))
+    # The default quote_bar_char is None → no vertical bar char in output.
+    # Common bar chars used: ▎ (U+258E), │, ┃. None should appear.
+    for bar in ("▎", "│", "┃"):
+        assert bar not in out, f"unexpected bar char {bar!r} in default blockquote"
+    # The existing behaviour is preserved: dim SGR 2 + content.
+    assert "A quote" in out
+    assert f"{ESC}[2m" in out
+
+
+def test_blockquote_bar_char_custom() -> None:
+    """``theme={"quote_bar_char": "▎"}`` renders a left bar.
+
+    PR1 adds the ``quote_bar_char`` / ``quote_bar_color`` theme knobs.
+    When the char is set, the blockquote becomes a row Box with the bar
+    on the left replacing the pure-indent behaviour.
+    """
+    out = _render(Markdown("> A quote", theme={"quote_bar_char": "▎"}))
+    assert "▎" in out
+    assert "A quote" in out
+
+
+def test_blockquote_bar_char_with_color() -> None:
+    """``theme={"quote_bar_char": "▎", "quote_bar_color": "cyan"}`` colours the bar."""
+    out = _render(
+        Markdown("> A quote", theme={"quote_bar_char": "▎", "quote_bar_color": "cyan"})
+    )
+    assert "▎" in out
+    # Cyan SGR 36 applied to the bar segment.
+    assert f"{ESC}[36m" in out
+
+
+def test_blockquote_bar_char_dim_fallback() -> None:
+    """``quote_bar_color=None`` (default) falls back to dimColor on the bar."""
+    out = _render(Markdown("> A quote", theme={"quote_bar_char": "│"}))
+    assert "│" in out
+    # dimColor SGR 2 applied somewhere (the bar segment).
+    assert f"{ESC}[2m" in out
+
+
+def test_list_nested_ordered_auto() -> None:
+    """``list_ordered_nested_style="auto"`` shifts marker by depth.
+
+    PR1 adds the ``list_ordered_nested_style`` theme key. ``"auto"``
+    uses decimal at the top level (depth 0), alpha at depth 1, roman
+    at depth ≥ 2. We render a 3-level nested ordered list and assert
+    the depth-2 marker is an alpha letter (``a.``).
+    """
+    src = (
+        "1. top\n"
+        "   1. nested\n"
+        "      1. deep\n"
+    )
+    out = _render(Markdown(src, theme={"list_ordered_nested_style": "auto"}))
+    # Top level (depth 0) → decimal "1."
+    assert "1." in out
+    # Depth 1 → alpha "a."
+    assert "a." in out, f"expected alpha marker 'a.' for depth-1 nested list; got: {out!r}"
+    # Depth 2 → roman "i."
+    assert "i." in out, f"expected roman marker 'i.' for depth-2 nested list; got: {out!r}"
+    # Sanity: content present.
+    for label in ("top", "nested", "deep"):
+        assert label in out
+
+
+def test_list_nested_ordered_alpha_style() -> None:
+    """``list_ordered_nested_style="alpha"`` uses alpha at every depth."""
+    src = (
+        "1. top\n"
+        "   1. nested\n"
+    )
+    out = _render(Markdown(src, theme={"list_ordered_nested_style": "alpha"}))
+    # Both levels use alpha: top "a.", nested "a."
+    assert out.count("a.") >= 2, f"expected at least 2 alpha markers; got: {out!r}"
+    for label in ("top", "nested"):
+        assert label in out
+
+
+def test_list_nested_ordered_roman_style() -> None:
+    """``list_ordered_nested_style="roman"`` uses roman at every depth."""
+    src = (
+        "1. top\n"
+        "   1. nested\n"
+    )
+    out = _render(Markdown(src, theme={"list_ordered_nested_style": "roman"}))
+    # Both levels use roman: "i." each.
+    assert out.count("i.") >= 2, f"expected at least 2 roman markers; got: {out!r}"
+    for label in ("top", "nested"):
+        assert label in out
+
+
+def test_list_nested_ordered_decimal_default() -> None:
+    """Default ``list_ordered_nested_style="decimal"`` uses decimal at every depth.
+
+    Regression guard: the default behaviour is unchanged by PR1 — every
+    nesting level renders ``1.`` / ``2.`` / …
+    """
+    src = (
+        "1. top\n"
+        "   1. nested\n"
+    )
+    out = _render(Markdown(src))
+    # Decimal markers: "1." appears at both levels (counter resets to 1
+    # for the nested list because markdown-it-py starts each ordered
+    # list at 1 unless the source says otherwise).
+    assert out.count("1.") >= 2
+
+
+def test_list_nested_bullet_chars() -> None:
+    """``list_bullet_nested_chars="-*+"`` cycles bullet by depth.
+
+    PR1 adds the ``list_bullet_nested_chars`` theme key. A multi-char
+    string cycles by ``depth % len(chars)``: depth 0 → ``-``, depth 1
+    → ``*``, depth 2 → ``+``, depth 3 → ``-`` (wraps).
+    """
+    src = (
+        "- a\n"
+        "  - a1\n"
+        "    - a1a\n"
+    )
+    out = _render(Markdown(src, theme={"list_bullet_nested_chars": "-*+"}))
+    # Markers are rendered as dim "<char> " segments wrapped in SGR 2.
+    # We assert the three distinct marker characters appear in depth
+    # order: ``-`` (depth 0), ``*`` (depth 1), ``+`` (depth 2).
+    idx_dash = out.find("- ")
+    idx_star = out.find("* ")
+    idx_plus = out.find("+ ")
+    assert idx_dash >= 0, f"expected '-' marker; got: {out!r}"
+    assert idx_star >= 0, f"expected '*' marker at depth 1; got: {out!r}"
+    assert idx_plus >= 0, f"expected '+' marker at depth 2; got: {out!r}"
+    # Order: dash first, then star, then plus.
+    assert idx_dash < idx_star < idx_plus, (
+        f"expected marker order '- * +'; got positions "
+        f"dash={idx_dash} star={idx_star} plus={idx_plus} in {out!r}"
+    )
+    # Content sanity.
+    for label in ("a", "a1", "a1a"):
+        assert label in out
+
+
+def test_list_nested_bullet_chars_default_single() -> None:
+    """Default ``list_bullet_nested_chars="-"`` uses dash at every depth.
+
+    Regression guard: the default behaviour is unchanged — every
+    nesting level renders ``-``.
+    """
+    src = (
+        "- a\n"
+        "  - a1\n"
+    )
+    out = _render(Markdown(src))
+    # Both levels use "-".
+    assert out.count("- ") >= 2
+
+
+def test_resolve_theme_color_prefers_legacy_key() -> None:
+    """``_resolve_theme_color`` returns the legacy value when present.
+
+    Backwards-compatibility contract: a caller passing
+    ``theme={"h1_color": "cyan"}`` gets ``"cyan"`` back, not the
+    semantic ``accent`` default.
+    """
+    from ink.externals.markdown import _resolve_theme_color
+
+    theme = {"h1_color": "cyan", "accent_color": "red"}
+    assert _resolve_theme_color(theme, "accent", "h1_color") == "cyan"
+
+
+def test_resolve_theme_color_falls_back_to_semantic() -> None:
+    """When the legacy key is absent, the semantic key is used."""
+    from ink.externals.markdown import _resolve_theme_color
+
+    theme = {"accent_color": "red"}
+    # legacy_key "h1_color" is absent → fall through to semantic "accent".
+    assert _resolve_theme_color(theme, "accent", "h1_color") == "red"
+
+
+def test_resolve_theme_color_uses_semantic_default() -> None:
+    """When neither key is set, the SEMANTIC_COLORS default is used."""
+    from ink.externals.markdown import _resolve_theme_color
+
+    theme: dict[str, Any] = {}
+    # No legacy, no semantic override → SEMANTIC_COLORS["accent"] = "cyan".
+    assert _resolve_theme_color(theme, "accent", "h1_color") == "cyan"
+
+
+def test_resolve_theme_color_handles_none_legacy() -> None:
+    """A ``None`` legacy value falls through to the semantic layer.
+
+    This matches the convention that ``None`` means "inherit the
+    terminal default" — but when a caller explicitly sets the legacy
+    key to ``None``, we honour the semantic override (if any) rather
+    than blindly returning ``None``.
+    """
+    from ink.externals.markdown import _resolve_theme_color
+
+    theme = {"h1_color": None, "accent_color": "red"}
+    # legacy is None → fall through to semantic "accent" = "red".
+    assert _resolve_theme_color(theme, "accent", "h1_color") == "red"
+
+
+def test_resolve_theme_color_resolves_semantic_name() -> None:
+    """A semantic value that is itself a semantic name resolves one level deeper.
+
+    Future-proofs for ``theme={"h1_color": "accent"}`` — the legacy
+    value ``"accent"`` is a semantic name, so we resolve it through
+    :data:`SEMANTIC_COLORS` to ``"cyan"``.
+    """
+    from ink.externals.markdown import _resolve_theme_color
+
+    theme = {"h1_color": "accent"}
+    assert _resolve_theme_color(theme, "accent", "h1_color") == "cyan"

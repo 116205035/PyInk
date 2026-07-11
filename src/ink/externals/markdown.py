@@ -96,6 +96,85 @@ if TYPE_CHECKING:
 
 __all__ = ["Markdown", "DEFAULT_MARKDOWN_THEME"]
 
+#: Semantic colour key → concrete colour name mapping.
+#:
+#: PR1 introduces a semantic colour layer so callers can say "accent" /
+#: "muted" / "border" instead of hard-coding ``"cyan"`` / ``"gray"``.
+#: ``None`` means "inherit the terminal default" (matches the convention
+#: used throughout :data:`DEFAULT_MARKDOWN_THEME`). The mapping is
+#: deliberately a separate dict (not inline in :data:`DEFAULT_MARKDOWN_THEME`)
+#: so :func:`_resolve_theme_color` can resolve any semantic key via a
+#: single lookup.
+#:
+#: These keys are *defined* in PR1 but not yet wired into the legacy
+#: ``h1_color`` / ``code_color`` / ``quote_color`` defaults — PR3 will
+#: flip the legacy keys to resolve through the semantic layer. Defining
+#: them now lets downstream callers opt in early without waiting for PR3.
+SEMANTIC_COLORS: dict[str, str | None] = {
+    "text": None,
+    "accent": "cyan",
+    "secondary": "blue",
+    "muted": "gray",
+    "border": "gray",
+    "success": "green",
+    "error": "red",
+    "warning": "yellow",
+    "info": "blue",
+}
+
+
+def _resolve_theme_color(
+    theme: dict[str, Any],
+    semantic_key: str,
+    legacy_key: str,
+) -> str | None:
+    """Resolve a colour from ``theme``, preferring the legacy key.
+
+    PR1 introduces a semantic colour layer. Each semantic name (e.g.
+    ``"accent"``) has a default concrete colour in
+    :data:`SEMANTIC_COLORS` (e.g. ``"cyan"``) and a corresponding theme
+    override key with a ``_color`` suffix (e.g. ``"accent_color"``).
+    Legacy per-block colour keys (e.g. ``"h1_color"``) still exist for
+    backwards compatibility.
+
+    Resolution order:
+
+    1. ``legacy_key`` (e.g. ``"h1_color"``) — if present in ``theme``
+       and not ``None``, return its value verbatim (possibly resolving
+       one level through :data:`SEMANTIC_COLORS` if the value is itself
+       a semantic name like ``"accent"``). This preserves the existing
+       behaviour for callers that pass ``theme={"h1_color": "cyan"}``.
+    2. ``f"{semantic_key}_color"`` (e.g. ``"accent_color"``) — if
+       present in ``theme``, honour the caller's semantic override
+       (again resolving through :data:`SEMANTIC_COLORS` if the value is
+       a semantic name).
+    3. :data:`SEMANTIC_COLORS` default for ``semantic_key``.
+
+    A value of ``None`` means "inherit the terminal default" (matches
+    the convention used throughout :data:`DEFAULT_MARKDOWN_THEME`).
+    The function never raises; an unknown ``semantic_key`` yields
+    ``None``.
+    """
+    legacy = theme.get(legacy_key)
+    if legacy is not None:
+        # A legacy value may itself be a semantic name (``"accent"``) —
+        # resolve one level deeper so ``theme={"h1_color": "accent"}``
+        # works once PR3 flips the defaults.
+        if isinstance(legacy, str) and legacy in SEMANTIC_COLORS:
+            return SEMANTIC_COLORS[legacy]
+        return legacy if isinstance(legacy, str) else None
+
+    semantic_theme_key = f"{semantic_key}_color"
+    if semantic_theme_key in theme:
+        override = theme.get(semantic_theme_key)
+        if isinstance(override, str) and override in SEMANTIC_COLORS:
+            return SEMANTIC_COLORS[override]
+        if isinstance(override, str) or override is None:
+            return override
+
+    return SEMANTIC_COLORS.get(semantic_key)
+
+
 #: Default theme: per-block colour / weight hints. Keys mirror the PRD's
 #: example theme. ``None`` means "inherit the terminal default". Colour
 #: names use PyInk's :data:`ink.render.ansi.NAMED_COLORS` vocabulary
@@ -124,6 +203,54 @@ DEFAULT_MARKDOWN_THEME: dict[str, Any] = {
     "quote_color": "gray",
     "code_block_lang_color": "gray",
     "hr_color": None,
+    # ---- PR1: Semantic colour keys --------------------------------------
+    # Defined now so downstream callers can opt in via
+    # ``theme={"h1_color": "accent"}`` (resolved through
+    # :data:`SEMANTIC_COLORS`). PR3 will rewire the legacy colour keys
+    # above to default-resolve through these semantic keys. ``None``
+    # means "inherit the terminal default".
+    "text_color": None,
+    "accent_color": "cyan",
+    "secondary_color": "blue",
+    "muted_color": "gray",
+    "border_color": "gray",
+    "success_color": "green",
+    "error_color": "red",
+    "warning_color": "yellow",
+    "info_color": "blue",
+    # ---- PR1: Heading style knobs --------------------------------------
+    # ``h{n}_underline`` / ``h{n}_italic`` default to ``False`` so the
+    # existing rainbow-colour + bold heading rendering is unchanged.
+    # Callers can opt in per level (e.g. ``theme={"h1_underline": True}``).
+    "h1_underline": False,
+    "h1_italic": False,
+    "h2_underline": False,
+    "h2_italic": False,
+    "h3_underline": False,
+    "h3_italic": False,
+    "h4_underline": False,
+    "h4_italic": False,
+    "h5_underline": False,
+    "h5_italic": False,
+    "h6_underline": False,
+    "h6_italic": False,
+    # ---- PR1: Blockquote bar -------------------------------------------
+    # ``quote_bar_char=None`` keeps the existing pure-indent (paddingLeft=2)
+    # behaviour. Setting it to a visible character (e.g. ``"▎"``) wraps
+    # the blockquote in a row Box with a coloured left bar replacing
+    # the indent.
+    "quote_bar_char": None,
+    "quote_bar_color": None,
+    # ---- PR1: List nested markers --------------------------------------
+    # ``list_ordered_nested_style="decimal"`` keeps the existing
+    # ``1. 2. 3.`` at every depth. Other values: ``"alpha"`` (a. b. c.),
+    # ``"roman"`` (i. ii. iii.), ``"auto"`` (decimal → alpha → roman by
+    # depth).
+    "list_ordered_nested_style": "decimal",
+    # ``list_bullet_nested_chars="-"`` keeps the existing single-dash
+    # bullet at every depth. A multi-char string (e.g. ``"-*+"``) cycles
+    # by ``depth % len(chars)``.
+    "list_bullet_nested_chars": "-",
     # ---- PR4: HighlightedCode integration knobs -------------------------
     # ``code_block_theme`` is forwarded verbatim to ``HighlightedCode``'s
     # ``theme=`` prop (a Pygments token → colour mapping). ``None`` lets
@@ -317,8 +444,9 @@ def _render_inline(
 
     * ``text`` — verbatim text run with the active style.
     * ``code_inline`` — single run with the ``code_color`` from the
-      theme. Inline code never inherits bold / italic / strikethrough
-      from the surrounding context (it's a distinct typographic style).
+      theme. PR1: inline code inherits the surrounding bold / italic /
+      strikethrough so ``**bold `code`**`` renders the code run bold
+      too (previously the outer inline state was dropped).
     * ``softbreak`` / ``hardbreak`` — newline character; the parent
       ``Text`` treats ``\\n`` as a line break inside the same leaf.
     * ``link_open`` / ``link_close`` — wraps the contained text in an
@@ -363,7 +491,22 @@ def _render_inline(
 
         if ctype == "code_inline":
             color = theme.get("code_color")
-            out.append(apply_style(child.content, color=color))
+            # PR1: inline code now inherits the surrounding bold / italic /
+            # strikethrough so ``**bold `code`**`` renders the code segment
+            # bold too. Previously code_inline dropped the outer inline
+            # state, which read as a typographic mismatch inside emphasised
+            # spans. ``dimColor=quote_dim`` is preserved so blockquote
+            # context still mutes the code run.
+            out.append(
+                apply_style(
+                    child.content,
+                    color=color,
+                    bold=bold,
+                    italic=italic,
+                    strikethrough=strikethrough,
+                    dimColor=quote_dim,
+                )
+            )
             i += 1
             continue
 
@@ -468,11 +611,17 @@ def _render_heading(
     Inline content inside a heading is rendered with the heading's
     colour and bold settings overlaid on top of any inline styling
     (bold wins).
+
+    PR1 adds ``h{n}_underline`` / ``h{n}_italic`` theme keys (default
+    ``False``) so callers can opt into underline / italic per heading
+    level without touching the default rainbow-colour + bold look.
     """
     level = token.tag  # "h1" / "h2" / … / "h6"
     suffix = level[1:]
     color = theme.get(f"h{suffix}_color")
     bold = _theme_bool(theme.get(f"h{suffix}_bold", True))
+    underline = _theme_bool(theme.get(f"h{suffix}_underline", False))
+    italic = _theme_bool(theme.get(f"h{suffix}_italic", False))
 
     # Render the inline content first, then wrap the whole heading in
     # the heading colour / bold so headings read uniformly. We compose
@@ -481,7 +630,13 @@ def _render_heading(
     # any segment that already had bold, which is fine because SGR is
     # idempotent in practice.
     inline_str = _render_inline_token(inline, theme)
-    styled = apply_style(inline_str, color=color, bold=bold)
+    styled = apply_style(
+        inline_str,
+        color=color,
+        bold=bold,
+        underline=underline,
+        italic=italic,
+    )
     return Text(styled)
 
 
@@ -582,35 +737,143 @@ def _render_blockquote(
 
     Returns the rendered ``Box`` and the index just past the matching
     ``blockquote_close``. The contents are rendered as nested blocks
-    (typically paragraphs), then wrapped in a single ``Box`` with
-    ``paddingLeft=2`` for the visual indent. The quote colour from
-    the theme is applied to the wrapper's inline content by injecting
-    a ``quote_dim`` flag into the inner render so each inline text
-    run picks up ``dimColor=True``.
+    (typically paragraphs), then wrapped in a single ``Box``.
+
+    Two shapes are supported:
+
+    * **Default (PR3 behaviour)** — ``quote_bar_char`` is ``None``: the
+      blockquote is wrapped in a column ``Box`` with ``paddingLeft=2``
+      for a pure-indent look. The ``quote_color`` from the theme is
+      applied to inline runs via a ``__quote__`` flag that makes each
+      inline text run pick up ``dimColor=True``.
+    * **Bar mode (PR1)** — ``quote_bar_char`` is a non-empty string
+      (e.g. ``"▎"``): the blockquote becomes a row ``Box`` with a
+      coloured left bar (``Text(quote_bar_char, color=quote_bar_color)``)
+      and a 1-space gutter replacing the ``paddingLeft=2`` indent. When
+      ``quote_bar_color`` is ``None`` the bar falls back to ``dimColor``
+      so the default (no explicit colour) still reads as muted.
     """
     inner_tokens, j = _collect_balanced(tokens, start, "blockquote_open", "blockquote_close")
     quote_theme = dict(theme)
     quote_theme["__quote__"] = True
     inner_elements, _ = _render_tokens(inner_tokens, 0, quote_theme)
+
+    bar_char = theme.get("quote_bar_char")
+    if bar_char:
+        bar_color = theme.get("quote_bar_color")
+        bar_props: dict[str, Any] = {"dimColor": True}
+        if bar_color is not None:
+            bar_props = {"color": bar_color}
+        return (
+            Box(
+                Text(bar_char, **bar_props),
+                Box(*inner_elements, flexDirection="column", paddingLeft=1),
+                flexDirection="row",
+            ),
+            j + 1,
+        )
+
     return (
         Box(*inner_elements, flexDirection="column", paddingLeft=2),
         j + 1,
     )
 
 
+def _list_marker(
+    is_ordered: bool,
+    counter: int,
+    depth: int,
+    theme: dict[str, Any],
+) -> str:
+    """Compute the marker string for a list item at the given ``depth``.
+
+    * Bullet lists: read ``list_bullet_nested_chars`` (default ``"-"``).
+      A multi-char string cycles by ``depth % len(chars)`` so ``"-*+"``
+      yields ``-`` / ``*`` / ``+`` / ``-`` / … across nesting levels.
+      A single-char string (the default) yields the same char at every
+      depth (matches the pre-PR1 behaviour).
+    * Ordered lists: read ``list_ordered_nested_style`` (default
+      ``"decimal"``). ``"alpha"`` renders ``a.`` / ``b.`` / … (cycles
+      every 26), ``"roman"`` renders lower-case Roman numerals
+      (``i.`` / ``ii.`` / …), ``"auto"`` switches by depth:
+      depth 0 → decimal, depth 1 → alpha, depth ≥ 2 → roman.
+
+    The returned marker does NOT include the trailing space — callers
+    append it so they control the gutter width.
+    """
+    if not is_ordered:
+        chars = theme.get("list_bullet_nested_chars") or "-"
+        if not isinstance(chars, str) or not chars:
+            chars = "-"
+        char = chars[depth % len(chars)]
+        return char
+
+    style = theme.get("list_ordered_nested_style") or "decimal"
+    if not isinstance(style, str):
+        style = "decimal"
+    style = style.strip().lower()
+
+    if style == "auto":
+        if depth <= 0:
+            style = "decimal"
+        elif depth == 1:
+            style = "alpha"
+        else:
+            style = "roman"
+
+    if style == "alpha":
+        # 1 → a, 26 → z, 27 → a (cycle, mirroring list behaviour in
+        # most renderers; ordered lists rarely exceed 26 items).
+        letter = chr(ord("a") + (counter - 1) % 26)
+        return f"{letter}."
+    if style == "roman":
+        return f"{_to_roman(counter)}."
+
+    # Default / fallback: decimal.
+    return f"{counter}."
+
+
+def _to_roman(n: int) -> str:
+    """Convert a positive int to lower-case Roman numerals.
+
+    Used by :func:`_list_marker` for the ``roman`` / ``auto`` nested
+    styles. Supports 1-3999 (well beyond any realistic list length);
+    values outside that range fall back to the decimal string so we
+    never crash on pathological input.
+    """
+    if n <= 0 or n >= 4000:
+        return str(n)
+    val = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1]
+    sym = ["m", "cm", "d", "cd", "c", "xc", "l", "xl", "x", "ix", "v", "iv", "i"]
+    out: list[str] = []
+    for v, s in zip(val, sym, strict=True):
+        while n >= v:
+            out.append(s)
+            n -= v
+    return "".join(out)
+
+
 def _render_list(
     tokens: list[Token],
     start: int,
     theme: dict[str, Any],
+    *,
+    depth: int = 0,
 ) -> tuple[Element, int]:
     """Render a ``bullet_list_open`` / ``ordered_list_open`` span.
 
     Each ``list_item_open`` ... ``list_item_close`` becomes one column
-    row. The marker is a dim ``"-"`` (bullet) or ``"N."`` (ordered,
-    starting at the item's ``info`` number or 1). The item's first
-    block (typically a paragraph) renders inline with the marker; any
+    row. The marker is computed by :func:`_list_marker` based on
+    ``depth`` and the ``list_ordered_nested_style`` /
+    ``list_bullet_nested_chars`` theme keys. The item's first block
+    (typically a paragraph) renders inline with the marker; any
     subsequent blocks (nested lists, code blocks, …) render below,
     indented by ``paddingLeft``.
+
+    ``depth`` is threaded into nested lists by passing ``depth + 1``
+    to :func:`_render_list_item`'s recursive :func:`_render_tokens`
+    call, so a list nested two levels deep picks up the right marker
+    style automatically.
     """
     list_token = tokens[start]
     is_ordered = list_token.type == "ordered_list_open"
@@ -633,7 +896,9 @@ def _render_list(
             item_tokens, k = _collect_balanced(
                 body_tokens, i, "list_item_open", "list_item_close"
             )
-            rows.append(_render_list_item(item_tokens, is_ordered, counter, theme))
+            rows.append(
+                _render_list_item(item_tokens, is_ordered, counter, theme, depth=depth)
+            )
             if is_ordered:
                 counter += 1
             i = k + 1
@@ -648,6 +913,8 @@ def _render_list_item(
     is_ordered: bool,
     counter: int,
     theme: dict[str, Any],
+    *,
+    depth: int = 0,
 ) -> Element:
     """Render a single list item.
 
@@ -655,8 +922,14 @@ def _render_list_item(
     (so ``- a`` reads as one line). Subsequent blocks are wrapped in a
     nested column ``Box`` with ``paddingLeft=2`` so nested lists and
     multi-paragraph items indent under the marker.
+
+    ``depth`` is passed through to :func:`_render_tokens` so any nested
+    ``bullet_list_open`` / ``ordered_list_open`` inside ``rest_tokens``
+    recurses into :func:`_render_list` with ``depth + 1``, picking up
+    the next marker style (decimal → alpha → roman for ordered,
+    cycling chars for bullet).
     """
-    marker = f"{counter}." if is_ordered else "-"
+    marker = _list_marker(is_ordered, counter, depth, theme)
     if not tokens:
         return Box(Text(f"{marker} ", dimColor=True), flexDirection="row")
 
@@ -675,7 +948,9 @@ def _render_list_item(
         rest_start = 3
 
     rest_tokens = tokens[rest_start:]
-    rest_elements, _ = _render_tokens(rest_tokens, 0, theme)
+    # Nested lists inside this item start at depth + 1 so their markers
+    # shift (decimal → alpha → roman, or cycling bullet chars).
+    rest_elements, _ = _render_tokens(rest_tokens, 0, theme, depth=depth + 1)
 
     head_row_children: list[Element] = [
         Text(f"{marker} ", dimColor=True),
@@ -778,6 +1053,8 @@ def _render_tokens(
     tokens: list[Token],
     start: int,
     theme: dict[str, Any],
+    *,
+    depth: int = 0,
 ) -> tuple[list[Element], int]:
     """Walk ``tokens`` from ``start`` and render each top-level block.
 
@@ -785,6 +1062,11 @@ def _render_tokens(
     next unprocessed token (which is ``len(tokens)`` when called at the
     top level, or the index past the closing token of a sub-block when
     called recursively).
+
+    ``depth`` tracks the list-nesting depth so :func:`_render_list` can
+    pick the right marker style (``decimal`` / ``alpha`` / ``roman`` /
+    cycling bullet chars). Top-level calls default to ``depth=0``; each
+    recursive descent into a nested list passes ``depth + 1``.
     """
     elements: list[Element] = []
     i = start
@@ -820,7 +1102,7 @@ def _render_tokens(
             continue
 
         if ttype in ("bullet_list_open", "ordered_list_open"):
-            el, next_i = _render_list(tokens, i, theme)
+            el, next_i = _render_list(tokens, i, theme, depth=depth)
             elements.append(el)
             i = next_i
             continue
