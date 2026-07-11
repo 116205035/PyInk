@@ -690,3 +690,36 @@ PyInk Markdown 渲染对标 claude-code，拆 3 个 PR 完成：PR1 基础改造
 ### Next Steps
 
 - None - task complete
+
+
+## Session 20: markdown 遗留清理：quote_color wire-up + 边框字符集去重
+
+**Date**: 2026-07-11
+**Task**: markdown 遗留清理：quote_color wire-up + 边框字符集去重
+**Branch**: `main`
+
+### Summary
+
+修复 pyink-markdown-render-polish 任务的 2 个已知遗留。R1：quote_color 主题键之前存在于 DEFAULT_MARKDOWN_THEME 但从未被读取，删除 __quote__ flag（PR1 起只走 dimColor 与 quote_color 语义脱节），改为 __quote_color__ 单一 flag 透传，_render_inline 有值用 color / None 不染色，默认 quote_color=muted → SGR 90 gray（was SGR 2 dimColor），完成 PR3 改默认值的本意。R2：删除 _TABLE_BORDER_CHARS（外角与 BORDER_STYLES 重复维护），新增 _TABLE_CROSS_CHARS 只含 cross 字符 + _get_table_border_chars 从 BORDER_STYLES 读外角、从 _TABLE_CROSS_CHARS 补 cross，_TABLE_BORDER_ALIASES 映射 rounded→round，ansi.py 加 BORDER_STYLES[rounded] 别名统一命名。遵循 research 约束不扩展 BORDER_STYLES 加 cross 字段（_paint_box_border 不读）。185 测试全过（177 baseline + 8 新增），lint/typecheck 绿。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0cf343f` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

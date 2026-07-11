@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 19
+- **Total Sessions**: 20
 - **Last Active**: 2026-07-11
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~692 | Active |
+| `journal-1.md` | ~725 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 20 | 2026-07-11 | markdown 遗留清理：quote_color wire-up + 边框字符集去重 | `0cf343f` | `main` |
 | 19 | 2026-07-11 | 完善 markdown 显示效果细节 | `401e17e`, `ae477a5`, `ba295b4`, `529b830` | `main` |
 | 18 | 2026-06-24 | Fix Jarvis Phase 1 integration bugs (cursor hide / placeholder cursor / layout max-rows) | `451a8aa`, `7260276`, `3cde0cf` | `main` |
 | 17 | 2026-06-23 | Rename pyink to ink + PyPI name exploration (deferred) | `95bb1b2`, `597680c` | `main` |
