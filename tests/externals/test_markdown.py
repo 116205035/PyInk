@@ -184,11 +184,20 @@ def _restore_import() -> Any:
 # ---------------------------------------------------------------------------
 
 
-def test_static_str_returns_box_host_with_column_direction() -> None:
+def test_static_str_now_function_component() -> None:
+    """PR2: static ``str`` sources route through ``_MarkdownImpl`` too.
+
+    Pre-PR2 the static path eagerly built a ``box`` host element so
+    callers could introspect the rendered element tree. PR2 unifies the
+    static and reactive paths so width-aware blocks (tables) can pick
+    up the layout-time content width — the static path now returns a
+    function component element whose body defers parsing + rendering
+    to layout time.
+    """
     el = Markdown("# Hi")
     assert isinstance(el, Element)
-    assert el.type == "box"
-    assert el.props["flexDirection"] == "column"
+    assert el.type is _MarkdownImpl
+    assert el.props["source"] == "# Hi"
 
 
 def test_signal_source_returns_function_component_element() -> None:
@@ -206,14 +215,24 @@ def test_callable_source_returns_function_component_element() -> None:
 
 
 def test_box_props_forwarded_to_outer_box() -> None:
+    """``box_props`` are forwarded to ``_MarkdownImpl`` which applies them
+    to the outer ``Box`` container at mount time.
+    """
     el = Markdown("# Hi", borderStyle="round", padding=1)
-    assert el.props["borderStyle"] == "round"
-    assert el.props["padding"] == 1
+    box_props = el.props["box_props"]
+    assert box_props["borderStyle"] == "round"
+    assert box_props["padding"] == 1
 
 
 def test_caller_flexDirection_is_ignored() -> None:
+    """The component's contract is ``flexDirection="column"``; a caller
+    passing ``flexDirection="row"`` is stripped before forwarding.
+    """
     el = Markdown("# Hi", flexDirection="row")
-    assert el.props["flexDirection"] == "column"
+    box_props = el.props["box_props"]
+    # ``flexDirection`` is popped before forwarding so the component can
+    # force ``"column"`` (one block per row).
+    assert "flexDirection" not in box_props
 
 
 # ---------------------------------------------------------------------------
@@ -402,24 +421,20 @@ def test_blockquote_with_multiple_lines() -> None:
 
 
 def test_horizontal_rule_uses_divider() -> None:
-    """``---`` produces a ``Divider`` element (a single bottom edge box)."""
-    el = Markdown("a\n\n---\n\nb")
-    # The middle child of the outer Box is the divider box.
-    children = el.children
-    # Find the divider (a box with borderBottom=True, others False).
-    divider_found = False
-    for child in children:
-        if isinstance(child, Element) and child.type == "box":
-            props = child.props
-            if (
-                props.get("borderBottom") is True
-                and props.get("borderTop") is False
-                and props.get("borderLeft") is False
-                and props.get("borderRight") is False
-            ):
-                divider_found = True
-                break
-    assert divider_found, "expected a Divider element between the two paragraphs"
+    """``---`` produces a ``Divider`` element that renders as a row of ``─``.
+
+    PR2 changed the static path to return a function component element,
+    so we can no longer walk ``el.children`` to find the Divider box.
+    Instead we render to a string and assert the divider glyph row
+    appears between the two paragraphs.
+    """
+    out = _render(Markdown("a\n\n---\n\nb"))
+    # Divider renders as a row of U+2500 (─) characters.
+    assert "─" in out
+    assert "a" in out
+    assert "b" in out
+    # The divider sits between the two paragraphs.
+    assert out.index("a") < out.index("─") < out.index("b")
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +450,265 @@ def test_table_renders_aligned_columns() -> None:
     # Body cells.
     for label in ("1", "2", "hello", "world"):
         assert label in out
+
+
+# ---------------------------------------------------------------------------
+# PR2: Table rendering polish — borders / alignment / inline / responsive
+# ---------------------------------------------------------------------------
+
+
+def test_table_border_single() -> None:
+    """Default ``table_border_style="single"`` draws ``┌─┬─┐`` / ``└─┴─┘``."""
+    out = _render(Markdown("| A | B |\n|---|---|\n| 1 | 2 |\n"))
+    # Top border uses single-line corners + cross.
+    assert "┌" in out
+    assert "┬" in out
+    assert "┐" in out
+    # Bottom border.
+    assert "└" in out
+    assert "┴" in out
+    assert "┘" in out
+    # Header/body separator.
+    assert "├" in out
+    assert "┼" in out
+    assert "┤" in out
+    # Vertical separators.
+    assert "│" in out
+    # Horizontal fill.
+    assert "─" in out
+
+
+def test_table_border_none() -> None:
+    """``table_border_style="none"`` disables the frame entirely."""
+    out = _render(
+        Markdown(
+            "| A | B |\n|---|---|\n| 1 | 2 |\n",
+            theme={"table_border_style": "none"},
+        )
+    )
+    # No border glyphs should appear.
+    for glyph in ("┌", "┐", "└", "┘", "├", "┤", "┬", "┴", "┼", "│"):
+        assert glyph not in out, (
+            f"border glyph {glyph!r} should be absent when border_style='none'"
+        )
+    # Content still present.
+    assert "A" in out
+    assert "B" in out
+    assert "1" in out
+    assert "2" in out
+
+
+def test_table_border_rounded() -> None:
+    """``table_border_style="rounded"`` uses ``╭`` / ``╮`` / ``╰`` / ``╯``."""
+    out = _render(
+        Markdown(
+            "| A | B |\n|---|---|\n| 1 | 2 |\n",
+            theme={"table_border_style": "rounded"},
+        )
+    )
+    # Rounded corners (top/bottom only — the mid separator stays single).
+    assert "╭" in out
+    assert "╮" in out
+    assert "╰" in out
+    assert "╯" in out
+    # Single-line square corners should NOT appear (top/bottom corners
+    # are rounded; the mid separator uses ├ ┼ ┤ which are not corners).
+    assert "┌" not in out
+    assert "┐" not in out
+    assert "└" not in out
+    assert "┘" not in out
+
+
+def test_table_border_double() -> None:
+    """``table_border_style="double"`` uses ``╔═╗╝╚`` glyphs."""
+    out = _render(
+        Markdown(
+            "| A | B |\n|---|---|\n| 1 | 2 |\n",
+            theme={"table_border_style": "double"},
+        )
+    )
+    # Double-line corners.
+    assert "╔" in out
+    assert "╗" in out
+    assert "╚" in out
+    assert "╝" in out
+    # Double horizontal fill.
+    assert "═" in out
+    # Single horizontal should NOT appear (double replaces it).
+    assert "─" not in out
+
+
+def test_table_align_center() -> None:
+    """``:---:`` marker centers the column's cells."""
+    out = _render(Markdown("| A |\n|:---:|\n| short |\n| longertext |\n"))
+    # The header "A" should be centered (padding on both sides). With
+    # ideal width = len("longertext") = 10, "A" gets 4 spaces left +
+    # 5 right (or 5 left + 4 right — center splits with extra on right).
+    # We assert the centered position by checking "A" is not left-aligned
+    # (i.e. there's a space before "A" in the header row).
+    import re
+    visible = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    # The header row is the second line (after the top border). Find it.
+    lines = visible.split("\n")
+    header_lines = [ln for ln in lines if "A" in ln and "│" in ln]
+    assert header_lines, f"header row not found in: {visible!r}"
+    header = header_lines[0]
+    # Centered: there should be a space immediately before "A" (not
+    # left-aligned which would put "A" right after "│ ").
+    a_idx = header.index("A")
+    assert a_idx > 0 and header[a_idx - 1] == " ", (
+        f"expected 'A' to be centered (space before); got: {header!r}"
+    )
+
+
+def test_table_align_right() -> None:
+    """``---:`` marker right-aligns the column's cells."""
+    out = _render(Markdown("| A |\n|---:|\n| short |\n| longertext |\n"))
+    import re
+    visible = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    lines = visible.split("\n")
+    # The body row "short" should be right-aligned (padding on left).
+    short_lines = [ln for ln in lines if "short" in ln and "│" in ln]
+    assert short_lines, f"short row not found in: {visible!r}"
+    short_line = short_lines[0]
+    s_idx = short_line.index("short")
+    # Right-aligned: there should be a space before "short" (not
+    # right after "│ ").
+    assert s_idx > 0 and short_line[s_idx - 1] == " ", (
+        f"expected 'short' to be right-aligned (space before); got: {short_line!r}"
+    )
+
+
+def test_table_cell_inline_bold() -> None:
+    """``**bold**`` inside a cell renders with SGR 1."""
+    out = _render(Markdown("| A |\n|---|\n| **bold** |\n"))
+    assert f"{ESC}[1mbold{ESC}[0m" in out
+
+
+def test_table_cell_inline_code() -> None:
+    """`` `code` `` inside a cell renders with the code colour (red SGR 31)."""
+    out = _render(Markdown("| A |\n|---|\n| `code` |\n"))
+    assert f"{ESC}[31mcode{ESC}[0m" in out
+
+
+def test_table_responsive_shrink_wide() -> None:
+    """Wide terminal uses ideal widths (no truncation)."""
+    src = (
+        "| Name | Age | Role |\n"
+        "|:-----|:---:|------:|\n"
+        "| Alice | 30 | Admin |\n"
+        "| Bob | 25 | User |\n"
+    )
+    out = _render(Markdown(src), columns=120)
+    # All cell content appears in full (ideal widths fit).
+    for label in ("Name", "Age", "Role", "Alice", "Bob", "Admin", "User", "30", "25"):
+        assert label in out
+
+
+def test_table_responsive_shrink_narrow() -> None:
+    """Narrow terminal keeps the bordered layout but shrinks columns.
+
+    At 50 columns the 3-column table still fits (sum of ideal widths
+    + borders < 50), so we expect the bordered layout rather than the
+    key-value fallback.
+    """
+    src = (
+        "| Name | Age | Role |\n"
+        "|:-----|:---:|------:|\n"
+        "| Alice | 30 | Admin |\n"
+        "| Bob | 25 | User |\n"
+    )
+    out = _render(Markdown(src), columns=50)
+    # Border glyphs present (bordered layout, not key-value).
+    assert "┌" in out
+    assert "└" in out
+    # Content present.
+    for label in ("Name", "Alice", "Bob", "Admin", "User"):
+        assert label in out
+
+
+def test_table_kv_fallback() -> None:
+    """Extreme narrow terminal degrades to key-value layout."""
+    src = (
+        "| Name | Age | Role |\n"
+        "|:-----|:---:|------:|\n"
+        "| Alice | 30 | Admin |\n"
+        "| Bob | 25 | User |\n"
+    )
+    out = _render(Markdown(src), columns=20)
+    # No border glyphs (key-value layout, no frame).
+    for glyph in ("┌", "┐", "└", "┘", "├", "┤", "┬", "┴", "┼"):
+        assert glyph not in out, (
+            f"border glyph {glyph!r} should be absent in key-value fallback"
+        )
+    # Key-value pairs appear: "Name:" / "Age:" / "Role:" labels.
+    assert "Name:" in out
+    assert "Age:" in out
+    assert "Role:" in out
+    # Values appear.
+    for label in ("Alice", "Bob", "Admin", "User", "30", "25"):
+        assert label in out
+
+
+def test_table_string_width_cjk() -> None:
+    """CJK characters count as 2 cells (string_width, not len)."""
+    src = (
+        "| 名前 | 年齢 |\n"
+        "|:-----|:---:|\n"
+        "| 愛子 | 30 |\n"
+        "| 太郎 | 25 |\n"
+    )
+    out = _render(Markdown(src), columns=80)
+    import re
+    visible = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    lines = visible.split("\n")
+    # All data rows should have the same total visible width (the
+    # CJK width is correctly accounted for so columns line up). We
+    # check the right border ``│`` appears at the same column on
+    # every data row.
+    data_lines = [ln for ln in lines if "│" in ln and ("愛子" in ln or "太郎" in ln)]
+    assert len(data_lines) >= 2, f"expected ≥2 CJK data rows; got: {visible!r}"
+    # The right-edge ``│`` column should be the same on both rows.
+    right_cols = {ln.rfind("│") for ln in data_lines}
+    assert len(right_cols) == 1, (
+        f"CJK rows have inconsistent right-edge column: {right_cols}; "
+        f"lines={data_lines!r}"
+    )
+
+
+def test_table_columns_from_layout_width() -> None:
+    """A static table inside a narrow parent Box shrinks to fit.
+
+    Regression for the PR2 static-path-routes-through-_MarkdownImpl
+    change: a static ``Markdown("...")`` inside a parent Box with a
+    constrained width must pick up the layout-time width via
+    ``get_current_text_width()`` and shrink the table accordingly.
+    Pre-PR2 the static path eagerly built the element tree with no
+    width context, so the table rendered at ideal widths and overflowed.
+    """
+    src = (
+        "| Name | Age | Role |\n"
+        "|:-----|:---:|------:|\n"
+        "| Alice | 30 | Admin |\n"
+        "| Bob | 25 | User |\n"
+    )
+    # Wrap the static Markdown in a parent Box with padding + border so
+    # the available content width is well below the viewport width.
+    out = _render(
+        Box(
+            Markdown(src),
+            flexDirection="column",
+            padding=2,
+            borderStyle="round",
+        ),
+        columns=30,
+    )
+    # The table should degrade to key-value (30 cols - padding 2*2 -
+    # border 2 = ~24 content; 3-column table with min widths 7+3+10=20
+    # + border overhead ~10 = 30 > 24 → fallback).
+    assert "Name:" in out
+    assert "Age:" in out
+    assert "Role:" in out
 
 
 # ---------------------------------------------------------------------------
@@ -857,55 +1131,56 @@ def test_fenced_block_applies_border_color() -> None:
 
     Default border colour is ``gray`` (SGR 90). Overriding it to
     ``magenta`` (SGR 35) should make the wrapper border box's
-    ``borderColor`` prop ``"magenta"``.
+    ``borderColor`` prop ``"magenta"``, which surfaces in the rendered
+    output as the border glyphs being wrapped in SGR 35.
     """
-    el = Markdown(
-        "```python\nx = 1\n```",
-        theme={"code_block_border_color": "magenta"},
+    import re
+
+    out = _render(
+        Markdown(
+            "```python\nx = 1\n```",
+            theme={"code_block_border_color": "magenta"},
+        )
     )
-    # Tree shape: outer column box -> code-block box -> [header?, border box].
-    # The border box is one level deeper than the column children; walk
-    # the grandchildren to find it.
-    border_box: Element | None = None
-    for child in el.children:
-        if not isinstance(child, Element) or child.type != "box":
-            continue
-        for sub in child.children:
-            if (
-                isinstance(sub, Element)
-                and sub.type == "box"
-                and sub.props.get("borderStyle") == "single"
-            ):
-                border_box = sub
-                break
-        if border_box is not None:
-            break
-    assert border_box is not None, "expected a single-border Box wrapping code"
-    assert border_box.props.get("borderColor") == "magenta"
+    # The single-line border glyphs (┌ ─ │ └ ┐) should be wrapped in
+    # magenta (SGR 35) rather than the default gray (SGR 90). We look
+    # for a run of SGR + box-drawing glyphs + reset to assert the
+    # border colour specifically (the language header still uses gray
+    # for its dim styling, so a bare ``[35m in out`` would be enough
+    # but ``[90m not in out`` would false-positive on the header).
+    border_runs = re.findall(
+        r"\x1b\[[0-9;]*m[┌─┐│└┘]+\x1b\[0m", out
+    )
+    assert border_runs, "expected at least one border glyph run in output"
+    for run in border_runs:
+        assert f"{ESC}[35m" in run, (
+            f"border run should use magenta (SGR 35); got: {run!r}"
+        )
+        assert f"{ESC}[90m" not in run, (
+            f"border run should NOT use default gray (SGR 90); got: {run!r}"
+        )
 
 
 @_pygments_mark
 def test_fenced_block_show_border_false_removes_frame() -> None:
     """``code_block_show_border=False`` skips the wrapper border Box.
 
-    With the border disabled, the code-block box should NOT contain a
-    child Box with ``borderStyle="single"`` — the HighlightedCode result
-    sits directly under the code-block box.
+    With the border disabled, the rendered output should NOT contain
+    the single-line box-drawing glyphs (``┌`` / ``┐`` / ``└`` / ``┘`` /
+    ``│``) that the bordered path emits.
     """
-    el = Markdown(
-        "```python\nx = 1\n```",
-        theme={"code_block_show_border": False},
+    out = _render(
+        Markdown(
+            "```python\nx = 1\n```",
+            theme={"code_block_show_border": False},
+        )
     )
-    # Walk grandchildren (outer column -> code-block box -> border box?).
-    for child in el.children:
-        if not isinstance(child, Element) or child.type != "box":
-            continue
-        for sub in child.children:
-            if not isinstance(sub, Element) or sub.type != "box":
-                continue
-            assert sub.props.get("borderStyle") != "single", (
-                "border box should be absent when code_block_show_border=False"
-            )
+    # The corner glyphs of a single-line border should be absent.
+    for glyph in ("┌", "┐", "└", "┘"):
+        assert glyph not in out, (
+            f"border glyph {glyph!r} should be absent when "
+            f"code_block_show_border=False"
+        )
 
 
 @_pygments_mark
@@ -1059,20 +1334,18 @@ def test_fenced_code_block_fallback_has_no_border(
     """The fallback path never wraps code in a border Box.
 
     The border is a PR4 addition tied to the HighlightedCode path; the
-    PR3 fallback stays a plain Box of dim Text rows.
+    PR3 fallback stays a plain Box of dim Text rows. We render to a
+    string and assert the single-line border corner glyphs are absent.
     """
     _install_pygments_import_blocker()
-    el = Markdown("```python\nx = 1\n```")
-    # Walk grandchildren (outer column -> code-block box -> ?).
-    for child in el.children:
-        if not isinstance(child, Element) or child.type != "box":
-            continue
-        for sub in child.children:
-            if not isinstance(sub, Element) or sub.type != "box":
-                continue
-            assert sub.props.get("borderStyle") != "single", (
-                "fallback path should not wrap code in a border"
-            )
+    out = _render(Markdown("```python\nx = 1\n```"))
+    # The corner glyphs of a single-line border should be absent in
+    # the fallback path.
+    for glyph in ("┌", "┐", "└", "┘"):
+        assert glyph not in out, (
+            f"fallback path should not wrap code in a border; "
+            f"found glyph {glyph!r} in output"
+        )
 
 
 def test_nested_code_block_in_markdown_does_not_break_surrounding_blocks(

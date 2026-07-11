@@ -15,20 +15,24 @@ an ``ImportError`` whose message points the caller at the right extra
 ``markdown_it``, so the optional group only matters when this component
 is actually used.
 
-Design (per PRD PR3 scope):
+Design (per PRD scope):
 
-* ``Markdown`` is a thin factory that returns a ``box`` host element
-  for static ``str`` sources — no function component, no hooks, no live
-  render pipeline needed. This is the cheapest possible shape and
-  matches the common case (Markdown is usually rendered from a snapshot
-  string, not a live signal).
-* Reactive sources (``Signal[str]`` / ``Callable[[], str]``) are
-  deferred to a function component body (:func:`_MarkdownImpl`) so the
-  signal write triggers a re-render through the parent's normal
-  re-render machinery. The function component parses and renders the
-  Markdown on every mount — the PRD's "Out of Scope" note explicitly
-  defers incremental parsing, so re-parsing the whole document is the
-  expected cost.
+* ``Markdown`` routes both static (``str``) and reactive
+  (``Signal[str]`` / ``Callable[[], str]``) sources through a single
+  function component (:func:`_MarkdownImpl`) whose body returns a
+  ``Box`` wrapping a single ``Text`` leaf carrying a layout-time
+  callable. The callable parses + renders the Markdown when the layout
+  pass invokes it, which is the only point at which the available
+  content width is known — this lets width-aware blocks (tables) pick
+  up the width via ``get_current_text_width()`` and responsively shrink
+  or degrade to a key-value layout. PR2 unified the two paths; pre-PR2
+  the static path eagerly built a ``box`` host element, which meant
+  tables had no width context and couldn't shrink.
+* The function component parses and renders the Markdown on every
+  mount — the PRD's "Out of Scope" note explicitly defers incremental
+  parsing, so re-parsing the whole document is the expected cost. The
+  rendered string is cached (see :func:`_cached_render`) so the
+  render-loop's double-layout doesn't double the work.
 * Parsing uses :class:`markdown_it.MarkdownIt` configured with the
   ``"commonmark"`` preset plus the ``table`` plugin (the PRD's
   "supported Markdown elements" list calls out tables). The parser is
@@ -87,6 +91,7 @@ from ink.core.element import Element, create_element
 from ink.core.signal import Signal
 from ink.externals.divider import Divider
 from ink.externals.link import _wrap_osc8
+from ink.layout.measure import WrapMode, string_width, wrap_text
 from ink.render.ansi import apply_style
 
 if TYPE_CHECKING:
@@ -269,6 +274,40 @@ DEFAULT_MARKDOWN_THEME: dict[str, Any] = {
     # the highlighted code. Forwarded to both paths so the header stays
     # consistent between highlighted and fallback rendering.
     "code_block_show_language": True,
+    # ---- PR2: Table rendering knobs ------------------------------------
+    # ``table_border_style`` selects the box-drawing character set used
+    # for the table frame + the header/body separator. ``"single"`` (the
+    # default) draws ``┌─┬─┐``; ``"rounded"`` uses ``╭─╮╯╰``; ``"double"``
+    # uses ``╔═╗╝╚``; ``"none"`` disables the frame entirely (matching
+    # the pre-PR2 borderless look).
+    "table_border_style": "single",
+    # ``table_border_color=None`` falls back to the theme's ``border``
+    # semantic colour (resolved via :func:`_resolve_theme_color`); a
+    # concrete colour name overrides it.
+    "table_border_color": None,
+    # Whether the header row renders bold. Mirrors the
+    # ``table_header_bold`` convention from claude-code.
+    "table_header_bold": True,
+    # ``table_header_align=None`` lets each column's alignment (from the
+    # ``:---:`` markers) apply to the header. A concrete value
+    # (``"left"`` / ``"center"`` / ``"right"``) overrides per-column
+    # alignment for the header row only.
+    "table_header_align": None,
+    # Cell padding (left + right) inside each column. Default 1 matches
+    # claude-code's ``" " + cell + " "`` layout.
+    "table_cell_padding": 1,
+    # Separator between key and value when the table degrades to the
+    # vertical / key-value layout (extreme terminal narrowness).
+    "table_kv_separator": ":",
+    # Degrade threshold: a single cell that wraps to more than this many
+    # lines triggers the vertical / key-value fallback.
+    "table_max_row_lines": 4,
+    # Minimum column width — columns never shrink below this even in the
+    # proportional-shrink branch (prevents degenerate 1-char columns).
+    "table_min_column_width": 3,
+    # Safety margin left between the table and the terminal right edge
+    # to absorb resize-race measurement drift (claude-code: 4).
+    "table_safety_margin": 4,
 }
 
 
@@ -966,30 +1005,214 @@ def _render_list_item(
     return Box(*parts, flexDirection="column")
 
 
+#: Box-drawing character sets for the table frame. Each set carries the
+#: 6 glyphs a bordered table needs: outer corners + edges for top /
+#: bottom border lines, the header/body separator, and the per-column
+#: cross pieces (``top`` / ``bottom`` / ``mid`` rows all use the same
+#: horizontal fill + different cross glyphs). See :func:`_hline`.
+_TABLE_BORDER_CHARS: dict[str, dict[str, str]] = {
+    "single": {
+        "top_left": "┌", "top_right": "┐", "top_cross": "┬",
+        "bottom_left": "└", "bottom_right": "┘", "bottom_cross": "┴",
+        "mid_left": "├", "mid_right": "┤", "mid_cross": "┼",
+        "horizontal": "─", "vertical": "│",
+    },
+    "rounded": {
+        "top_left": "╭", "top_right": "╮", "top_cross": "┬",
+        "bottom_left": "╰", "bottom_right": "╯", "bottom_cross": "┴",
+        "mid_left": "├", "mid_right": "┤", "mid_cross": "┼",
+        "horizontal": "─", "vertical": "│",
+    },
+    "double": {
+        "top_left": "╔", "top_right": "╗", "top_cross": "╦",
+        "bottom_left": "╚", "bottom_right": "╝", "bottom_cross": "╩",
+        "mid_left": "╠", "mid_right": "╣", "mid_cross": "╬",
+        "horizontal": "═", "vertical": "║",
+    },
+}
+
+
+def _parse_table_align(token: Token) -> str:
+    """Extract the column alignment from a ``th_open`` / ``td_open`` token.
+
+    markdown-it-py stores the alignment in ``token.attrs['style']`` as
+    ``"text-align:left|center|right"`` (verified experimentally — see
+    ``research/RESEARCH-NOTES.md``). A column with no alignment marker
+    has an empty ``attrs`` and defaults to ``"left"``.
+
+    Per the CommonMark table spec, alignment is a column-level property
+    derived from the ``:---:`` separator row; body cells inherit it.
+    We therefore only consult the header ``th_open`` tokens when
+    building the per-column align list (see :func:`_render_table`).
+    """
+    style = (token.attrs or {}).get("style", "")
+    if not isinstance(style, str):
+        return "left"
+    if "text-align:center" in style:
+        return "center"
+    if "text-align:right" in style:
+        return "right"
+    return "left"
+
+
+def _pad_aligned(text: str, text_w: int, width: int, align: str) -> str:
+    """Pad ``text`` to ``width`` cells according to ``align``.
+
+    Mirrors claude-code's ``padAligned``: left-align pads on the right,
+    right-align pads on the left, center splits the padding with the
+    extra cell on the right (matches the common ``str.center`` convention).
+    ``text_w`` is the caller-measured display width (via
+    :func:`string_width`) so ANSI-styled cells pad correctly.
+    """
+    if text_w >= width:
+        return text
+    pad = width - text_w
+    if align == "center":
+        left = pad // 2
+        right = pad - left
+        return " " * left + text + " " * right
+    if align == "right":
+        return " " * pad + text
+    return text + " " * pad
+
+
+def _table_border_chars(style: str) -> dict[str, str] | None:
+    """Return the box-drawing glyph set for ``style``.
+
+    Returns ``None`` for ``"none"`` (no frame). Unknown styles fall
+    back to ``"single"`` so a typo in the theme never crashes the
+    renderer — the table still renders, just with the default frame.
+    """
+    if style == "none":
+        return None
+    return _TABLE_BORDER_CHARS.get(style, _TABLE_BORDER_CHARS["single"])
+
+
+def _hline(
+    chars: dict[str, str],
+    widths: list[int],
+    padding: int,
+    left: str,
+    cross: str,
+    right: str,
+) -> str:
+    """Build a horizontal border line for the table frame.
+
+    ``widths`` are the per-column content widths; each column is drawn
+    as ``horizontal * (width + 2 * padding)`` so the border spans the
+    full padded cell. Columns are joined with ``cross`` and capped with
+    ``left`` / ``right``.
+    """
+    fill = chars["horizontal"]
+    parts = [left]
+    n = len(widths)
+    for i, w in enumerate(widths):
+        parts.append(fill * (w + 2 * padding))
+        parts.append(cross if i < n - 1 else right)
+    return "".join(parts)
+
+
+def _dataline(
+    chars: dict[str, str],
+    cells: list[str],
+    widths: list[int],
+    aligns: list[str],
+    padding: int,
+) -> str:
+    """Build a data row line: ``│ cell │ cell │``.
+
+    Each cell is padded to its column width according to the column's
+    alignment, then wrapped in ``padding``-wide gutters on both sides.
+    Cells are joined with the vertical separator and capped with the
+    left / right edge glyphs.
+    """
+    vertical = chars["vertical"]
+    parts = [vertical]
+    n = len(widths)
+    for i in range(n):
+        cell = cells[i] if i < len(cells) else ""
+        cell_w = string_width(cell)
+        padded = _pad_aligned(cell, cell_w, widths[i], aligns[i])
+        parts.append(" " * padding + padded + " " * padding)
+        parts.append(vertical)
+    return "".join(parts)
+
+
 def _render_table(
     tokens: list[Token],
     start: int,
     theme: dict[str, Any],
+    *,
+    columns: int | None = None,
 ) -> tuple[Element, int]:
-    """Render a ``table_open`` ... ``table_close`` span as aligned columns.
+    """Render a ``table_open`` ... ``table_close`` span as a bordered table.
 
-    CommonMark tables come as ``thead_open`` (one row of ``th``) +
-    ``tbody_open`` (rows of ``td``). We collect all cells, compute the
-    max column width, and lay each row out as a row ``Box`` of padded
-    cell ``Text`` leaves.
+    CommonMark tables arrive as ``thead_open`` (one row of ``th``) +
+    ``tbody_open`` (rows of ``td``). For each cell we collect the
+    ``inline`` child token and render it via :func:`_render_inline_token`
+    so inline styling (``**bold**`` / ```code```) is honoured inside
+    cells. Column alignment is read from the header row's ``th_open``
+    ``attrs['style']`` (see :func:`_parse_table_align`).
+
+    Layout passes through three regimes (ported from claude-code's
+    ``MarkdownTable.tsx``):
+
+    * **A — ideal**: ``sum(ideal_widths)`` fits the available width →
+      use each column's natural max width.
+    * **B — proportional shrink**: ideal overflows but min widths fit →
+      distribute the slack by each column's ``ideal - min`` ratio.
+    * **C — key-value fallback**: even min widths overflow → degrade
+      to a vertical ``header: value`` layout per row.
+
+    The available width comes from ``columns`` (passed by
+    :func:`_render_tokens`, which got it from
+    :func:`_render_markdown_to_string`, which in turn read it from the
+    layout's text-width context — see ``research/layout-width-context.md``).
+    When ``columns`` is ``None`` (defensive — shouldn't happen post-PR2
+    since both static and reactive paths route through
+    :func:`_render_markdown_to_string`), we fall back to the ideal
+    widths without responsive shrink.
+
+    The frame is drawn with box-drawing characters (``single`` /
+    ``rounded`` / ``double`` / ``none``) via :func:`_hline` and
+    :func:`_dataline`; each border line and data row is a ``Text`` leaf
+    inside a column ``Box`` (per ``research/table-border-options.md`` —
+    the layout engine's ``Box(borderStyle=...)`` cannot draw the
+    internal ``┬┴┼`` crosses).
     """
     body_tokens, end = _collect_balanced(tokens, start, "table_open", "table_close")
 
+    # Walk the table tokens once, collecting:
+    # * ``header``: the list of header cell strings (rendered inline).
+    # * ``aligns``: per-column alignment from the header's th_open attrs.
+    # * ``rows``: list of body rows, each a list of cell strings.
+    # * ``raw_cells``: the (token, is_header) pairs per cell so we can
+    #   re-render with proper styling when computing wrapped line counts.
+    header: list[str] = []
+    aligns: list[str] = []
     rows: list[list[str]] = []
     current_row: list[str] = []
+    in_thead = False
     i = 0
     while i < len(body_tokens):
         t = body_tokens[i]
-        if t.type == "tr_open":
+        if t.type == "thead_open":
+            in_thead = True
+        elif t.type == "thead_close":
+            in_thead = False
+        elif t.type == "tr_open":
             current_row = []
         elif t.type == "tr_close":
-            rows.append(current_row)
+            if in_thead:
+                header = current_row
+            else:
+                rows.append(current_row)
         elif t.type in ("th_open", "td_open"):
+            # Read alignment only from the header row's th_open — the
+            # CommonMark spec says alignment is column-level, derived
+            # from the ``:---:`` separator, so body cells inherit it.
+            if in_thead and t.type == "th_open":
+                aligns.append(_parse_table_align(t))
             k = i + 1
             cell_text = ""
             while k < len(body_tokens) and body_tokens[k].type not in (
@@ -997,51 +1220,260 @@ def _render_table(
                 "td_close",
             ):
                 if body_tokens[k].type == "inline":
-                    cell_text = _inline_plain_text(body_tokens[k])
+                    # Render the cell with full inline styling so
+                    # ``**bold**`` / `` `code` `` carry SGR sequences.
+                    # ``string_width`` strips CSI when we measure widths.
+                    cell_text = _render_inline_token(body_tokens[k], theme)
                 k += 1
             current_row.append(cell_text)
             i = k
         i += 1
 
-    if not rows:
+    if not rows and not header:
         return Box(flexDirection="column"), end + 1
 
-    # Column count from the widest row.
-    n_cols = max(len(r) for r in rows)
-    widths = [0] * n_cols
-    for r in rows:
-        for idx, cell in enumerate(r):
-            widths[idx] = max(widths[idx], len(cell))
+    all_rows = ([header] if header else []) + rows
+    n_cols = max(len(r) for r in all_rows) if all_rows else 0
+    if n_cols == 0:
+        return Box(flexDirection="column"), end + 1
 
-    rendered_rows: list[Element] = []
-    for r in rows:
-        cells: list[Element] = []
+    # Normalise aligns to n_cols (default left for unspecified columns).
+    while len(aligns) < n_cols:
+        aligns.append("left")
+    aligns = aligns[:n_cols]
+
+    # Theme knobs.
+    border_style = str(theme.get("table_border_style", "single"))
+    chars = _table_border_chars(border_style)
+    padding = int(theme.get("table_cell_padding", 1))
+    min_col_w = int(theme.get("table_min_column_width", 3))
+    max_row_lines = int(theme.get("table_max_row_lines", 4))
+    safety_margin = int(theme.get("table_safety_margin", 4))
+    header_bold = _theme_bool(theme.get("table_header_bold", True))
+    header_align_override = theme.get("table_header_align")
+    kv_separator = str(theme.get("table_kv_separator", ":"))
+
+    # Apply bold to the header cells (post-inline-render) so the SGR
+    # sequence wraps the already-styled content. ``apply_style`` is
+    # idempotent in practice for nested bold.
+    styled_header = [
+        apply_style(cell, bold=header_bold) if header_bold else cell
+        for cell in header
+    ]
+
+    # Compute per-column min / ideal widths across all rows (header + body).
+    # ``min_w`` is the longest single *word* in any cell of the column
+    # (prevents degenerate word-wrap splits); ``ideal_w`` is the longest
+    # full cell. Both floor at ``min_col_w``.
+    def _cell_plain_widths(cells: list[str]) -> tuple[int, int]:
+        """Return (min_word_width, full_cell_width) for a list of cells."""
+        if not cells:
+            return min_col_w, min_col_w
+        # Strip ANSI for word-splitting so SGR bytes don't masquerade as
+        # word characters. The returned width is a display width.
+        from ink.layout.measure import _strip_ansi
+        plain = _strip_ansi(" ".join(cells))
+        words = [w for w in plain.split() if w]
+        if not words:
+            return min_col_w, max(min_col_w, string_width(plain))
+        longest_word = max(string_width(w) for w in words)
+        full = max(string_width(_strip_ansi(c)) for c in cells)
+        return max(min_col_w, longest_word), max(min_col_w, full)
+
+    min_widths: list[int] = []
+    ideal_widths: list[int] = []
+    for idx in range(n_cols):
+        col_cells = []
+        if header:
+            col_cells.append(styled_header[idx] if idx < len(styled_header) else "")
+        for r in rows:
+            col_cells.append(r[idx] if idx < len(r) else "")
+        min_w, ideal_w = _cell_plain_widths(col_cells)
+        min_widths.append(min_w)
+        ideal_widths.append(ideal_w)
+
+    # Determine the available content width.
+    if columns is not None and columns > 0:
+        # borderOverhead = 1 (left edge) + n_cols * (2*padding + 1 vertical)
+        # matches claude-code's ``1 + numCols * 3`` for padding=1.
+        border_overhead = 1 + n_cols * (2 * padding + 1)
+        available = max(columns - border_overhead - safety_margin, n_cols * min_col_w)
+    else:
+        available = None
+
+    # Choose column widths via the three-regime algorithm.
+    total_min = sum(min_widths)
+    total_ideal = sum(ideal_widths)
+
+    needs_hard_wrap = False
+    if available is None or total_ideal <= available:
+        # Regime A — ideal widths.
+        col_widths = list(ideal_widths)
+    elif total_min <= available:
+        # Regime B — proportional shrink: each column keeps its min,
+        # the slack is distributed by the (ideal - min) ratio.
+        extra_space = available - total_min
+        overflows = [ideal_widths[i] - min_widths[i] for i in range(n_cols)]
+        total_overflow = sum(overflows)
+        col_widths = []
+        for i in range(n_cols):
+            if total_overflow == 0:
+                col_widths.append(min_widths[i])
+            else:
+                extra = int((overflows[i] / total_overflow) * extra_space)
+                col_widths.append(min_widths[i] + extra)
+    else:
+        # Regime C — too narrow even for min widths. Scale by min ratio
+        # and allow hard-wrap; the safety net below may still degrade
+        # to key-value if wrapping blows past ``max_row_lines``.
+        needs_hard_wrap = True
+        scale = available / total_min if total_min > 0 else 1.0
+        col_widths = [
+            max(int(w * scale), min_col_w) for w in min_widths
+        ]
+
+    # Decide whether to degrade to key-value. We wrap each cell to its
+    # column width and count the max number of wrapped lines across all
+    # cells; if any cell exceeds ``max_row_lines``, fall back.
+    def _max_wrap_lines() -> int:
+        max_lines = 1
+        wrap_mode: WrapMode = "hard" if needs_hard_wrap else "wrap"
         for idx in range(n_cols):
-            text = r[idx] if idx < len(r) else ""
-            # Pad to the column width and add a one-space gutter so
-            # adjacent cells don't run together when both fill their
-            # column.
-            padding = " " * (widths[idx] - len(text))
-            gutter = " " if idx < n_cols - 1 else ""
-            cells.append(Text(text + padding + gutter))
-        rendered_rows.append(Box(*cells, flexDirection="row"))
+            if header:
+                cell = styled_header[idx] if idx < len(styled_header) else ""
+                wrapped = wrap_text(cell, col_widths[idx], mode=wrap_mode)
+                max_lines = max(max_lines, len(wrapped))
+            for r in rows:
+                cell = r[idx] if idx < len(r) else ""
+                wrapped = wrap_text(cell, col_widths[idx], mode=wrap_mode)
+                max_lines = max(max_lines, len(wrapped))
+        return max_lines
 
-    return Box(*rendered_rows, flexDirection="column"), end + 1
+    use_kv = False
+    if available is not None and _max_wrap_lines() > max_row_lines:
+        use_kv = True
+    # Safety net: if even the ideal layout can't fit, degrade.
+    if available is not None and total_min > available:
+        use_kv = True
+
+    if use_kv:
+        # Pass the *unstyled* header to the key-value renderer —
+        # :func:`_render_table_kv` applies its own bold styling to the
+        # ``label:`` segment, so pre-styled header cells would double-wrap
+        # the SGR sequence (``\x1b[1m\x1b[1mName\x1b[0m:\x1b[0m``).
+        return _render_table_kv(
+            header, rows, aligns, columns, theme, kv_separator,
+        ), end + 1
+
+    # Build the bordered / borderless table.
+    header_aligns = list(aligns)
+    if isinstance(header_align_override, str):
+        header_aligns = [header_align_override] * n_cols
+
+    if chars is None:
+        # ``table_border_style="none"`` — render borderless rows like
+        # the pre-PR2 path (row Box of padded cell Text leaves).
+        rendered_rows: list[Element] = []
+        all_data_rows = ([styled_header] if header else []) + rows
+        for r in all_data_rows:
+            cells_el: list[Element] = []
+            for idx in range(n_cols):
+                text = r[idx] if idx < len(r) else ""
+                cell_w = string_width(text)
+                pad = col_widths[idx] - cell_w
+                if pad < 0:
+                    pad = 0
+                gutter = " " * padding if idx < n_cols - 1 else ""
+                cells_el.append(Text(text + " " * pad + gutter))
+            rendered_rows.append(Box(*cells_el, flexDirection="row"))
+        return Box(*rendered_rows, flexDirection="column"), end + 1
+
+    # Bordered path: each border line and data row is a single Text leaf.
+    border_color = theme.get("table_border_color")
+    if border_color is None:
+        border_color = _resolve_theme_color(theme, "border", "border_color")
+
+    top_border = _hline(
+        chars, col_widths, padding,
+        chars["top_left"], chars["top_cross"], chars["top_right"],
+    )
+    mid_border = _hline(
+        chars, col_widths, padding,
+        chars["mid_left"], chars["mid_cross"], chars["mid_right"],
+    )
+    bottom_border = _hline(
+        chars, col_widths, padding,
+        chars["bottom_left"], chars["bottom_cross"], chars["bottom_right"],
+    )
+
+    if border_color is not None:
+        top_border = apply_style(top_border, color=border_color)
+        mid_border = apply_style(mid_border, color=border_color)
+        bottom_border = apply_style(bottom_border, color=border_color)
+
+    lines: list[Element] = []
+    if header:
+        lines.append(Text(top_border))
+        header_line = _dataline(chars, styled_header, col_widths, header_aligns, padding)
+        lines.append(Text(header_line))
+        lines.append(Text(mid_border))
+    else:
+        lines.append(Text(top_border))
+    for r in rows:
+        lines.append(Text(_dataline(chars, r, col_widths, aligns, padding)))
+    lines.append(Text(bottom_border))
+
+    return Box(*lines, flexDirection="column"), end + 1
 
 
-def _inline_plain_text(token: Token) -> str:
-    """Flatten an ``inline`` token's children into a single plain string.
+def _render_table_kv(
+    header: list[str],
+    rows: list[list[str]],
+    aligns: list[str],
+    columns: int | None,
+    theme: dict[str, Any],
+    kv_separator: str,
+) -> Element:
+    """Render a table as a vertical key-value list (the narrow-terminal fallback).
 
-    Used by table cell rendering — we don't honour inline styling inside
-    table cells in PR3 (the PRD calls out only "basic table support").
+    Each body row becomes a block of ``header: value`` lines (one per
+    column), with a ``─`` separator between rows. Mirrors claude-code's
+    ``renderVerticalFormat``: the label (header cell) is bolded, the
+    separator sits between rows, and the value is wrapped to the
+    available width minus the label + separator indentation.
     """
-    out: list[str] = []
-    for child in token.children or []:
-        if child.type in ("text", "code_inline"):
-            out.append(child.content)
-        elif child.type in ("softbreak", "hardbreak"):
-            out.append(" ")
-    return "".join(out)
+    n_cols = max(len(header), max((len(r) for r in rows), default=0))
+    if n_cols == 0:
+        return Box(flexDirection="column")
+
+    available = columns if isinstance(columns, int) and columns > 0 else 80
+    sep_width = min(max(available - 1, 1), 40)
+    separator = "─" * sep_width
+    sep_color = _resolve_theme_color(theme, "border", "border_color")
+    if sep_color is not None:
+        separator_styled = apply_style(separator, color=sep_color)
+    else:
+        separator_styled = separator
+
+    lines: list[Element] = []
+    for row_idx, r in enumerate(rows):
+        if row_idx > 0:
+            lines.append(Text(separator_styled))
+        for col_idx in range(n_cols):
+            label = header[col_idx] if col_idx < len(header) else f"Column {col_idx + 1}"
+            value = r[col_idx] if col_idx < len(r) else ""
+            # Strip any newlines from the value so the key-value line
+            # reads as a single ``label: value`` row.
+            from ink.layout.measure import _strip_ansi
+            value_plain = _strip_ansi(value).replace("\n", " ").strip()
+            label_w = string_width(_strip_ansi(label))
+            first_line_w = max(available - label_w - 3, 10)
+            wrapped = wrap_text(value_plain, first_line_w, mode="wrap") if value_plain else [""]
+            label_styled = apply_style(label + kv_separator, bold=True)
+            lines.append(Text(label_styled + " " + (wrapped[0] if wrapped else "")))
+            for cont in wrapped[1:]:
+                lines.append(Text("  " + cont))
+    return Box(*lines, flexDirection="column")
 
 
 # ---------------------------------------------------------------------------
@@ -1055,6 +1487,7 @@ def _render_tokens(
     theme: dict[str, Any],
     *,
     depth: int = 0,
+    columns: int | None = None,
 ) -> tuple[list[Element], int]:
     """Walk ``tokens`` from ``start`` and render each top-level block.
 
@@ -1067,6 +1500,14 @@ def _render_tokens(
     pick the right marker style (``decimal`` / ``alpha`` / ``roman`` /
     cycling bullet chars). Top-level calls default to ``depth=0``; each
     recursive descent into a nested list passes ``depth + 1``.
+
+    ``columns`` is the available content width for width-aware blocks
+    (currently only :func:`_render_table` consumes it for responsive
+    shrink + key-value fallback). ``None`` means "no width constraint
+    known" — tables render at their ideal widths without shrinking.
+    Both the static and reactive ``Markdown`` paths route through
+    :func:`_render_markdown_to_string`, which threads the layout-time
+    width (or viewport fallback) here.
     """
     elements: list[Element] = []
     i = start
@@ -1114,7 +1555,7 @@ def _render_tokens(
             continue
 
         if ttype == "table_open":
-            el, next_i = _render_table(tokens, i, theme)
+            el, next_i = _render_table(tokens, i, theme, columns=columns)
             elements.append(el)
             i = next_i
             continue
@@ -1156,7 +1597,7 @@ def _render_markdown_to_string(text: str, columns: int, theme: dict[str, Any]) -
     from ink.layout import layout, render_layout_to_string
 
     tokens = _parse(text)
-    elements, _ = _render_tokens(tokens, 0, theme)
+    elements, _ = _render_tokens(tokens, 0, theme, columns=columns)
     inner = create_element("box", *elements, flexDirection="column", gap=1)
     reconciler = Reconciler()
     mounted = reconciler.mount(inner)
@@ -1316,11 +1757,13 @@ def Markdown(
     Returns
     -------
     Element
-        The static ``str`` fast path returns a ``box`` host element
-        directly — no function component, no hooks. The reactive branch
-        (``Signal`` / ``Callable``) returns an element whose ``type`` is
-        :func:`_MarkdownImpl`, a function component that re-parses and
-        re-renders the source on every mount.
+        A function component element whose ``type`` is
+        :func:`_MarkdownImpl`. Both static and reactive sources share
+        this path so width-aware blocks (tables) can pick up the
+        layout-time content width for responsive shrink + key-value
+        fallback. The function component body returns a ``Box`` whose
+        only child is a single ``Text`` leaf carrying a callable that
+        parses + renders the Markdown at layout time.
 
     Raises
     ------
@@ -1347,7 +1790,9 @@ def Markdown(
       knobs.
     * Blockquotes (indented + dim).
     * Horizontal rules (via :func:`Divider`).
-    * Tables (basic column alignment, no inline styling).
+    * Tables (bordered frame, column alignment from ``:---:`` markers,
+      inline cell styling, responsive shrink to the available content
+      width, and key-value fallback when the terminal is too narrow).
     * Soft / hard line breaks inside paragraphs.
 
     Usage
@@ -1360,30 +1805,38 @@ def Markdown(
     """
     effective_theme = _merge_theme(theme)
 
-    # Static fast path: parse + render eagerly. No function component,
-    # no hooks, no live render pipeline required.
-    if isinstance(source, str):
-        # Eagerly verify the optional dependency is installed so the
-        # caller gets a clear error at call time rather than at first
-        # render. The actual parse delegates to :func:`_parse`, which
-        # re-checks the import — the redundant guard is intentional
-        # (matches :func:`HighlightedCode`'s pattern).
-        try:
-            from markdown_it import MarkdownIt  # noqa: F401
-        except ImportError as exc:
-            raise ImportError(
-                "Markdown requires markdown-it-py. "
-                "Install: pip install ink[markdown]"
-            ) from exc
-        tokens = _parse(source)
-        elements, _ = _render_tokens(tokens, 0, effective_theme)
-        box_props = dict(box_props)
-        box_props.pop("flexDirection", None)
-        return Box(*elements, flexDirection="column", gap=1, **box_props)
+    # Eagerly verify the optional dependency is installed so the
+    # caller gets a clear error at call time rather than at first
+    # render. Both the static and reactive paths route through
+    # :func:`_MarkdownImpl` (which calls :func:`_parse`), so the guard
+    # lives here once rather than duplicating per branch.
+    try:
+        from markdown_it import MarkdownIt  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "Markdown requires markdown-it-py. "
+            "Install: pip install ink[markdown]"
+        ) from exc
 
-    # Reactive branch: defer to a function component so signal writes
-    # re-render. The reconciler mounts it like any other function
-    # component; the body parses + renders on every mount.
+    # Strip ``flexDirection`` from the caller's box_props — the
+    # component's contract is "one block per row", so the outer Box is
+    # always ``"column"``. Doing this here (rather than only inside
+    # :func:`_MarkdownImpl`) keeps ``el.props["box_props"]`` clean for
+    # introspection and avoids a confusing "I passed row but got column"
+    # surprise at render time.
+    box_props = dict(box_props)
+    box_props.pop("flexDirection", None)
+
+    # Both static (``str``) and reactive (``Signal`` / ``Callable``)
+    # sources route through :func:`_MarkdownImpl` so width-aware blocks
+    # (currently tables — see :func:`_render_table`) can pick up the
+    # layout-time width via ``get_current_text_width()``. The static
+    # path used to return a ``box`` host element eagerly; the
+    # ``Text(callable)`` shape defers parsing + rendering to layout
+    # time, which is the only point at which the available content
+    # width is known. This matches claude-code's ``MarkdownText`` model
+    # and lets tables responsively shrink + degrade to key-value in
+    # narrow containers (see ``research/layout-width-context.md``).
     return create_element(
         _MarkdownImpl,
         source=source,
