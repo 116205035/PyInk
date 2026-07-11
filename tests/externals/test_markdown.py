@@ -1898,10 +1898,11 @@ def test_spacing_before_heading() -> None:
 
 
 def test_spacing_after_heading() -> None:
-    """PR3: a heading has 2 blank rows after it (claude-code style).
+    """A heading has 1 blank row after it.
 
-    ``spacing_after_heading=2`` → two blank lines between the heading
-    and the following paragraph.
+    ``spacing_after_heading=1`` → one blank line between the heading
+    and the following paragraph. (Was 2 in PR3 claude-code style; tuned
+    down to 1 for tighter visual density.)
     """
     out = _render(Markdown("# Heading\n\nPara."))
     lines = out.split("\n")
@@ -1910,8 +1911,8 @@ def test_spacing_after_heading() -> None:
     assert heading_idx is not None and para_idx is not None
     assert para_idx > heading_idx
     blank_count = sum(1 for ln in lines[heading_idx + 1:para_idx] if ln.strip() == "")
-    assert blank_count >= 2, (
-        f"expected ≥2 blank lines after heading; got {blank_count}: {lines!r}"
+    assert blank_count >= 1, (
+        f"expected ≥1 blank line after heading; got {blank_count}: {lines!r}"
     )
 
 

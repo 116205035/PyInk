@@ -339,7 +339,7 @@ DEFAULT_MARKDOWN_THEME: dict[str, Any] = {
     # get 1 trailing blank; other blocks get 1 leading + 1 trailing so
     # they visually separate from neighbours.
     "spacing_before_heading": 1,
-    "spacing_after_heading": 2,
+    "spacing_after_heading": 1,
     "spacing_before_paragraph": 0,
     "spacing_after_paragraph": 1,
     "spacing_before_code_block": 1,
