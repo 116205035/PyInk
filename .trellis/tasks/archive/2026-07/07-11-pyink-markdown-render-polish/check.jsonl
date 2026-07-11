@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "检查实现是否过度复制 claude-code TS 而未做 Python 化改造；检查表格渲染、主题语义键解析、inline 样式栈是否有重复逻辑（如多处实现颜色解析、多处实现宽度计算）。"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "检查跨层接口契约：主题语义键 (text/accent/secondary/muted/border) 解析在所有 _render_* 函数中是否一致？表格宽度收缩是否正确与 layout 层交互？inline 样式栈是否正确穿透嵌套结构（bold 内的 code、表格单元格内的 inline）？break change 是否在 changelog 记录？"}

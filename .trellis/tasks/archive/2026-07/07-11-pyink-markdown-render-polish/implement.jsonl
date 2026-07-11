@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "本任务参考 claude-code 的 MarkdownTable.tsx 和 markdown.ts 实现。要求实现者先搜 PyInk 现有代码再写——ANSI 渲染 (ink.render.ansi)、Text/Box 组件、Divider、HighlightedCode、link OSC8 等可复用基础设施已存在，避免无脑复制 TS 代码或重复造轮子。"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "markdown 渲染涉及 markdown-it-py tokens → _render_* 函数 → Text/Box 组件 → reconciler → layout → output 的多层穿越。主题语义键的引入要跨 markdown 模块 (externals/markdown.py) 和主题系统。表格响应式收缩需要 layout 层的宽度信息回传。inline 样式栈重构影响所有 inline 渲染入口。"}
