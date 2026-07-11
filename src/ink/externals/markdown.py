@@ -1214,6 +1214,7 @@ def _dataline(
     widths: list[int],
     aligns: list[str],
     padding: int,
+    border_color: str | None = None,
 ) -> str:
     """Build a data row line: ``│ cell │ cell │``.
 
@@ -1221,16 +1222,29 @@ def _dataline(
     alignment, then wrapped in ``padding``-wide gutters on both sides.
     Cells are joined with the vertical separator and capped with the
     left / right edge glyphs.
+
+    ``border_color`` applies the same colour to the vertical separators
+    that :func:`_hline` applies to the horizontal borders, so the whole
+    frame reads as one colour. ``None`` leaves the separators at the
+    terminal default (used when the caller has disabled border colouring).
+    Cell content is never touched — each separator is independently
+    wrapped in its own SGR run so the reset does not bleed into the
+    cell's inline styling.
     """
     vertical = chars["vertical"]
-    parts = [vertical]
+    v_segment = (
+        apply_style(vertical, color=border_color)
+        if border_color is not None
+        else vertical
+    )
+    parts = [v_segment]
     n = len(widths)
     for i in range(n):
         cell = cells[i] if i < len(cells) else ""
         cell_w = string_width(cell)
         padded = _pad_aligned(cell, cell_w, widths[i], aligns[i])
         parts.append(" " * padding + padded + " " * padding)
-        parts.append(vertical)
+        parts.append(v_segment)
     return "".join(parts)
 
 
@@ -1510,13 +1524,15 @@ def _render_table(
     lines: list[Element] = []
     if header:
         lines.append(Text(top_border))
-        header_line = _dataline(chars, styled_header, col_widths, header_aligns, padding)
+        header_line = _dataline(
+            chars, styled_header, col_widths, header_aligns, padding, border_color,
+        )
         lines.append(Text(header_line))
         lines.append(Text(mid_border))
     else:
         lines.append(Text(top_border))
     for r in rows:
-        lines.append(Text(_dataline(chars, r, col_widths, aligns, padding)))
+        lines.append(Text(_dataline(chars, r, col_widths, aligns, padding, border_color)))
     lines.append(Text(bottom_border))
 
     return Box(*lines, flexDirection="column"), end + 1
