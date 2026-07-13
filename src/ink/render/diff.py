@@ -142,18 +142,59 @@ def repaint_frame(
 
 
 def _paint_initial(new_frame: str, stdout: TextIO) -> None:
-    """Write ``new_frame`` and park the cursor at its top-left."""
-    stdout.write(new_frame)
+    """Write ``new_frame`` and park the cursor at its top-left.
+
+    Each row is pre-cleared with ``\\x1b[2K`` so that when the new row is
+    shorter than the previous frame's row at the same position, the old
+    tail doesn't bleed through. This was the root cause of Jarvis TUI's
+    "duplicate hint" / "thinking overflow" / "double status_bar" bugs
+    triggered by Phase C1's high-frequency spinner repaints:
+    ``repaint_frame`` routes height changes through
+    ``_erase_reachable_rows`` (whose budget is capped by
+    ``available_rows``) + ``_paint_initial``. When the budget is smaller
+    than the old frame, the top old rows stay uncleared, and the previous
+    bare ``write(new_frame)`` left stale tails whenever a new row was
+    shorter than its predecessor.
+
+    Sequence shape::
+
+        \\r\\x1b[2K<line0>\\n\\x1b[2K<line1>\\n\\x1b[2K<line2>...
+
+    The leading ``\\r`` returns the cursor to column 1 of the current row
+    (caller parks the cursor at column 1 of frame row 0); ``\\x1b[2K`` then
+    clears that whole row before ``<line0>`` is written. For each
+    subsequent row, ``\\n`` moves the cursor down one row (column stays at
+    1) and ``\\x1b[2K`` clears that row before its content lands. After the
+    final row we retreat the cursor back to row 0 of the painted region —
+    identical to the legacy cursor-park behaviour.
+
+    The cost is N extra ``\\x1b[2K`` writes per repaint (N = line count).
+    At ~10 bytes each and a 50ms throttle this is well under 1 KB/s of
+    extra stdout I/O, negligible in practice. ``\\x1b[2K`` is already
+    used by ``_repaint``, so terminal compatibility is already validated.
+    """
+    lines = new_frame.split("\n")
+    parts: list[str] = []
+    for i, line in enumerate(lines):
+        if i == 0:
+            # Caller parks cursor at column 1 of row 0; return to col 1
+            # explicitly then clear the entire row before writing it.
+            parts.append("\r\x1b[2K")
+        else:
+            # Move down one row (column stays at 1) and clear it before
+            # the new content lands — prevents stale-tail bleed-through.
+            parts.append("\n\x1b[2K")
+        parts.append(line)
+    stdout.write("".join(parts))
     # Walk the cursor back up to the first row. We always end at column 1
     # of row 0 of the painted region so subsequent writes have a stable
     # origin.
-    new_lines = new_frame.split("\n")
-    up = len(new_lines) - 1
-    parts: list[str] = []
+    up = len(lines) - 1
+    back_parts: list[str] = []
     if up > 0:
-        parts.append("\x1b[" + str(up) + "A")
-    parts.append("\r")
-    stdout.write("".join(parts))
+        back_parts.append("\x1b[" + str(up) + "A")
+    back_parts.append("\r")
+    stdout.write("".join(back_parts))
 
 
 def _repaint(
