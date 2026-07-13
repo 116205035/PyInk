@@ -29,11 +29,8 @@ def _capture(old: str | None, new: str) -> str:
 
 def test_initial_paint_writes_frame_then_parks_cursor() -> None:
     out = _capture(None, "hello\nworld")
-    # Each row is pre-cleared with ``\r\x1b[2K`` (first row) /
-    # ``\n\x1b[2K`` (subsequent rows) so shorter new rows don't leave
-    # stale tails from a previous frame (Jarvis TUI regression fix).
-    assert "\r\x1b[2Khello" in out
-    assert "\n\x1b[2Kworld" in out
+    # The frame itself...
+    assert "hello\nworld" in out
     # ...followed by a cursor-up to the first row + CR.
     assert out.endswith("\x1b[1A\r")
     assert _CLEAR_SCREEN not in out
@@ -41,66 +38,7 @@ def test_initial_paint_writes_frame_then_parks_cursor() -> None:
 
 def test_initial_paint_single_row_no_cursor_up() -> None:
     out = _capture(None, "single")
-    # Single row: leading ``\r\x1b[2K`` + content + ``\r``. No cursor-up
-    # because we never descended.
-    assert out == "\r\x1b[2Ksingle\r"
-    assert _CLEAR_SCREEN not in out
-
-
-# ---------------------------------------------------------------------------
-# Initial paint — row pre-clear regression (Jarvis TUI Phase B/C bugs)
-#
-# Root cause: ``_paint_initial`` used to do a bare ``stdout.write(new_frame)``
-# without any ``\x1b[2K``. When a repaint overwrote a previous frame whose
-# row was LONGER than the new row at the same position, the old row's tail
-# bled through, producing "duplicate hint" / "thinking overflow" /
-# "double status_bar" visual artifacts in the Jarvis TUI under Phase C1's
-# high-frequency spinner repaints.
-#
-# Fix: pre-clear every row of the new frame before writing its content.
-# These tests pin that contract.
-# ---------------------------------------------------------------------------
-
-
-def test_initial_paint_clears_every_row() -> None:
-    """Multi-row frame: each row gets its own ``\\x1b[2K``."""
-    out = _capture(None, "r0\nr1\nr2")
-    # First row gets ``\r\x1b[2K``, subsequent rows get ``\n\x1b[2K``.
-    # Total clears == number of rows.
-    assert out.count("\x1b[2K") == 3
-    assert _CLEAR_SCREEN not in out
-
-
-def test_initial_paint_single_row_has_leading_cr_and_clear() -> None:
-    """Single-row frame: ``\\r\\x1b[2K`` precedes the content."""
-    out = _capture(None, "only")
-    assert out.startswith("\r\x1b[2Konly")
-    assert _CLEAR_SCREEN not in out
-
-
-def test_initial_paint_empty_frame_does_not_crash() -> None:
-    """Empty ``new_frame`` (no content) must still emit a valid sequence.
-
-    ``"".split("\\n")`` returns ``[""]`` (length 1), so we emit
-    ``\\r\\x1b[2K`` + "" + ``\\r`` — clearing the single empty row and
-    parking the cursor. No cursor-up because there's only one row.
-    """
-    out = _capture(None, "")
-    assert out == "\r\x1b[2K\r"
-    assert _CLEAR_SCREEN not in out
-
-
-def test_initial_paint_content_preserved_between_clears() -> None:
-    """The frame body is still written verbatim between the clear sequences."""
-    out = _capture(None, "alpha\nbeta\ngamma")
-    # All three row contents must appear in order.
-    assert "alpha" in out
-    assert "beta" in out
-    assert "gamma" in out
-    # And they must follow their respective ``\x1b[2K`` clears.
-    assert "\r\x1b[2Kalpha" in out
-    assert "\n\x1b[2Kbeta" in out
-    assert "\n\x1b[2Kgamma" in out
+    assert out == "single\r"
     assert _CLEAR_SCREEN not in out
 
 
