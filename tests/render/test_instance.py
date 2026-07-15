@@ -278,12 +278,9 @@ def test_static_rows_approx_does_not_starve_available_rows_after_history_load() 
     from repainting more than its first row — the "framework
     initialized but UI stuck on Initializing" bug.
 
-    The fix recognises that static content already scrolled out the top
-    of the viewport no longer occupies the frame's vertical budget, so
-    when ``_static_rows_approx >= rows`` we pass ``available_rows =
-    rows`` (the frame owns the whole viewport). This test asserts the
-    fix by spying on ``write_diff`` and checking the ``available_rows``
-    value passed after a 100-line static flush + signal repaint.
+    When ``static_approx + frame_h > rows`` the paint has scrolled, so
+    ``available_rows`` becomes ``min(rows, frame_h)`` — enough to reach
+    every on-screen frame row (including a StatusBar near the bottom).
     """
     from ink.render import diff as diff_mod
     from ink.render import instance as instance_mod
@@ -353,15 +350,14 @@ def test_static_rows_approx_does_not_starve_available_rows_after_history_load() 
         inst.unmount()  # type: ignore[attr-defined]
 
 
-def test_static_rows_approx_passes_full_viewport_when_static_overflows() -> None:
-    """When static content overflows the viewport, ``available_rows``
-    should equal the viewport size (``rows``), not 1.
+def test_static_rows_approx_passes_frame_height_when_static_overflows() -> None:
+    """When static+frame overflows the viewport, ``available_rows``
+    must be at least the live frame height (capped by ``rows``).
 
-    Rationale: once static scrolled out the top, the frame anchor sits
-    at the viewport top (from the cursor's perspective), so the frame
-    can safely use the entire viewport. The previous formula
-    ``max(1, rows - _static_rows_approx)`` collapsed to 1 here and
-    starved the frame; the fix returns ``rows`` instead.
+    Rationale: once paint scrolls, the frame sits at the bottom of the
+    viewport. Reachable rows equal on-screen frame height — not the
+    leftover ``rows - static_approx`` (which goes negative / collapses
+    when static alone already exceeds the viewport).
     """
     from ink.render import diff as diff_mod
     from ink.render import instance as instance_mod
@@ -369,7 +365,12 @@ def test_static_rows_approx_passes_full_viewport_when_static_overflows() -> None
     counter = signal(0)
 
     def Counter() -> object:
-        return Text(lambda: f"v={counter.value}")
+        return Box(
+            Text(lambda: f"a={counter.value}"),
+            Text(lambda: f"b={counter.value}"),
+            Text(lambda: f"c={counter.value}"),
+            flexDirection="column",
+        )
 
     inst, out = _make_instance(Counter(), columns=40, rows=30)
 
@@ -383,7 +384,7 @@ def test_static_rows_approx_passes_full_viewport_when_static_overflows() -> None
     diff_mod.write_diff = spy
     instance_mod.write_diff = spy
     try:
-        # Flush enough static to overflow the 30-row viewport.
+        # Flush enough static to overflow the 30-row viewport alone.
         big_static = "\n".join(f"line {i}" for i in range(50)) + "\n"
         inst.write_static(big_static)  # type: ignore[attr-defined]
         captured.clear()
@@ -391,14 +392,80 @@ def test_static_rows_approx_passes_full_viewport_when_static_overflows() -> None
         counter.value = 1
         time.sleep(0.3)
 
-        # Filter out None (initial paint / no-cap path) and confirm at
-        # least one repaint received available_rows == rows.
         capped = [ar for ar in captured if ar is not None]
         assert capped, f"expected at least one capped repaint call, got: {captured!r}"
-        assert capped[-1] == 30, (
-            f"available_rows should equal viewport (30) when static "
+        # Frame is 3 rows → available_rows == 3 (min(rows, frame_h)).
+        assert capped[-1] >= 3, (
+            f"available_rows should be >= frame height (3) when static "
             f"overflows, got {capped[-1]}. Captured: {captured!r}"
         )
+        assert capped[-1] <= 30
+    finally:
+        diff_mod.write_diff = real_write_diff
+        instance_mod.write_diff = real_write_diff
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_static_plus_frame_partial_overflow_does_not_starve_status_row() -> None:
+    """Regress Jarvis sticky Initializing: static < rows but static+frame > rows.
+
+    Example: static_approx=47, rows=50, frame=14 → old formula gave
+    ``available_rows = 3``, so write_diff's row_cap could not reach a
+    StatusBar near the bottom of the frame. ``current_frame`` still
+    flipped to the ready text, then ``prev_frame == new_frame`` made
+    every later paint a no-op — StatusBar stayed on Initializing forever.
+    """
+    from ink.render import diff as diff_mod
+    from ink.render import instance as instance_mod
+
+    ready = signal(False)
+
+    def App() -> object:
+        # 10-row frame with the status row near the bottom (index 8).
+        return Box(
+            *[Text(f"pad{i}") for i in range(8)],
+            Text(lambda: "Initializing..." if not ready.value else "READY status"),
+            Text(lambda: "(locked)" if not ready.value else "> open"),
+            flexDirection="column",
+        )
+
+    inst, out = _make_instance(App(), columns=40, rows=50)
+
+    captured: list[tuple[int, int | None]] = []
+    real_write_diff = diff_mod.write_diff
+
+    def spy(old_frame: str | None, new_frame: str, stdout: object, available_rows: int | None = None) -> None:
+        rows_in_frame = new_frame.count("\n") + 1 if new_frame else 0
+        captured.append((rows_in_frame, available_rows))
+        return real_write_diff(old_frame, new_frame, stdout, available_rows)
+
+    diff_mod.write_diff = spy
+    instance_mod.write_diff = spy
+    try:
+        # 47 static rows: fits alone in a 50-row viewport, but with the
+        # 10-row frame totals 57 > 50 — paint scrolls.
+        big_static = "\n".join(f"hist {i}" for i in range(47)) + "\n"
+        inst.write_static(big_static)  # type: ignore[attr-defined]
+        assert inst._static_rows_approx == 47  # type: ignore[attr-defined]
+        assert inst._static_rows_approx < 50  # type: ignore[attr-defined]
+
+        captured.clear()
+        out.truncate(0)
+        out.seek(0)
+        ready.value = True
+        time.sleep(0.3)
+
+        multi = [(n, ar) for n, ar in captured if ar is not None and n >= 10]
+        assert multi, f"expected a >=10-row capped repaint, got: {captured!r}"
+        frame_n, available_rows = multi[-1]
+        # Old bug: available_rows = max(1, 50-47) = 3  (< status row index).
+        # Fix: available_rows = min(50, frame_h) >= 10.
+        assert available_rows is not None and available_rows >= frame_n, (
+            f"available_rows={available_rows} starved below frame={frame_n} "
+            f"for partial overflow (static=47, rows=50). Captured: {captured!r}"
+        )
+        assert "READY status" in out.getvalue()
+        assert "> open" in out.getvalue()
     finally:
         diff_mod.write_diff = real_write_diff
         instance_mod.write_diff = real_write_diff
@@ -406,7 +473,7 @@ def test_static_rows_approx_passes_full_viewport_when_static_overflows() -> None
 
 
 def test_static_rows_within_viewport_keeps_original_pr2_formula() -> None:
-    """Sanity: when static content fits inside the viewport, the
+    """Sanity: when static+frame fit inside the viewport, the
     original PR2 formula ``available_rows = rows - static_above`` is
     preserved. This protects the cursor-overshoot fix for the
     palette-Esc scenario where static is small (welcome banner ~3

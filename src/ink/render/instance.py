@@ -126,14 +126,14 @@ class Instance:
         # it stops at ``cur_row`` regardless.
         #
         # Cumulative growth caveat: the count never decreases even
-        # after lines scroll off the top of the viewport, so in
-        # long-running sessions with heavy static output (e.g. Jarvis
-        # eager-loading hundreds of history lines) it balloons past
-        # the viewport height. :meth:`_paint_now` detects the overflow
-        # case (``_static_rows_approx >= rows``) and switches the
-        # available-row formula to ``rows`` so the cumulative value
-        # cannot starve the live frame (regression: live UI stuck on
-        # "Initializing" after history load).
+        # after lines scroll off the top of the viewport. Combined with
+        # a non-trivial live frame, ``static_approx + frame_h`` can
+        # exceed ``rows`` even when ``static_approx < rows``. Painting
+        # that frame scrolls the terminal; afterwards the frame sits at
+        # the bottom of the viewport and needs ``frame_h`` reachable
+        # rows — not ``rows - static_approx``. See :meth:`_paint_now`
+        # for the overflow formula (regression: Jarvis StatusBar stuck
+        # on "Initializing..." after history load on medium-tall terminals).
         self._static_rows_approx: int = 0
         self._unmounted: bool = False
         self._mount_complete: bool = False
@@ -390,39 +390,36 @@ class Instance:
             # ``_static_rows_approx`` docstring for details.
             #
             # ``available_rows`` = number of viewport rows the cursor can
-            # safely descend into starting from the frame's row 0. The
-            # frame is painted immediately after the static region, so:
+            # safely descend into starting from the frame's row 0:
             #
-            # * When static content fits inside the viewport
-            #   (``static_total < rows``): the frame anchor sits at
-            #   viewport row ``static_total`` and ``available_rows``
-            #   equals ``rows - static_total`` (matches PR2's original
-            #   formula).
-            # * When static content overflows the viewport
-            #   (``static_total >= rows``): the static region scrolled
-            #   out the top entirely, so the frame anchor effectively
-            #   sits at the viewport top and ``available_rows`` equals
-            #   ``rows``. The previous formula ``rows - static_total``
-            #   went negative here and collapsed to ``max(1, ...)``,
-            #   starving small frames of the rows they needed to repaint
-            #   — the "live UI stuck after heavy history load" bug.
-            #
-            # ``_repaint`` already takes ``min(available_rows - 1,
-            # max_len - 1)``, so passing ``rows`` when static overflows
-            # restores the original top-down walk for in-viewport frames
-            # (no spurious cap) while still capping frames that
-            # genuinely overflow the viewport.
+            # * Everything fits (``static_approx + frame_h <= rows``):
+            #   frame anchor sits at viewport row ``static_approx`` and
+            #   ``available_rows = rows - static_approx`` (PR2 formula).
+            # * Content overflows (``static_approx + frame_h > rows`` —
+            #   either static alone fills the viewport OR static+frame
+            #   scrolls on paint): after scroll the frame sits at the
+            #   bottom, so reachable rows equal the on-screen frame
+            #   height ``min(rows, frame_h)``. Using the old
+            #   ``rows - static_approx`` here under-counts when
+            #   ``static_approx < rows`` but static+frame still scrolls
+            #   (e.g. static=47, rows=50, frame=14 → spare=3). The
+            #   StatusBar near the bottom of the frame then sits past
+            #   ``row_cap``; ``current_frame`` updates in memory while
+            #   stdout never rewrites that row, and the next paint
+            #   early-returns on ``prev_frame == new_frame`` — Jarvis's
+            #   sticky "Initializing..." after history load.
             available_rows: int | None = None
+            prev_line_count = len(prev_frame.split("\n")) if prev_frame else 0
+            new_line_count = len(new_frame.split("\n")) if new_frame else 0
             if rows is not None and rows > 0:
-                if self._static_rows_approx >= rows:
-                    available_rows = rows
+                frame_h = max(prev_line_count, new_line_count, 1)
+                if self._static_rows_approx + frame_h > rows:
+                    available_rows = min(rows, frame_h)
                 else:
                     available_rows = max(1, rows - self._static_rows_approx)
             if not prev_frame:
                 write_diff(None, new_frame, self.stdout)
             else:
-                prev_line_count = len(prev_frame.split("\n"))
-                new_line_count = len(new_frame.split("\n")) if new_frame else 0
                 height_delta = abs(new_line_count - prev_line_count)
                 # Palette open/close and similar UI toggles change the live
                 # frame height by several rows. Incremental diff cannot
