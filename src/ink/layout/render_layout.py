@@ -23,6 +23,7 @@ PR4 additions on top of PR3:
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ink.layout.flex import LayoutNode
@@ -32,6 +33,27 @@ __all__ = ["render_layout_to_string"]
 
 #: SGR reset sequence used to terminate every colour / style run.
 _SGR_RESET = "\x1b[0m"
+
+#: Regex that matches ANSI SGR (Select Graphic Rendition) sequences —
+#: ``\x1b[...m`` where ``...`` is any run of ``;``-separated numbers (or
+#: empty, for the ``\x1b[m`` shorthand). Used by
+#: :func:`_line_has_visible_content` to strip styling before checking
+#: whether a rendered line carries any user-visible characters.
+_ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _line_has_visible_content(styled_line: str) -> bool:
+    """Check if a styled line has any visible (non-whitespace) characters.
+
+    Strips ANSI SGR sequences from ``styled_line`` and reports whether the
+    remaining content has any non-whitespace characters. Used by the text
+    leaf painter to decide whether to flush the background band to the full
+    layout width — an empty/SGR-only row with ``flushBackgroundToWidth=True``
+    would otherwise paint a phantom coloured stripe the user sees as a
+    "ghost message" (e.g. Jarvis' ``pending_user_row`` when idle).
+    """
+    bare = _ANSI_SGR_RE.sub("", styled_line)
+    return bool(bare.strip())
 
 
 def _load_ansi() -> Any:
@@ -575,8 +597,14 @@ def _paint_text(
             styled = _apply_text_style(raw_line, text_props, inherited_bg=inherited_bg)
         grid.put(abs_x, abs_y + i, styled)
         if bg_body is not None:
-            bg_open = f"\x1b[{bg_body}m"
-            grid.mark_row_background(abs_x, abs_y + i, leaf_w, bg_open, _SGR_RESET)
+            # Only flush background when the row has visible content —
+            # an empty/whitespace-only row with flushBackgroundToWidth=True
+            # would otherwise paint a phantom coloured stripe the user
+            # sees as a "ghost message" (e.g. Jarvis' pending_user_row
+            # when idle: the leaf stays mounted but its text is "").
+            if _line_has_visible_content(styled):
+                bg_open = f"\x1b[{bg_body}m"
+                grid.mark_row_background(abs_x, abs_y + i, leaf_w, bg_open, _SGR_RESET)
 
 
 def _clip_lines_to_height(

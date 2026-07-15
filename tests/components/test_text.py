@@ -230,6 +230,72 @@ def test_box_flush_background_to_width_spans_interior() -> None:
 
 
 # ---------------------------------------------------------------------------
+# flushBackgroundToWidth — empty content must not paint a phantom stripe
+# ---------------------------------------------------------------------------
+
+
+def test_flush_bg_skipped_on_empty_content() -> None:
+    """``flushBackgroundToWidth=True`` + empty content -> no background stripe.
+
+    Regression test for the "phantom coloured stripe on idle rows" bug:
+    when a Text leaf stays mounted (e.g. Jarvis' ``pending_user_row``)
+    but its content is "" (idle state), the row-level bg painter would
+    still register a row background — painting an empty coloured stripe
+    the user sees as a ghost message. The fix skips
+    :meth:`_Grid.mark_row_background` when the styled line has no
+    visible characters.
+    """
+    out = render_to_string(
+        Text("", backgroundColor="red", flushBackgroundToWidth=True)
+    )
+    # No background opener anywhere in the output.
+    assert f"{ESC}[41m" not in out
+    # The output is just an empty row (no phantom bg band).
+    assert out == ""
+
+
+def test_flush_bg_renders_with_content() -> None:
+    """``flushBackgroundToWidth=True`` + content -> background stripe present.
+
+    Sanity check that the empty-content guard did not regress the normal
+    case: a row with visible text still paints the bg band spanning the
+    layout width.
+    """
+    out = render_to_string(
+        Text("hi", backgroundColor="red", flushBackgroundToWidth=True)
+    )
+    assert out.startswith(f"{ESC}[41m")
+    assert out.endswith(f"{ESC}[0m")
+    assert "hi" in out
+
+
+def test_flush_bg_skipped_on_sgr_only_content() -> None:
+    """``flushBackgroundToWidth=True`` + SGR-only content -> no background.
+
+    Edge case: when ``_apply_text_style`` wraps an empty string the
+    rendered line may carry ANSI SGR sequences (e.g. a bare ``\x1b[0m``)
+    but no visible characters. The visible-content check must strip the
+    SGR runs before deciding, otherwise the row would still paint a
+    phantom stripe. We construct the scenario by rendering an empty Text
+    with a foreground colour (which applies an SGR wrap even when the
+    text body is empty).
+    """
+    out = render_to_string(
+        Text(
+            "",
+            color="blue",
+            backgroundColor="red",
+            flushBackgroundToWidth=True,
+        )
+    )
+    # No background opener — the row had no visible characters after
+    # stripping SGR sequences.
+    assert f"{ESC}[41m" not in out
+    # Output is an empty row.
+    assert out == ""
+
+
+# ---------------------------------------------------------------------------
 # Style toggles
 # ---------------------------------------------------------------------------
 
