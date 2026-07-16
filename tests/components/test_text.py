@@ -711,3 +711,112 @@ def test_text_scroll_offset_signal_dynamic() -> None:
     assert "L2" in frame and "L3" in frame and "L4" in frame
     assert "L0" not in frame and "L1" not in frame
     inst.unmount()
+
+
+# ---------------------------------------------------------------------------
+# collapseIfEmpty — idle Text leaf occupies 0 rows instead of 1
+# ---------------------------------------------------------------------------
+# A leaf that stays mounted but whose content is "" during idle still
+# claims 1 row of layout space (PR2 Bug 1 floor). For Jarvis' live-frame
+# surfaces (sub-agent blocks / todos / spinner row / task list / hint
+# line / picker) that mount once and swap content via a callable, the
+# idle frame leaks 6+ blank rows between the message stream and the
+# input region. ``collapseIfEmpty=True`` opts into dropping the floor to
+# 0 when content is empty — non-empty content keeps the floor at 1 so
+# the PR2 Bug 1 overlap fix stays intact.
+
+
+def test_collapseIfEmpty_empty_text_renders_zero_rows() -> None:
+    """``Text("", collapseIfEmpty=True)`` produces no output row."""
+    out = render_to_string(Text("", collapseIfEmpty=True), columns=80)
+    # 0 rows → empty snapshot (no trailing newline either).
+    assert out == ""
+
+
+def test_collapseIfEmpty_box_with_empty_texts_renders_zero_rows() -> None:
+    """A column of two empty collapseIfEmpty Texts produces no rows."""
+    out = render_to_string(
+        Box(
+            Text("", collapseIfEmpty=True),
+            Text("", collapseIfEmpty=True),
+            flexDirection="column",
+        ),
+        columns=80,
+    )
+    assert out == ""
+
+
+def test_collapseIfEmpty_callable_empty_renders_zero_rows() -> None:
+    """A callable leaf returning ``""`` + collapseIfEmpty → 0 rows."""
+    out = render_to_string(Text(lambda: "", collapseIfEmpty=True), columns=80)
+    assert out == ""
+
+
+def test_collapseIfEmpty_default_keeps_one_row_for_empty() -> None:
+    """``Text("")`` without the prop keeps the legacy 1-row behaviour
+    (back-compat: callers that did not opt in see no change)."""
+    out = render_to_string(Text(""), columns=80)
+    # Legacy behaviour: empty Text renders an empty string (one row of
+    # zero visible width, which the trailing-whitespace strip elides to
+    # the empty snapshot). The point is that the layout still reserves
+    # the row — verified separately via the column-stacking test below.
+    assert out == ""
+
+
+def test_collapseIfEmpty_default_empty_text_in_column_still_occupies_a_row() -> None:
+    """Back-compat: ``Text("")`` (no prop) inside a column still claims
+    a row, so a sibling below it is offset. ``collapseIfEmpty=True``
+    sibling below it is NOT offset (no row claimed)."""
+    # Without prop: empty Text claims its 1 row → the "below" Text
+    # lands on row 1, snapshot has 2 rows.
+    legacy = render_to_string(
+        Box(
+            Text(""),
+            Text("below"),
+            flexDirection="column",
+        ),
+        columns=80,
+    )
+    assert legacy == "\nbelow"
+
+    # With prop: empty Text claims 0 rows → "below" lands on row 0.
+    collapsed = render_to_string(
+        Box(
+            Text("", collapseIfEmpty=True),
+            Text("below"),
+            flexDirection="column",
+        ),
+        columns=80,
+    )
+    assert collapsed == "below"
+
+
+def test_collapseIfEmpty_non_empty_content_renders_normally() -> None:
+    """``Text("hello", collapseIfEmpty=True)`` renders the text."""
+    out = render_to_string(Text("hello", collapseIfEmpty=True), columns=80)
+    assert out == "hello"
+
+
+def test_collapseIfEmpty_non_empty_styled_content_renders_normally() -> None:
+    """Non-empty content with style + collapseIfEmpty renders normally."""
+    out = render_to_string(
+        Text("hi", color="red", collapseIfEmpty=True), columns=80
+    )
+    assert out == f"{ESC}[31mhi{ESC}[0m"
+
+
+def test_collapseIfEmpty_interleaved_with_non_empty_in_column() -> None:
+    """A column with a mix of empty (collapsed) and non-empty Texts
+    packs tightly — only the non-empty rows survive in the snapshot."""
+    out = render_to_string(
+        Box(
+            Text("", collapseIfEmpty=True),
+            Text("first"),
+            Text("", collapseIfEmpty=True),
+            Text("second"),
+            Text("", collapseIfEmpty=True),
+            flexDirection="column",
+        ),
+        columns=80,
+    )
+    assert out == "first\nsecond"

@@ -986,6 +986,18 @@ def _layout_node(
             # Measure the current text (source on first pass, prior
             # wrap on later passes) under the current constraint.
             w, h = _measure_text(node, max_w_for_text, float("inf"))
+        # collapseIfEmpty: when the resolved content is empty AND the
+        # prop is set, force the measured dimensions to 0 so the leaf
+        # claims no cells in either axis. ``_measure_text`` reports
+        # height 1 for an empty string (legacy floor), so without this
+        # clamp a column of empty Text(collapseIfEmpty=True) leaves
+        # would still stack 1 row each — the prop must reach the
+        # measurement, not just the min-content clamp. Non-empty
+        # content keeps the measured height so wrapping / scroll still
+        # work.
+        if node.text == "" and node.props.get("collapseIfEmpty"):
+            w = 0
+            h = 0
         node.measured_width = w
         node.measured_height = h
         if own_w < 0:
@@ -1373,7 +1385,13 @@ def _compute_min_content_main(node: FlexNode) -> int:
     (which resolves to min-content):
 
     * **Text leaf**: fixed at ``1`` (a text leaf occupies at least one
-      row/column, even if its content doesn't fit).
+      row/column, even if its content doesn't fit). Exception: when the
+      text content is empty AND the leaf carries ``collapseIfEmpty=True``,
+      the floor drops to ``0`` so an idle mounted leaf (e.g. Jarvis'
+      ``Text(callable_returning_empty)`` rows) consumes no vertical
+      space. The PR2 Bug 1 overlap fix is preserved for non-empty
+      content — the floor only collapses when there is literally
+      nothing to paint.
     * **Box container**: aggregates children's min-content. Along the
       main axis, a row's min-content is ``max(children min-width)`` (the
       widest child sets the floor); a column's is ``sum(children
@@ -1388,6 +1406,18 @@ def _compute_min_content_main(node: FlexNode) -> int:
     uniformly from any parent.
     """
     if node.kind == "text":
+        # Text leaf: default floor is 1 (PR2 Bug 1 overlap fix). When
+        # the content is empty AND ``collapseIfEmpty=True`` the floor
+        # drops to 0 so the leaf occupies no main-axis space. At this
+        # point ``node.text`` is already resolved — the measurement pass
+        # (above) invoked the callable / text renderer before reaching
+        # here — so we read the plain string. Non-empty content keeps
+        # the floor at 1 regardless of the prop (the prop is an opt-in
+        # to collapse, never an opt-out of the overlap fix).
+        text = node.text or ""
+        if text == "" and node.props.get("collapseIfEmpty"):
+            node.min_content_main = 0
+            return 0
         node.min_content_main = 1
         return 1
     style = node.style

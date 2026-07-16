@@ -566,6 +566,15 @@ def _paint_text(
     bands) opt in by setting the prop to ``True``.
     """
     text = node.content or ""
+    # collapseIfEmpty: when the leaf content is empty AND the prop is
+    # set, skip painting entirely. The layout pass already reserved 0
+    # rows for this leaf (see ``_compute_min_content_main``), so the
+    # renderer has nothing to fill — the early return keeps
+    # ``text.split("\\n")``'s phantom single ``[""]`` row from painting
+    # an empty styled line into the grid (which would still occupy a
+    # cell the parent layout thought was empty).
+    if not text and node.props.get("collapseIfEmpty"):
+        return
     raw_lines = text.split("\n")
     if node.height > 0 and len(raw_lines) > node.height:
         raw_lines = _clip_lines_to_height(raw_lines, node.height, node.props)
