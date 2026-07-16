@@ -125,15 +125,28 @@ def repaint_frame(
     stdout: TextIO,
     available_rows: int | None = None,
 ) -> None:
-    """Erase ``old_frame`` then paint ``new_frame`` from frame row 0.
+    """Erase ``old_frame`` then paint ``new_frame``.
 
     Used when the live frame height changes enough (e.g. palette open /
     close) that incremental ``write_diff`` would leave unreachable tail
     rows uncleared or park the cursor at the wrong y.
+
+    Shrink is **top-aligned**: the new frame is painted at the same
+    origin as the erased footprint. Bottom-aligning (cursor-down by
+    ``old_h - new_h`` before paint) looked better for a single collapse
+    — content sat on the old bottom edge — but left a hollow band
+    *above* the chrome. On repeated palette open/Esc that band grew by
+    the picker height each cycle, because the paint origin drifted down
+    and never reclaimed the gap. Top-align keeps the origin stable so
+    the next grow fills the same footprint instead of stacking gaps.
     """
     if old_frame:
         old_lines = old_frame.split("\n")
-        budget = available_rows if (available_rows and available_rows > 0) else len(old_lines)
+        budget = (
+            available_rows
+            if (available_rows and available_rows > 0)
+            else len(old_lines)
+        )
         _erase_reachable_rows(old_lines, stdout, budget)
     if new_frame:
         _paint_initial(new_frame, stdout)

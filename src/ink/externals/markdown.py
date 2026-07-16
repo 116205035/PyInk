@@ -1967,7 +1967,11 @@ def _MarkdownImpl(**props: Any) -> Element:
     # :func:`_render_tokens` via per-block ``spacing_before_*`` /
     # ``spacing_after_*`` theme knobs (see :func:`_render_markdown_to_string`).
     return Box(
-        Text(render_reactive),
+        # Empty source (Jarvis idle ``current_response``) must claim 0
+        # rows — otherwise a permanently-mounted Markdown leaf leaks a
+        # blank line above the status/input block after collapseIfEmpty
+        # cleared the neighbouring Text rows.
+        Text(render_reactive, collapseIfEmpty=True),
         flexDirection="column",
         **box_props,
     )

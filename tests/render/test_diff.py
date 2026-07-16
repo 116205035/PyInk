@@ -293,6 +293,28 @@ def test_frame_shrink_ends_cursor_at_frame_row_zero() -> None:
         )
 
 
+def test_repaint_frame_shrink_keeps_top_origin() -> None:
+    """Shrinking via ``repaint_frame`` must not bottom-align.
+
+    Bottom-align (cursor-down by shrink before paint) left a hollow
+    band above Jarvis' input that grew by the command-list height on
+    every ``/`` → Esc cycle. Top-align keeps the paint origin stable
+    so the next grow reuses the same footprint.
+    """
+    from ink.render.diff import repaint_frame
+
+    old = "\n".join(f"row{i}" for i in range(8))
+    new = "a\nb\nc"  # shrink by 5
+    out = StringIO()
+    repaint_frame(old, new, out, available_rows=8)
+    diff = out.getvalue()
+    assert _CLEAR_SCREEN not in diff
+    # After erase the cursor is already on the footprint's first row;
+    # do not emit a shrink cursor-down before painting.
+    assert "\x1b[5B" not in diff, f"unexpected bottom-align in {diff!r}"
+    assert "\r\x1b[2Ka" in diff
+
+
 # ---------------------------------------------------------------------------
 # Invariant sweep — every public test path
 # ---------------------------------------------------------------------------
