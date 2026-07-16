@@ -820,3 +820,61 @@ def test_collapseIfEmpty_interleaved_with_non_empty_in_column() -> None:
         columns=80,
     )
     assert out == "first\nsecond"
+
+
+def test_collapseIfEmpty_multi_line_content_renders_all_rows() -> None:
+    """Multi-line content + collapseIfEmpty renders every row.
+
+    Regression guard for Jarvis' picker Text leaf: the picker body
+    is a single Text(collapseIfEmpty=True) whose callable returns
+    a multi-line string (``"line1\\nline2\\nline3"``) when the picker
+    is open and ``""`` when closed. The prop must collapse only the
+    empty case — multi-line content needs to render every row so the
+    command list stays visible.
+    """
+    out = render_to_string(
+        Text("line1\nline2\nline3", collapseIfEmpty=True), columns=80
+    )
+    assert out == "line1\nline2\nline3"
+
+
+def test_collapseIfEmpty_callable_multi_line_renders_all_rows() -> None:
+    """A callable leaf returning a multi-line string + collapseIfEmpty
+    renders every row (mirrors the live picker Text leaf shape)."""
+    out = render_to_string(
+        Text(lambda: "line1\nline2\nline3", collapseIfEmpty=True),
+        columns=80,
+    )
+    assert out == "line1\nline2\nline3"
+
+
+def test_collapseIfEmpty_multi_line_with_ansi_renders_all_rows() -> None:
+    """Multi-line content with ANSI colour codes + collapseIfEmpty
+    renders every row. Catches a regression where string_width
+    measurement of ANSI-laden text (e.g. Jarvis picker rows) could
+    be miscounted, clipping the leaf to 1 row."""
+    body = (
+        "\x1b[33m❯ /agent\x1b[0m      \x1b[2m\x1b[90mSelect Agent\x1b[0m\n"
+        "\x1b[2m\x1b[90m  /cache\x1b[0m      \x1b[2m\x1b[90mManage cache\x1b[0m\n"
+        "\x1b[2m\x1b[90m  /quit\x1b[0m       \x1b[2m\x1b[90mExit application\x1b[0m"
+    )
+    out = render_to_string(Text(body, collapseIfEmpty=True), columns=80)
+    # 3 logical rows survive — the snapshot keeps the ANSI bytes.
+    assert out == body
+    assert out.count("\n") == 2
+
+
+def test_collapseIfEmpty_multi_line_in_column_keeps_sibling_offsets() -> None:
+    """A multi-line collapseIfEmpty Text inside a column reserves
+    every content row — siblings above and below are offset by the
+    full multi-line height (not collapsed to a single row)."""
+    out = render_to_string(
+        Box(
+            Text("above"),
+            Text("a\nb\nc", collapseIfEmpty=True),
+            Text("below"),
+            flexDirection="column",
+        ),
+        columns=80,
+    )
+    assert out == "above\na\nb\nc\nbelow"
