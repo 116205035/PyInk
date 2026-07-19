@@ -116,13 +116,13 @@ class Instance:
         # Approximate count of terminal rows consumed by ALL flushed
         # static content (cumulative, never reset). Used to compute the
         # frame's available row budget so :func:`write_diff` can cap
-        # cursor-down movements and avoid the viewport-clamp cursor
+        # cursor-UP movements and avoid the viewport-clamp cursor
         # drift that wipes live content (input row, dividers) when the
         # frame + static overflows the viewport. The count is an
         # estimate — it tallies ``\\n`` characters in flushed static
         # text, which under-estimates when a static line wraps (eager
         # wrap) but that just means the cap is slightly generous; the
-        # bottom-up retreat in :func:`_repaint` stays correct because
+        # downward retreat in :func:`_repaint` stays correct because
         # it stops at ``cur_row`` regardless.
         #
         # Cumulative growth caveat: the count never decreases even
@@ -382,19 +382,22 @@ class Instance:
             if prev_frame == new_frame and prev_frame:
                 return
             # Compute the frame's available row budget so ``write_diff``
-            # can cap cursor-down movements. Without this cap, a frame
-            # taller than the viewport (after subtracting static content
-            # above) causes the cursor to clamp at the viewport bottom,
-            # which makes the final cursor-up overshoot past frame row 0
-            # and wipe live content (input row, dividers). See
-            # ``_static_rows_approx`` docstring for details.
+            # can cap cursor-UP movements. Without this cap, a frame
+            # taller than the viewport (after accounting for static
+            # content above) causes cursor-up moves to clamp at the
+            # viewport top, which makes the final cursor-down retreat
+            # overshoot past the frame's last row and wipe live content
+            # (input row, dividers). See ``_static_rows_approx``
+            # docstring for details.
             #
-            # ``available_rows`` = number of viewport rows the cursor can
-            # safely descend into starting from the frame's row 0:
+            # ``available_rows`` = number of frame rows actually visible
+            # on screen — i.e. how far the cursor may climb from the
+            # frame's last row (where it is parked):
             #
             # * Everything fits (``static_approx + frame_h <= rows``):
             #   frame anchor sits at viewport row ``static_approx`` and
-            #   ``available_rows = rows - static_approx`` (PR2 formula).
+            #   ``available_rows = rows - static_approx >= frame_h``
+            #   (PR2 formula) — every frame row is reachable.
             # * Content overflows (``static_approx + frame_h > rows`` —
             #   either static alone fills the viewport OR static+frame
             #   scrolls on paint): after scroll the frame sits at the
@@ -404,8 +407,8 @@ class Instance:
             #   ``static_approx < rows`` but static+frame still scrolls
             #   (e.g. static=47, rows=50, frame=14 → spare=3). The
             #   StatusBar near the bottom of the frame then sits past
-            #   ``row_cap``; ``current_frame`` updates in memory while
-            #   stdout never rewrites that row, and the next paint
+            #   the reachable floor; ``current_frame`` updates in memory
+            #   while stdout never rewrites that row, and the next paint
             #   early-returns on ``prev_frame == new_frame`` — Jarvis's
             #   sticky "Initializing..." after history load.
             available_rows: int | None = None
@@ -447,23 +450,26 @@ class Instance:
 
         Sequence:
 
-        1. Erase the previous live frame (cursor-up + per-line ``\\x1b[2K``)
-           — the cursor ends on the first row of the (now blank) frame
-           region, which is exactly one line below the existing static
-           output.
-        2. Write ``static_text`` from that position. Each ``\\n`` inside it
-           advances to the next row; when the cursor would walk past the
-           bottom of the viewport the terminal scrolls, pushing older
-           static lines up — which is precisely the desired behaviour for
-           log-style output.
-        3. Write the new live frame as a fresh initial paint so its cursor
-           park lands on the new frame's first row.
+        1. Erase the previous live frame. The cursor is parked on the
+           frame's LAST row, so ``write_diff(prev_frame, "")`` walks
+           UPWARD clearing each row and ends on the first row of the
+           (now blank) frame region — exactly one line below the
+           existing static output.
+        2. Write ``static_text`` from that position. Each ``\\n`` inside
+           it advances to the next row; when the cursor would walk past
+           the bottom of the viewport the terminal scrolls, pushing
+           older static lines up — which is precisely the desired
+           behaviour for log-style output.
+        3. Write the new live frame as a fresh initial paint; its cursor
+           park lands on the new frame's LAST row (bottom-parked
+           convention, 07-19-input-pyink-cursor-markdown).
 
         This routine deliberately avoids ``\\x1b[2J`` (full-screen clear)
         so PRD Decision 3 (inline mode never destroys scrollback) holds.
         """
         # Step 1 — clear the previous frame. ``write_diff`` with an empty
-        # new frame erases each row and parks the cursor at row 0.
+        # new frame erases each row (bottom-up) and parks the cursor at
+        # row 0 of the frame region.
         if prev_frame:
             write_diff(prev_frame, "", self.stdout)
         # Step 2 — append the new static text. ``write_diff(None, new_frame)``
@@ -472,7 +478,7 @@ class Instance:
         self.stdout.write(static_text)
         self.stdout.flush()
         # Track approximate static row count so subsequent ``_repaint``
-        # calls can cap cursor-down movements and avoid the viewport-clamp
+        # calls can cap cursor-UP movements and avoid the viewport-clamp
         # cursor drift (see ``_static_rows_approx`` docstring).
         self._static_rows_approx += static_text.count("\n")
         # Step 3 — paint the new frame from the cursor's current position.

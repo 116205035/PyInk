@@ -32,17 +32,17 @@ def test_initial_paint_writes_frame_then_parks_cursor() -> None:
     # Each row is pre-cleared with ``\r\x1b[2K`` (first row) /
     # ``\n\x1b[2K`` (subsequent rows) so shorter new rows don't leave
     # stale tails from a previous frame (Jarvis TUI regression fix).
-    assert "\r\x1b[2Khello" in out
-    assert "\n\x1b[2Kworld" in out
-    # ...followed by a cursor-up to the first row + CR.
-    assert out.endswith("\x1b[1A\r")
+    # Bottom-parked convention (07-19): after the last row the cursor
+    # stays on that row — a single ``\r`` parks it at column 1. No
+    # cursor-up retreat back to row 0.
+    assert out == "\r\x1b[2Khello\n\x1b[2Kworld\r"
     assert _CLEAR_SCREEN not in out
 
 
 def test_initial_paint_single_row_no_cursor_up() -> None:
     out = _capture(None, "single")
-    # Single row: leading ``\r\x1b[2K`` + content + ``\r``. No cursor-up
-    # because we never descended.
+    # Single row: leading ``\r\x1b[2K`` + content + ``\r``. No cursor
+    # move because the first row IS the last row.
     assert out == "\r\x1b[2Ksingle\r"
     assert _CLEAR_SCREEN not in out
 
@@ -129,19 +129,19 @@ def test_single_line_change_only_touches_that_row() -> None:
     assert "alpha" not in out
     assert "gamma" not in out
     assert _CLEAR_SCREEN not in out
-    # We expect: move down to row 1, CR + erase-line + new content,
-    # then back up to row 0.
-    assert "\x1b[1B" in out  # cursor down 1
-    assert "\r\x1b[2KBETA" in out
-    assert out.endswith("\x1b[1A\r")
+    # Bottom-parked: the cursor starts on the last row (row 2), moves UP
+    # to the changed row 1, clears + rewrites it, then returns DOWN to
+    # the last row.
+    assert out == "\x1b[1A\r\x1b[2KBETA\x1b[1B\r"
 
 
-def test_first_row_change_does_not_move_down() -> None:
+def test_first_row_change_moves_up_from_bottom() -> None:
     old = "alpha\nbeta"
     new = "ALPHA\nbeta"
     out = _capture(old, new)
-    # First row → no down move; rewrite + return to row 0.
-    assert out.startswith("\r\x1b[2KALPHA")
+    # First row changed: from the parked last row the diff climbs 1,
+    # rewrites, then descends back to the last row.
+    assert out == "\x1b[1A\r\x1b[2KALPHA\x1b[1B\r"
     assert _CLEAR_SCREEN not in out
 
 
@@ -149,9 +149,11 @@ def test_last_row_change() -> None:
     old = "a\nb\nc"
     new = "a\nb\nC"
     out = _capture(old, new)
-    assert "\x1b[2B" in out  # down to row 2
-    assert "\r\x1b[2KC" in out
-    assert out.endswith("\x1b[2A\r")
+    # Bottom-parked micro-move: the changed row IS the cursor's parked
+    # row, so the whole repaint is a bare clear + rewrite + CR with no
+    # cursor travel at all. This is the common case (typing in the
+    # input row) that 07-19 optimises for.
+    assert out == "\r\x1b[2KC\r"
     assert _CLEAR_SCREEN not in out
 
 
@@ -212,63 +214,73 @@ def test_full_clear_uses_line_clears_not_full_screen_clear() -> None:
 # ---------------------------------------------------------------------------
 # Frame-shrink cursor retreat — viewport-clamp robustness
 #
-# When ``available_rows`` is provided, ``_repaint`` must cap cursor-down
-# movements so the cursor never reaches a row the terminal will clamp.
-# Without the cap, a clamped cursor-up at the end of the diff overshoots
-# past frame row 0 and the next paint anchors at the wrong y — wiping
-# live content (input row, dividers). See ``diff.py`` docstring for the
-# full rationale.
+# When ``available_rows`` is provided, ``_repaint`` must cap cursor-UP
+# movements so the cursor never climbs into the scrollback (where it
+# would clamp at the viewport's top edge). Without the cap, a clamped
+# cursor-down retreat at the end of the diff overshoots past the frame's
+# last row and the next paint anchors at the wrong y — wiping live
+# content (input row, dividers). See ``diff.py`` docstring for the full
+# rationale.
 # ---------------------------------------------------------------------------
 
 
-def test_frame_shrink_with_available_rows_caps_cursor_descent() -> None:
-    """When ``available_rows`` is set, the cursor never moves past that row."""
-    # Old frame is 10 rows; new is 2. Without a cap the diff would emit
-    # a ``\x1b[9B`` (down to row 9) — with ``available_rows=5`` it must
-    # stop at row 4 and clear only rows 2-4. The cursor-up at the end
-    # retreats from row 4 (not row 9), so the next paint anchors at the
-    # right y.
+def test_frame_shrink_with_available_rows_caps_cursor_ascent() -> None:
+    """When ``available_rows`` is set, the cursor never climbs above the
+    reachable floor (``len(old) - available_rows``)."""
+    # Old frame is 10 rows; new is 2. With ``available_rows=5`` the
+    # cursor (parked on old row 9) may climb at most 4 rows, so rows
+    # 9..5 are cleared and rows 0..4 — already in the scrollback — are
+    # skipped. The total ascent must not exceed 4.
     old = "\n".join(["row%d" % i for i in range(10)])
     new = "row0\nrow1"
     out = StringIO()
     write_diff(old, new, out, available_rows=5)
     diff = out.getvalue()
     assert _CLEAR_SCREEN not in diff
-    # No cursor-down by more than 4 rows (cap - 1) — a single ``\x1b[4B``
-    # is the largest down-move we should see. ``\x1b[9B`` (the un-capped
-    # descent to the bottom of the old frame) must NOT appear.
-    assert "\x1b[9B" not in diff
-    assert "\x1b[5B" not in diff
-    # The largest down-move in the diff should be at most 4 rows.
     import re
-    downs = [int(n) for n in re.findall(r"\x1b\[(\d+)B", diff)]
-    assert downs, "expected at least one cursor-down in frame-shrink diff"
-    assert max(downs) <= 4, f"cursor-down {max(downs)} exceeds available_rows-1=4: {diff!r}"
+    ups = [int(n) for n in re.findall(r"\x1b\[(\d+)A", diff)]
+    assert ups, "expected at least one cursor-up in frame-shrink diff"
+    # Total upward travel from the parked last row (index 9) is capped
+    # at available_rows - 1 = 4 — the cursor stops at row 5 and never
+    # climbs into the scrollback.
+    assert sum(ups) <= 4, (
+        f"cursor-up total {sum(ups)} exceeds available_rows-1=4: {diff!r}"
+    )
+    # No single large jump either — the walk is row-by-row.
+    assert max(ups) <= 4
+    # Rows in the scrollback (indices 0..4) are left uncleared: exactly
+    # 5 rows (9..5) get erased.
+    assert diff.count("\x1b[2K") == 5
 
 
 def test_frame_shrink_without_available_rows_keeps_legacy_behaviour() -> None:
-    """``available_rows=None`` (default) preserves the original top-down walk."""
+    """``available_rows=None`` (default) preserves the original full walk."""
     old = "\n".join(["row%d" % i for i in range(10)])
     new = "row0\nrow1"
     out = StringIO()
     write_diff(old, new, out, available_rows=None)
     diff = out.getvalue()
-    # The un-capped path reaches the bottom (row 9) of the old frame via
-    # a descent to row 2 then 7× cursor-down-by-1. The total descent
-    # equals 9 rows — backward compat with existing diff callers that
-    # don't pass viewport info.
+    # The un-capped path climbs from old row 9 up to row 1 (the new
+    # frame's last row): 7 climbs across the erased rows (9→2) plus the
+    # final retreat to row 1 — 8 rows of total ascent, mirrored from the
+    # legacy top-down walk's descent. Net movement equals
+    # ``old_last_row - new_last_row`` = 9 - 1 = 8. Backward compat with
+    # existing diff callers that don't pass viewport info.
     import re
-    downs = [int(n) for n in re.findall(r"\x1b\[(\d+)B", diff)]
-    assert sum(downs) == 9, f"uncapped path should descend 9 rows total, got {sum(downs)}: {diff!r}"
+    ups = [int(n) for n in re.findall(r"\x1b\[(\d+)A", diff)]
+    assert sum(ups) == 8, f"uncapped path should ascend 8 rows total, got {sum(ups)}: {diff!r}"
     assert _CLEAR_SCREEN not in diff
 
 
-def test_frame_shrink_ends_cursor_at_frame_row_zero() -> None:
-    """After a frame-shrink diff, the cursor must park at row 0 of the
-    painted region so the next paint anchors correctly. This holds whether
-    or not ``available_rows`` is provided."""
+def test_frame_shrink_ends_cursor_at_new_frame_last_row() -> None:
+    """After a frame-shrink diff the cursor must park on the NEW frame's
+    last row so the next paint anchors correctly. Net vertical movement
+    therefore equals ``old_height - new_height`` upward (not zero — the
+    park point moved). This holds whether or not ``available_rows`` is
+    provided."""
     old = "a\nb\nc\nd\ne"
     new = "a\nb"
+    height_delta = 5 - 2  # 3 rows
     # Without cap
     out1 = StringIO()
     write_diff(old, new, out1, available_rows=None)
@@ -283,13 +295,14 @@ def test_frame_shrink_ends_cursor_at_frame_row_zero() -> None:
         ups = [int(n) for n in re.findall(r"\x1b\[(\d+)A", diff)]
         total_down = sum(downs)
         total_up = sum(ups)
-        # After all cursor moves, the net vertical movement is 0 (cursor
-        # returns to row 0 of the frame). If this invariant breaks, the
-        # next diff anchors at the wrong y and drifts until live content
-        # is wiped.
-        assert total_down == total_up, (
-            f"{label}: cursor net drift non-zero "
-            f"(down={total_down}, up={total_up}, diff={diff!r})"
+        # The cursor starts on the old frame's last row and ends on the
+        # new frame's last row: net movement = height_delta upward. If
+        # this invariant breaks, the next diff anchors at the wrong y
+        # and drifts until live content is wiped.
+        assert total_up - total_down == height_delta, (
+            f"{label}: cursor net movement != height delta "
+            f"(down={total_down}, up={total_up}, expected net up={height_delta}, "
+            f"diff={diff!r})"
         )
 
 
