@@ -1438,8 +1438,10 @@ def test_classify_diff_lines_categories_each_kind() -> None:
 def test_assign_line_numbers_increments_per_row() -> None:
     """``_assign_line_numbers`` follows CC's row-counter rule.
 
-    Counter increments on context / add / del rows; hunk / marker rows
-    get ``None``.
+    Counter increments on every row EXCEPT when a ``del`` is paired
+    with the immediately-following ``add`` — the pair shares the same
+    counter value (CC's modification convention: ``-old / +new`` on the
+    same source line). Hunk / marker rows get ``None``.
     """
     from ink.externals.diff import _assign_line_numbers, _classify_diff_lines
 
@@ -1447,8 +1449,8 @@ def test_assign_line_numbers_increments_per_row() -> None:
     entries = _classify_diff_lines(diff_lines)
     _assign_line_numbers(entries)
     nums = [e.get("line_num") for e in entries]
-    # Hunk = None; context=1; del=2; add=3; context=4.
-    assert nums == [None, 1, 2, 3, 4]
+    # Hunk = None; context=1; del+add share 2 (paired); context=3.
+    assert nums == [None, 1, 2, 2, 3]
 
 
 def test_compute_gutter_width_handles_no_numbered_rows() -> None:
@@ -1711,9 +1713,10 @@ def test_start_line_offsets_gutter_numbers() -> None:
     When the caller knows the real source-file line where the diff
     begins (e.g. Jarvis's Edit tool records it from ``content.index(
     old_string)``), the gutter should show those file-accurate numbers
-    instead of the snippet-relative 1, 2, 3, … sequence. For a 2-row
-    diff starting at line 50 the rendered gutter is ``50`` / ``51``,
-    not ``1`` / ``2``.
+    instead of the snippet-relative 1, 2, 3, … sequence. For a 4-row
+    body diff (ctx + paired del/add + ctx) starting at line 50 the
+    rendered gutter is ``50`` / ``51`` / ``51`` / ``52`` (paired del/add
+    share the source line per CC convention), not ``1`` / ``2`` / ….
     """
     before = "alpha\nbeta\ngamma"
     after = "alpha\nBETA\ngamma"
@@ -1784,8 +1787,9 @@ def test_assign_line_numbers_with_start_line() -> None:
     """``_assign_line_numbers(start_line=N)`` shifts every assigned number.
 
     Unit-level guard for the counter logic: passing ``start_line=50``
-    should produce ``[None, 50, 51, 52, 53]`` for the same diff that
-    without the prop produces ``[None, 1, 2, 3, 4]``.
+    should produce ``[None, 50, 51, 51, 52]`` for the same diff that
+    without the prop produces ``[None, 1, 2, 2, 3]`` (paired del+add
+    share the same number — CC's modification convention).
     """
     from ink.externals.diff import _assign_line_numbers, _classify_diff_lines
 
@@ -1793,7 +1797,7 @@ def test_assign_line_numbers_with_start_line() -> None:
     entries = _classify_diff_lines(diff_lines)
     _assign_line_numbers(entries, start_line=50)
     nums = [e.get("line_num") for e in entries]
-    assert nums == [None, 50, 51, 52, 53]
+    assert nums == [None, 50, 51, 51, 52]
 
 
 def test_assign_line_numbers_start_line_below_1_clamps() -> None:
@@ -1809,4 +1813,84 @@ def test_assign_line_numbers_start_line_below_1_clamps() -> None:
     entries = _classify_diff_lines(diff_lines)
     _assign_line_numbers(entries, start_line=0)
     nums = [e.get("line_num") for e in entries]
-    assert nums == [1, 2, 3]
+    # ctx=1, paired del+add share 2.
+    assert nums == [1, 2, 2]
+
+
+# ---------------------------------------------------------------------------
+# Paired del+add line-number sharing (07-20-tool-message-rendering-polish)
+# ---------------------------------------------------------------------------
+
+
+def test_paired_del_add_shares_line_number() -> None:
+    """A ``-old`` immediately followed by ``+new`` shares its line number.
+
+    CC's ``StructuredDiff`` convention: a paired modification of a
+    source line is rendered as two visual rows (``-old`` then ``+new``)
+    tagged with the SAME line number — the source line being modified.
+    The counter increments ONCE for the pair, so the following context
+    row gets ``N+1`` (not ``N+2``).
+
+    Regression guard for the original buggy implementation, which
+    incremented the counter on every row kind uniformly, producing
+    ``[ctx=1, del=2, add=3, ctx=4]`` instead of the CC-correct
+    ``[ctx=1, del=2, add=2, ctx=3]``.
+    """
+    from ink.externals.diff import _assign_line_numbers, _classify_diff_lines
+
+    # context, then a paired del+add, then another context.
+    diff_lines = [" ctx_before", "-old line", "+new line", " ctx_after"]
+    entries = _classify_diff_lines(diff_lines)
+    _assign_line_numbers(entries)
+    nums = [e.get("line_num") for e in entries]
+    # del (index 1) and add (index 2) share the SAME number.
+    assert nums[1] == nums[2], (
+        f"paired del+add should share line number, got del={nums[1]!r} "
+        f"add={nums[2]!r} (full: {nums!r})"
+    )
+    # The pair's shared number equals the counter value at the del row.
+    # ctx_before=1, del+add share 2, ctx_after=3.
+    assert nums == [1, 2, 2, 3], (
+        f"expected [1, 2, 2, 3] for ctx+paired del/add+ctx, got {nums!r}"
+    )
+
+
+def test_unpaired_del_only_increments_normally() -> None:
+    """A standalone ``-`` row (no following ``+``) increments the counter.
+
+    Pure deletion (e.g. a line being removed with nothing inserted in
+    its place) does NOT share a number — the counter increments after
+    the del row exactly as for any other single row. The next context
+    / add row gets ``N+1``.
+    """
+    from ink.externals.diff import _assign_line_numbers, _classify_diff_lines
+
+    # context, standalone del (no add follows), then context.
+    diff_lines = [" ctx_before", "-gone", " ctx_after"]
+    entries = _classify_diff_lines(diff_lines)
+    _assign_line_numbers(entries)
+    nums = [e.get("line_num") for e in entries]
+    # ctx_before=1, del=2 (no pairing — pure deletion), ctx_after=3.
+    assert nums == [1, 2, 3], (
+        f"unpaired del should increment normally, got {nums!r}"
+    )
+
+
+def test_unpaired_add_only_increments_normally() -> None:
+    """A standalone ``+`` row (no preceding ``-``) increments the counter.
+
+    Pure insertion (e.g. a new line added with nothing removed before
+    it) does NOT share a number — the counter increments after the add
+    row exactly as for any other single row.
+    """
+    from ink.externals.diff import _assign_line_numbers, _classify_diff_lines
+
+    # context, standalone add (no del precedes), then context.
+    diff_lines = [" ctx_before", "+fresh", " ctx_after"]
+    entries = _classify_diff_lines(diff_lines)
+    _assign_line_numbers(entries)
+    nums = [e.get("line_num") for e in entries]
+    # ctx_before=1, add=2 (no pairing — pure insertion), ctx_after=3.
+    assert nums == [1, 2, 3], (
+        f"unpaired add should increment normally, got {nums!r}"
+    )

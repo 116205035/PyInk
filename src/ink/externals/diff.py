@@ -875,39 +875,66 @@ def _assign_line_numbers(
 
     Mirrors CC's ``numberDiffLines`` (``Fallback.tsx:423``): a single
     counter starts at ``1`` (or ``start_line`` when the caller knows the
-    real 1-indexed source-file line where the diff begins) and
-    increments on every context / add row. Remove rows carry the *next*
-    add / context row's number (so the paired +/- pair visually share a
-    number) — we follow CC's behaviour exactly by incrementing the
-    counter on remove rows *after* assigning them the pre-increment
-    value. This produces e.g. (with ``start_line=5``)::
+    real 1-indexed source-file line where the diff begins). The counter
+    behaviour depends on the row kind:
 
-        5   ctx
-        5 - old
-        5 + new
-        6   ctx
+    * **Paired del+add** (a ``del`` entry immediately followed by an
+      ``add`` entry): BOTH rows share the same counter value — they
+      represent a modification of the same source line. The counter
+      increments ONCE for the pair (not twice). This is CC's
+      ``StructuredDiff`` convention: a ``-old / +new`` modification
+      reads as two visual rows tagged with the single source line being
+      edited, e.g. (with ``start_line=5``)::
 
-    which is what CC renders. ``start_line`` lets callers that know the
-    real source line where the diff hunk starts (Jarvis's Edit tool
-    records this in ``ToolResult.metadata["start_line"]``) emit
-    file-accurate gutter numbers instead of the snippet-relative 1, 2,
-    3, … sequence. Default ``1`` preserves backward compatibility for
-    callers that don't care about real line numbers.
+          5   ctx
+          5 - old
+          5 + new
+          6   ctx
+
+    * **Unpaired del** (pure deletion, no ``add`` follows): increments
+      the counter normally.
+    * **Unpaired add** (pure insertion, no ``del`` precedes):
+      increments the counter normally.
+    * **Context**: increments the counter normally.
+    * **Hunk / marker**: set to ``None`` (don't correspond to a source
+      row, never counted).
+
+    ``start_line`` lets callers that know the real source line where
+    the diff hunk starts (Jarvis's Edit tool records this in
+    ``ToolResult.metadata["start_line"]``) emit file-accurate gutter
+    numbers instead of the snippet-relative 1, 2, 3, … sequence.
+    Default ``1`` preserves backward compatibility for callers that
+    don't care about real line numbers.
     """
     counter = max(1, int(start_line))
-    for entry in entries:
+    i = 0
+    n = len(entries)
+    while i < n:
+        entry = entries[i]
         kind = entry["kind"]
         if kind in ("hunk", "marker"):
             entry["line_num"] = None
+            i += 1
             continue
-        if kind == "del":
+        # Paired del+add: both rows represent the same source line
+        # being modified. Share the counter; increment once for the
+        # pair (CC's convention — two visual rows, one line number).
+        if (
+            kind == "del"
+            and i + 1 < n
+            and entries[i + 1]["kind"] == "add"
+        ):
             entry["line_num"] = counter
+            entries[i + 1]["line_num"] = counter
             counter += 1
-        elif kind in ("add", "context"):
+            i += 2
+            continue
+        if kind in ("del", "add", "context"):
             entry["line_num"] = counter
             counter += 1
         else:
             entry["line_num"] = None
+        i += 1
 
 
 def _compute_gutter_width(entries: list[dict[str, Any]]) -> int:
