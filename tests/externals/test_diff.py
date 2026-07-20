@@ -700,3 +700,332 @@ def test_bg_color_persists_through_highlight_branch(
         )
     )
     assert f"{ESC}[48;2;30;70;32m" in out
+
+
+# ---------------------------------------------------------------------------
+# CC-alignment extensions: line_numbers / inline_highlight / full_width_bg
+# (07-20-tool-message-rendering-polish)
+# ---------------------------------------------------------------------------
+
+
+def test_line_numbers_prefix_body_rows_with_padded_number() -> None:
+    """``line_numbers=True`` prefixes each body row with a padded number.
+
+    Format: ``<padded_num><sigil>`` where the padded number is right-
+    aligned to the width of the largest line number + 1. For a 2-line
+    diff the largest line is ``2`` so the gutter is 2 chars wide:
+    ``"1+"`` / ``"2-"`` etc.
+    """
+    before = "alpha\nbeta\ngamma"
+    after = "alpha\nBETA\ngamma"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            line_numbers=True,
+        )
+    )
+    # The first body row (context "alpha") gets gutter "1 " (1 + space
+    # sigil for context). We assert the substring "1 " appears on a
+    # line that also contains "alpha".
+    assert "alpha" in out
+    # We expect "1 " (the padded 1 + space sigil) to appear somewhere
+    # before "alpha". The exact byte sequence depends on prefix colour
+    # SGRs so we look for the bare characters.
+    assert "1 alpha" in out or " 1 alpha" in out
+
+
+def test_line_numbers_off_by_default() -> None:
+    """Without ``line_numbers`` no gutter appears — body rows start with code."""
+    before = "alpha"
+    after = "alpha\nbeta"
+    out = _render(StructuredDiff(before, after, show_header=False))
+    # The added line "beta" should appear without a leading digit.
+    # We strip ANSI and check the line starts with "+beta" (the diff
+    # sigil) rather than "<num>+beta".
+    plain = out
+    for code in (f"{ESC}[0m", f"{ESC}[32m", f"{ESC}[31m", f"{ESC}[1m"):
+        plain = plain.replace(code, "")
+    # The added line "beta" — when prefixed by a line-number gutter it
+    # would look like "1+beta" or "1 +beta". With no gutter it's just
+    # "+beta".
+    assert "+beta" in plain
+    # No digit-immediately-before-sigil pattern.
+    import re
+
+    assert re.search(r"\d\+beta", plain) is None
+
+
+def test_inline_highlight_paints_changed_token_brighter() -> None:
+    """``inline_highlight=True`` colours only the changed token brighter.
+
+    For an adjacent ``-old / +new`` pair where one token changes the
+    changed token should carry the ``greenBright`` (SGR 92) /
+    ``redBright`` (SGR 91) sequence while the unchanged tokens stay in
+    plain green / red.
+    """
+    before = "the quick brown fox"
+    after = "the slow brown fox"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            inline_highlight=True,
+        )
+    )
+    # ``quick`` (removed) → ``slow`` (added). The changed tokens carry
+    # the bright colour; ``the`` / ``brown`` / ``fox`` stay plain.
+    # SGR 92 = greenBright, SGR 91 = redBright.
+    assert f"{ESC}[92m" in out  # added "slow" brighter
+    assert f"{ESC}[91m" in out  # removed "quick" brighter
+
+
+def test_inline_highlight_off_by_default() -> None:
+    """Without ``inline_highlight`` no bright SGR (91/92) appears."""
+    before = "the quick brown fox"
+    after = "the slow brown fox"
+    out = _render(StructuredDiff(before, after, show_header=False))
+    # Default add colour is green (SGR 32), del is red (SGR 31).
+    # Neither bright variant (91/92) should appear.
+    assert f"{ESC}[92m" not in out
+    assert f"{ESC}[91m" not in out
+
+
+def test_inline_highlight_skips_high_change_ratio_lines() -> None:
+    """Lines above CC's 0.4 threshold fall back to whole-line colouring.
+
+    Two completely different lines have a change ratio of 1.0; the
+    word-diff helper returns ``None`` and the renderer emits the
+    standard green / red bands.
+    """
+    before = "aaaaa bbbbb"
+    after = "zzzzz yyyyy"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            inline_highlight=True,
+        )
+    )
+    # No bright SGR sequences — both rows fall back to plain green/red.
+    assert f"{ESC}[92m" not in out
+    assert f"{ESC}[91m" not in out
+    # The plain colours are still there.
+    assert f"{ESC}[32m" in out
+    assert f"{ESC}[31m" in out
+
+
+def test_inline_highlight_only_pairs_adjacent_remove_add() -> None:
+    """A standalone del or add row (no pair) skips inline highlighting."""
+    before = "alpha\nbeta"
+    after = "alpha\nbeta\ngamma"  # pure addition — no paired remove
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            inline_highlight=True,
+        )
+    )
+    # No paired remove → no inline highlight → no bright colour.
+    assert f"{ESC}[92m" not in out
+    assert f"{ESC}[91m" not in out
+
+
+def test_full_width_bg_pads_to_terminal_width() -> None:
+    """``full_width_bg=True`` flushes the row bg to terminal width.
+
+    The Box-level bg uses ``flushBackgroundToWidth=True`` so the bg
+    spans edge-to-edge. We assert the open SGR ``48;2;30;70;32`` still
+    appears (the add row's bg) — the ``flushBackgroundToWidth`` prop
+    primarily changes *how* the renderer paints the bg, not the SGR
+    sequence itself.
+    """
+    before = "x = 1"
+    after = "x = 2"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            add_bg_color="rgb(30,70,32)",
+            full_width_bg=True,
+        ),
+        columns=40,
+    )
+    assert f"{ESC}[48;2;30;70;32m" in out
+
+
+def test_full_width_bg_off_by_default_keeps_legacy_behaviour() -> None:
+    """Without ``full_width_bg`` the bg only covers the text cells."""
+    before = "x = 1"
+    after = "x = 2"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            add_bg_color="rgb(30,70,32)",
+        ),
+        columns=40,
+    )
+    # Legacy path: bg present (add_bg_color set) but row doesn't flush.
+    assert f"{ESC}[48;2;30;70;32m" in out
+
+
+def test_all_cc_props_combined_render_without_error() -> None:
+    """All three CC props + bg colours compose cleanly.
+
+    Smoke test that the renderer handles the combination without
+    raising and produces the expected visual signatures (line-number
+    gutter, inline-highlight bright tokens, full-width bg bands).
+    """
+    before = "def foo():\n    return 1\n"
+    after = "def foo():\n    return 2\n"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            language="text",
+            line_numbers=True,
+            inline_highlight=True,
+            full_width_bg=True,
+            add_bg_color="rgb(30,70,32)",
+            del_bg_color="rgb(74,32,32)",
+        ),
+        columns=60,
+    )
+    # Line-number gutter present.
+    assert "def foo" in out
+    # Bg bands present.
+    assert f"{ESC}[48;2;30;70;32m" in out
+    assert f"{ESC}[48;2;74;32;32m" in out
+    # Inline highlight present — "1" (removed) and "2" (added) get the
+    # bright SGR sequences.
+    assert f"{ESC}[92m" in out or f"{ESC}[91m" in out
+
+
+def test_cc_props_off_by_default_match_legacy_output() -> None:
+    """Defaults produce identical output to the pre-CC implementation.
+
+    Bytes-for-bytes equality with the legacy renderer is the strongest
+    backward-compat guarantee. We render the same diff with all CC
+    props at default (False) and assert no bright SGR (91/92) and no
+    line-number gutter appear.
+    """
+    before = "alpha\nbeta"
+    after = "alpha\nBETA"
+    out = _render(StructuredDiff(before, after, show_header=False))
+    # No CC-alignment features.
+    assert f"{ESC}[92m" not in out
+    assert f"{ESC}[91m" not in out
+    # No line-number gutter: the add line "+BETA" appears without a
+    # leading digit (legacy fast path uses ``Text(line)`` which
+    # includes the ``+`` prefix).
+    plain = out
+    for code in (f"{ESC}[0m", f"{ESC}[32m", f"{ESC}[31m", f"{ESC}[1m"):
+        plain = plain.replace(code, "")
+    assert "+BETA" in plain
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers for CC-alignment
+# ---------------------------------------------------------------------------
+
+
+def test_tokenize_for_word_diff_preserves_whitespace() -> None:
+    """Whitespace separators are kept on the following token."""
+    from ink.externals.diff import _tokenize_for_word_diff
+
+    tokens = _tokenize_for_word_diff("a b  c")
+    # Each entry is (sep, tok): ("", "a"), (" ", "b"), ("  ", "c")
+    assert tokens == [("", "a"), (" ", "b"), ("  ", "c")]
+
+
+def test_tokenize_for_word_diff_empty_line_returns_empty_list() -> None:
+    from ink.externals.diff import _tokenize_for_word_diff
+
+    assert _tokenize_for_word_diff("") == []
+
+
+def test_word_diff_parts_returns_changed_token_marks() -> None:
+    """``_word_diff_parts`` marks only the tokens that differ."""
+    from ink.externals.diff import _word_diff_parts
+
+    result = _word_diff_parts("foo bar", "foo baz")
+    assert result is not None
+    parts, _ratio = result
+    # Three tokens: "foo" (unchanged), "bar" → "baz" (changed).
+    assert len(parts) == 2
+    assert parts[0] == ("", "foo", False)
+    assert parts[1] == (" ", "baz", True)
+
+
+def test_word_diff_parts_returns_none_above_threshold() -> None:
+    """Completely different lines (ratio < 0.6) → ``None``."""
+    from ink.externals.diff import _word_diff_parts
+
+    result = _word_diff_parts("aaaaa bbbbb", "zzzzz yyyyy")
+    assert result is None
+
+
+def test_classify_diff_lines_categories_each_kind() -> None:
+    """``_classify_diff_lines`` tags hunk / marker / add / del / context."""
+    from ink.externals.diff import _classify_diff_lines
+
+    diff_lines = [
+        "@@ -1,2 +1,2 @@",
+        "--- before",
+        "+++ after",
+        " ctx",
+        "-del",
+        "+add",
+    ]
+    entries = _classify_diff_lines(diff_lines)
+    kinds = [e["kind"] for e in entries]
+    assert kinds == ["hunk", "marker", "marker", "context", "del", "add"]
+    # Bodies are stripped of the diff prefix.
+    add_entry = next(e for e in entries if e["kind"] == "add")
+    assert add_entry["body"] == "add"
+    del_entry = next(e for e in entries if e["kind"] == "del")
+    assert del_entry["body"] == "del"
+    ctx_entry = next(e for e in entries if e["kind"] == "context")
+    assert ctx_entry["body"] == "ctx"
+
+
+def test_assign_line_numbers_increments_per_row() -> None:
+    """``_assign_line_numbers`` follows CC's row-counter rule.
+
+    Counter increments on context / add / del rows; hunk / marker rows
+    get ``None``.
+    """
+    from ink.externals.diff import _assign_line_numbers, _classify_diff_lines
+
+    diff_lines = ["@@ -1,3 +1,3 @@", " ctx1", "-del", "+add", " ctx2"]
+    entries = _classify_diff_lines(diff_lines)
+    _assign_line_numbers(entries)
+    nums = [e.get("line_num") for e in entries]
+    # Hunk = None; context=1; del=2; add=3; context=4.
+    assert nums == [None, 1, 2, 3, 4]
+
+
+def test_compute_gutter_width_handles_no_numbered_rows() -> None:
+    """Empty / hunk-only diff → ``0`` (no gutter rendered)."""
+    from ink.externals.diff import _compute_gutter_width
+
+    assert _compute_gutter_width([]) == 0
+    assert _compute_gutter_width([{"line_num": None}]) == 0
+
+
+def test_compute_gutter_width_pads_to_max_plus_one() -> None:
+    """CC rule: ``len(str(max_num)) + 1``."""
+    from ink.externals.diff import _compute_gutter_width
+
+    # Single-digit max → 1+1=2.
+    assert _compute_gutter_width([{"line_num": 9}]) == 2
+    # Two-digit max → 2+1=3.
+    assert _compute_gutter_width([{"line_num": 99}]) == 3

@@ -40,6 +40,25 @@ Design (per PRD PR5 scope):
   case) the rendered output is a single row whose inline tokens sit
   next to the prefix glyph inside a ``flexDirection="row"`` ``Box``.
 
+CC-alignment extensions (07-20-tool-message-rendering-polish):
+
+Three new optional props opt into Claude Code's visual signatures:
+
+* ``line_numbers=True`` prefixes each body row with a padded line-number
+  gutter (``<padded_num><sigil><space>``). The numbering is a CC-style
+  row counter that increments on every add / context row and stays
+  unchanged on remove rows (mirrors CC's ``Fallback.tsx:423``).
+* ``inline_highlight=True`` pairs adjacent ``-`` / ``+`` lines and runs
+  :class:`difflib.SequenceMatcher` on their whitespace tokens. When the
+  change ratio is below CC's ``0.4`` threshold, only the changed tokens
+  are coloured in the brighter ``add_color`` / ``del_color`` (matching
+  CC's ``diffAddedWord`` / ``diffRemovedWord`` semantics).
+* ``full_width_bg=True`` sets ``flushBackgroundToWidth=True`` on the
+  outer Box of every add / del row so the per-row colour band spans
+  edge-to-edge across the terminal width (CC's strongest diff signature).
+
+All three default to ``False``; existing callers see no optical change.
+
 Colour note: the PRD's example theme spelled the dim colour
 ``"brightBlack"``; PyInk's named-colour table
 (see :data:`ink.render.ansi.NAMED_COLORS`) spells that ``"gray"`` /
@@ -62,6 +81,14 @@ from ink.core.signal import Signal
 from ink.externals.divider import Divider
 
 __all__ = ["StructuredDiff"]
+
+
+# CC's threshold for when word-level diffing falls back to whole-line
+# colouring (see ``Fallback.tsx:80`` — ``CHANGE_THRESHOLD = 0.4``). Above
+# this ratio the lines are considered "too different" and the inline
+# highlight is suppressed so the reader sees a uniform coloured band
+# instead of a noisy mix of bright / dim tokens.
+_INLINE_CHANGE_THRESHOLD = 0.4
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +131,181 @@ def _pygments_available() -> bool:
     except ImportError:
         return False
     return True
+
+
+def _tokenize_for_word_diff(line: str) -> list[tuple[str, str]]:
+    """Split ``line`` into ``(separator, token)`` pairs.
+
+    Mirrors CC's ``diffWordsWithSpace`` (the ``"diff"`` npm package) —
+    each token carries its leading whitespace so the reconstructed line
+    preserves the original spacing. ``difflib.SequenceMatcher`` is run
+    over the concatenated token strings (separator + token), so a match
+    keeps separator + token together and a change marks the whole pair.
+
+    Returns an empty list for an empty / whitespace-only line so the
+    caller can short-circuit (no tokens to highlight).
+    """
+    if not line:
+        return []
+    tokens: list[tuple[str, str]] = []
+    # ``re.finditer`` would work but ``str.split`` keeps the separators
+    # out of the result; we walk the string manually so each token
+    # carries its leading whitespace. This is exactly what CC's
+    # ``diffWordsWithSpace`` does at a higher level.
+    i = 0
+    n = len(line)
+    while i < n:
+        # Eat leading whitespace into the next token's separator.
+        sep_start = i
+        while i < n and line[i].isspace():
+            i += 1
+        sep = line[sep_start:i]
+        # Read the non-whitespace body.
+        tok_start = i
+        while i < n and not line[i].isspace():
+            i += 1
+        tok = line[tok_start:i]
+        if not sep and not tok:
+            # Both empty — defensive guard against an infinite loop
+            # that should never trigger given the loop conditions.
+            break
+        tokens.append((sep, tok))
+    return tokens
+
+
+def _word_diff_parts(
+    old_line: str,
+    new_line: str,
+) -> tuple[list[tuple[str, str, bool]], float] | None:
+    """Compute per-token change markers for two adjacent diff lines.
+
+    Returns ``None`` when the change ratio exceeds
+    :data:`_INLINE_CHANGE_THRESHOLD` (CC's 0.4 cut-off) so the caller
+    falls back to whole-line colouring. Otherwise returns a list of
+    ``(separator, token, changed)`` tuples — one per token of the
+    *target* line — plus the change ratio for callers that want to
+    inspect it.
+
+    The ``changed`` flag is ``True`` when the token differs between the
+    old / new line; ``False`` when the token is common (unchanged). The
+    caller renders changed tokens in the brighter colour and unchanged
+    tokens inherit the row's diff colour.
+
+    Mirrors CC's ``generateWordDiffElements`` (``Fallback.tsx:237``):
+    ``changeRatio = sum(len(changed_tokens)) / (len(old) + len(new))``
+    and rejects the pair when the ratio exceeds ``0.4``. We compute
+    the changed length via :class:`difflib.SequenceMatcher.get_opcodes`
+    so a token + its leading whitespace move together (CC's
+    ``diffWordsWithSpace`` semantics).
+    """
+    old_tokens = _tokenize_for_word_diff(old_line)
+    new_tokens = _tokenize_for_word_diff(new_line)
+    if not old_tokens and not new_tokens:
+        return None
+    total_chars = len(old_line) + len(new_line)
+    if total_chars == 0:
+        return None
+
+    # ``SequenceMatcher`` on the concatenated ``sep+token`` strings so
+    # a token + its leading whitespace move together.
+    old_keys = [sep + tok for sep, tok in old_tokens]
+    new_keys = [sep + tok for sep, tok in new_tokens]
+    matcher = difflib.SequenceMatcher(a=old_keys, b=new_keys, autojunk=False)
+
+    # Walk the opcodes and mark which target (new) tokens differ from
+    # the source (old). ``equal`` / ``replace`` / ``delete`` / ``insert``
+    # are the four opcodes; ``equal`` marks unchanged tokens, every
+    # other opcode marks changed tokens.
+    parts: list[tuple[str, str, bool]] = []
+    changed_chars = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for sep, tok in new_tokens[j1:j2]:
+                parts.append((sep, tok, False))
+        else:
+            for sep, tok in new_tokens[j1:j2]:
+                parts.append((sep, tok, True))
+                changed_chars += len(tok)
+    change_ratio = changed_chars / total_chars
+    if change_ratio > _INLINE_CHANGE_THRESHOLD:
+        return None
+    return parts, change_ratio
+
+
+def _build_inline_highlighted_spans(
+    parts: list[tuple[str, str, bool]],
+    *,
+    base_color: str,
+    inline_color: str,
+    bg_color: str | None,
+) -> list[Element]:
+    """Render a row's body as a list of inline-highlighted ``Text`` spans.
+
+    Each part carries its separator (leading whitespace) and token. The
+    ``changed`` flag selects between the brighter ``inline_color`` and
+    the row's ``base_color``. Whitespace separators inherit the
+    surrounding token's colour so the row reads as a continuous coloured
+    band.
+
+    Returns a flat list of ``Text`` leaves so the caller can pack them
+    as siblings inside a row ``Box``. We deliberately avoid nesting
+    ``Text`` inside ``Text`` because PyInk's text host flattens nested
+    children into the outer leaf's style — losing per-token colours.
+    """
+    spans: list[Element] = []
+    for sep, tok, changed in parts:
+        if sep:
+            sep_props: dict[str, Any] = {"color": base_color}
+            if bg_color is not None:
+                sep_props["backgroundColor"] = bg_color
+            spans.append(Text(sep, **sep_props))
+        if not tok:
+            continue
+        if changed:
+            tok_props: dict[str, Any] = {
+                "color": inline_color,
+                "bold": True,
+            }
+            if bg_color is not None:
+                tok_props["backgroundColor"] = bg_color
+            spans.append(Text(tok, **tok_props))
+        else:
+            base_props: dict[str, Any] = {"color": base_color}
+            if bg_color is not None:
+                base_props["backgroundColor"] = bg_color
+            spans.append(Text(tok, **base_props))
+    if not spans:
+        # Edge case: both lines are empty / whitespace only. Emit a
+        # single empty Text so the row still occupies a line.
+        spans.append(Text("", color=base_color))
+    return spans
+
+
+def _line_number_gutter(
+    line_num: int | None,
+    *,
+    width: int,
+    sigil: str,
+    color: str,
+    bg_color: str | None = None,
+) -> Text:
+    """Build a CC-style line-number gutter ``Text`` leaf.
+
+    Format: ``<padded_num><sigil>`` where the padded number uses
+    ``width`` characters (right-aligned). When ``line_num`` is ``None``
+    (the continuation row of a soft-wrapped pair) the entire number
+    column is rendered as spaces. CC's ``Fallback.tsx:331`` produces the
+    same shape via ``padStart(maxWidth)``.
+    """
+    if line_num is None:
+        num_str = " " * width
+    else:
+        num_str = str(line_num).rjust(width)
+    body = f"{num_str}{sigil}"
+    props: dict[str, Any] = {"color": color}
+    if bg_color is not None:
+        props["backgroundColor"] = bg_color
+    return Text(body, **props)
 
 
 def _render_diff_line(
@@ -209,6 +411,108 @@ def _render_diff_line(
     )
 
 
+def _render_diff_row_cc(
+    *,
+    body: str,
+    sigil: str,
+    base_color: str,
+    inline_parts: list[tuple[str, str, bool]] | None,
+    inline_color: str,
+    bg_color: str | None,
+    full_width_bg: bool,
+    line_num: int | None,
+    gutter_width: int,
+) -> Element:
+    """Render a single add / del / context row in CC-alignment mode.
+
+    Combines the optional line-number gutter, optional inline highlight,
+    and optional full-width background into a single row ``Box``. This
+    path is used when at least one of ``line_numbers`` /
+    ``inline_highlight`` / ``full_width_bg`` is enabled; the legacy
+    :func:`_render_diff_line` fast path handles the no-CC-features case.
+
+    Parameters
+    ----------
+    body:
+        The code portion (diff line with its ``+`` / ``-`` / `` `` prefix
+        stripped).
+    sigil:
+        ``"+"`` / ``"-"`` / ``" "`` — the diff marker shown right after
+        the line-number gutter.
+    base_color:
+        Diff colour (``add_color`` / ``del_color``) applied to unchanged
+        tokens and the sigil.
+    inline_parts:
+        Output of :func:`_word_diff_parts` when inline highlighting is
+        enabled for this row and the change ratio was below threshold.
+        ``None`` means "fall back to whole-line colour" — used either
+        when inline highlighting is off, the row is unpaired, or the
+        word-diff threshold rejected the pair.
+    inline_color:
+        Brighter colour (``greenBright`` / ``redBright``) applied to
+        changed tokens when ``inline_parts`` is not ``None``.
+    bg_color:
+        Optional per-row background colour. Required for full-width bg.
+    full_width_bg:
+        When ``True`` the outer Box carries
+        ``flushBackgroundToWidth=True`` so the bg spans the terminal
+        width.
+    line_num:
+        Optional 1-indexed row number rendered in the gutter.
+        ``None`` suppresses the number (renders spaces).
+    gutter_width:
+        Width (in characters) the line-number column is right-aligned
+        to. ``0`` disables the gutter entirely.
+
+    Returns
+    -------
+    Element
+        A row ``Box`` (gutter + body) or a single ``Text`` leaf when no
+        CC features are active for this row.
+    """
+    children: list[Element] = []
+
+    # Gutter (line number + sigil). Width 0 means caller opted out.
+    if gutter_width > 0:
+        children.append(
+            _line_number_gutter(
+                line_num,
+                width=gutter_width,
+                sigil=sigil,
+                color=base_color,
+                bg_color=bg_color,
+            )
+        )
+
+    # Body: inline-highlighted spans when available, otherwise a plain
+    # Text carrying the full body in the diff colour.
+    if inline_parts is not None:
+        children.extend(
+            _build_inline_highlighted_spans(
+                inline_parts,
+                base_color=base_color,
+                inline_color=inline_color,
+                bg_color=bg_color,
+            )
+        )
+    else:
+        body_props: dict[str, Any] = {"color": base_color}
+        if bg_color is not None:
+            body_props["backgroundColor"] = bg_color
+        children.append(Text(body, **body_props))
+
+    # No gutter + plain body + no bg → collapse to a single Text so we
+    # don't add a Box wrapper for the legacy no-features case.
+    if not children:
+        return Text(body, color=base_color)
+
+    box_props: dict[str, Any] = {"flexDirection": "row"}
+    if full_width_bg and bg_color is not None:
+        box_props["backgroundColor"] = bg_color
+        box_props["flushBackgroundToWidth"] = True
+    return Box(*children, **box_props)
+
+
 # ---------------------------------------------------------------------------
 # Diff computation + rendering
 # ---------------------------------------------------------------------------
@@ -243,6 +547,170 @@ def _compute_diff_lines(
     )
 
 
+def _classify_diff_lines(diff_lines: list[str]) -> list[dict[str, Any]]:
+    """Turn ``unified_diff`` output into a list of typed entries.
+
+    Each entry is a dict with:
+
+    * ``kind``: ``"hunk"`` / ``"marker"`` / ``"add"`` / ``"del"`` /
+      ``"context"``.
+    * ``body``: the line content with the leading prefix stripped
+      (``""`` for hunk / marker kinds; the code / text for the others).
+    * ``raw``: the original diff line (kept for hunk / marker rendering).
+
+    The body rows preserve their original order so the renderer can
+    walk them once for line numbering and once for output. Hunk and
+    marker entries are skipped by the line counter (they don't
+    correspond to source rows).
+    """
+    entries: list[dict[str, Any]] = []
+    for line in diff_lines:
+        if line.startswith("@@"):
+            entries.append({"kind": "hunk", "raw": line, "body": ""})
+        elif line.startswith("+++") or line.startswith("---"):
+            entries.append({"kind": "marker", "raw": line, "body": ""})
+        elif line.startswith("+"):
+            entries.append({"kind": "add", "raw": line, "body": line[1:]})
+        elif line.startswith("-"):
+            entries.append({"kind": "del", "raw": line, "body": line[1:]})
+        else:
+            # Context line — leading space (or empty string for a
+            # truly-blank diff row). Strip the leading space so the
+            # rendered body lines up with the add / del bodies.
+            body = line[1:] if line.startswith(" ") else line
+            entries.append({"kind": "context", "raw": line, "body": body})
+    return entries
+
+
+def _assign_line_numbers(entries: list[dict[str, Any]]) -> None:
+    """Populate ``line_num`` on each entry using CC's row-counter rule.
+
+    Mirrors CC's ``numberDiffLines`` (``Fallback.tsx:423``): a single
+    counter starts at ``1`` and increments on every context / add row.
+    Remove rows carry the *next* add / context row's number (so the
+    paired +/- pair visually share a number) — we follow CC's behaviour
+    exactly by incrementing the counter on remove rows *after* assigning
+    them the pre-increment value. This produces e.g.::
+
+        5   ctx
+        5 - old
+        5 + new
+        6   ctx
+
+    which is what CC renders.
+    """
+    counter = 1
+    for entry in entries:
+        kind = entry["kind"]
+        if kind in ("hunk", "marker"):
+            entry["line_num"] = None
+            continue
+        if kind == "del":
+            entry["line_num"] = counter
+            counter += 1
+        elif kind in ("add", "context"):
+            entry["line_num"] = counter
+            counter += 1
+        else:
+            entry["line_num"] = None
+
+
+def _compute_gutter_width(entries: list[dict[str, Any]]) -> int:
+    """Return the character width the line-number column needs.
+
+    CC's ``maxWidth`` is ``maxLineNumber.toString().length + 1``. We
+    use the same ``+1`` so the gutter always has at least one trailing
+    space and the sigil has room to breathe. Returns ``0`` when there
+    are no numbered rows (so the renderer can skip the gutter entirely).
+    """
+    max_num = 0
+    for entry in entries:
+        n = entry.get("line_num")
+        if isinstance(n, int) and n > max_num:
+            max_num = n
+    if max_num <= 0:
+        return 0
+    return len(str(max_num)) + 1
+
+
+def _pair_inline_highlights(
+    entries: list[dict[str, Any]],
+    *,
+    enabled: bool,
+) -> None:
+    """Attach ``inline_parts`` to paired add / del entries.
+
+    Walks the body entries and groups adjacent ``del`` + ``add`` blocks.
+    For each ``(del, add)`` pair runs :func:`_word_diff_parts` on their
+    bodies; when the change ratio is below threshold both entries get
+    their respective inline token lists:
+
+    * The ``del`` entry's ``inline_parts`` marks *removed* tokens
+      (changes from the old line's perspective).
+    * The ``add`` entry's ``inline_parts`` marks *added* tokens.
+
+    ``inline_parts`` is set to ``None`` when:
+
+    * ``enabled`` is ``False`` (caller didn't opt in).
+    * The pair was rejected by the change-ratio threshold.
+    * The entry is a context / hunk / marker row (never paired).
+
+    The renderer treats ``None`` as "fall back to whole-line colour".
+    """
+    if not enabled:
+        for entry in entries:
+            entry["inline_parts"] = None
+        return
+
+    # Initialize all entries to "no inline highlight" so unpaired rows
+    # fall back to whole-line colouring.
+    for entry in entries:
+        entry["inline_parts"] = None
+
+    i = 0
+    n = len(entries)
+    while i < n:
+        entry = entries[i]
+        if entry["kind"] != "del":
+            i += 1
+            continue
+        # Collect a run of consecutive del rows.
+        del_run_start = i
+        while i < n and entries[i]["kind"] == "del":
+            i += 1
+        del_run_end = i
+        # Collect the following run of consecutive add rows.
+        add_run_start = i
+        while i < n and entries[i]["kind"] == "add":
+            i += 1
+        add_run_end = i
+        del_run = entries[del_run_start:del_run_end]
+        add_run = entries[add_run_start:add_run_end]
+        if not del_run or not add_run:
+            continue
+        # Pair them up one-to-one; excess rows on either side keep
+        # ``inline_parts = None``. Mirrors CC's ``pairCount = min(...)``
+        # behaviour.
+        pair_count = min(len(del_run), len(add_run))
+        for k in range(pair_count):
+            del_entry = del_run[k]
+            add_entry = add_run[k]
+            # ``_word_diff_parts`` returns parts for the *new* line.
+            # We run it once and derive the old-line view from the
+            # inverse direction so the two rows agree on which tokens
+            # changed.
+            new_result = _word_diff_parts(
+                del_entry["body"], add_entry["body"]
+            )
+            old_result = _word_diff_parts(
+                add_entry["body"], del_entry["body"]
+            )
+            if new_result is None or old_result is None:
+                continue
+            add_entry["inline_parts"] = new_result[0]
+            del_entry["inline_parts"] = old_result[0]
+
+
 def _render_diff(
     before: str,
     after: str,
@@ -259,6 +727,11 @@ def _render_diff(
     highlight_theme: dict[str, str | None] | None,
     add_bg_color: str | None = None,
     del_bg_color: str | None = None,
+    line_numbers: bool = False,
+    inline_highlight: bool = False,
+    full_width_bg: bool = False,
+    inline_add_color: str = "greenBright",
+    inline_del_color: str = "redBright",
 ) -> list[Element]:
     """Compute the diff and turn it into a list of row elements.
 
@@ -303,39 +776,76 @@ def _render_diff(
         elements.append(Text(" ".join(header_parts), bold=True, color="yellow"))
         elements.append(Divider())
 
+    # CC-alignment pre-processing. The classification + numbering +
+    # pairing passes are cheap (single linear scan each); we run them
+    # unconditionally so the renderer can branch on entry metadata
+    # instead of recomputing per row. When no CC features are enabled
+    # the gutter width is 0, the inline_parts dict key is set to None,
+    # and the renderer falls back to :func:`_render_diff_line`.
+    entries = _classify_diff_lines(diff_lines)
+    _assign_line_numbers(entries)
+    _pair_inline_highlights(entries, enabled=inline_highlight)
+    gutter_width = _compute_gutter_width(entries) if line_numbers else 0
+    cc_mode = bool(
+        line_numbers or inline_highlight or (full_width_bg and (add_bg_color or del_bg_color))
+    )
+
     # Body: one Element per diff line.
-    for line in diff_lines:
-        if line.startswith("@@"):
-            # Hunk header — always rendered in hunk_color, bold so it
-            # stands out from the surrounding diff lines.
-            elements.append(Text(line, color=hunk_color, bold=True))
-        elif line.startswith("+++") or line.startswith("---"):
-            # File markers only appear when show_header is on (we pass
-            # empty filenames to difflib otherwise). Rendered dim so
-            # they read as metadata, not content.
-            elements.append(Text(line, dimColor=True))
-        elif line.startswith("+"):
+    for entry in entries:
+        kind = entry["kind"]
+        raw = entry["raw"]
+        if kind == "hunk":
+            elements.append(Text(raw, color=hunk_color, bold=True))
+            continue
+        if kind == "marker":
+            elements.append(Text(raw, dimColor=True))
+            continue
+
+        body = entry["body"]
+        if kind == "add":
+            color = add_color
+            bg = add_bg_color
+            sigil = "+"
+            inline_color = inline_add_color
+        elif kind == "del":
+            color = del_color
+            bg = del_bg_color
+            sigil = "-"
+            inline_color = inline_del_color
+        else:  # context
+            color = context_color or ""
+            bg = None
+            sigil = " "
+            inline_color = ""
+
+        if cc_mode:
             elements.append(
-                _render_diff_line(
-                    line,
-                    color=add_color,
-                    language=language,
-                    prefix="+",
-                    use_highlight=use_highlight,
-                    theme=highlight_theme,
-                    bg_color=add_bg_color,
+                _render_diff_row_cc(
+                    body=body,
+                    sigil=sigil,
+                    base_color=color,
+                    inline_parts=entry.get("inline_parts"),
+                    inline_color=inline_color,
+                    bg_color=bg,
+                    full_width_bg=full_width_bg,
+                    line_num=entry.get("line_num"),
+                    gutter_width=gutter_width,
                 )
             )
-        elif line.startswith("-"):
+            continue
+
+        # Legacy fast path — no CC features requested. Reuses the
+        # pre-CC renderer so byte-for-byte output stays identical.
+        if kind == "add" or kind == "del":
             elements.append(
                 _render_diff_line(
-                    line,
-                    color=del_color,
+                    raw,
+                    color=color,
                     language=language,
-                    prefix="-",
+                    prefix=sigil,
                     use_highlight=use_highlight,
                     theme=highlight_theme,
-                    bg_color=del_bg_color,
+                    bg_color=bg,
                 )
             )
         else:
@@ -343,7 +853,7 @@ def _render_diff(
             # terminal default unless ``context_color`` is set. Empty
             # diff lines (``""``) come from blank source rows; we still
             # emit a Text so the row count matches the diff.
-            elements.append(Text(line, color=context_color))
+            elements.append(Text(raw, color=context_color))
 
     return elements
 
@@ -391,6 +901,11 @@ def _DiffImpl(**props: Any) -> Element:
     highlight_theme: dict[str, str | None] | None = props["highlight_theme"]
     add_bg_color: str | None = props.get("add_bg_color")
     del_bg_color: str | None = props.get("del_bg_color")
+    line_numbers: bool = props.get("line_numbers", False)
+    inline_highlight: bool = props.get("inline_highlight", False)
+    full_width_bg: bool = props.get("full_width_bg", False)
+    inline_add_color: str = props.get("inline_add_color", "greenBright")
+    inline_del_color: str = props.get("inline_del_color", "redBright")
     box_props: dict[str, Any] = props["box_props"]
 
     from ink.core.reconciler import Reconciler
@@ -418,6 +933,11 @@ def _DiffImpl(**props: Any) -> Element:
             highlight_theme=highlight_theme,
             add_bg_color=add_bg_color,
             del_bg_color=del_bg_color,
+            line_numbers=line_numbers,
+            inline_highlight=inline_highlight,
+            full_width_bg=full_width_bg,
+            inline_add_color=inline_add_color,
+            inline_del_color=inline_del_color,
         )
         if not elements:
             return ""
@@ -467,6 +987,11 @@ def StructuredDiff(
     context_color: str | None = None,
     add_bg_color: str | None = None,
     del_bg_color: str | None = None,
+    line_numbers: bool = False,
+    inline_highlight: bool = False,
+    full_width_bg: bool = False,
+    inline_add_color: str = "greenBright",
+    inline_del_color: str = "redBright",
     theme: dict[str, str | None] | None = None,
     **box_props: Any,
 ) -> Element:
@@ -528,6 +1053,35 @@ def StructuredDiff(
         Optional background colour spec for ``-`` lines. Same
         semantics as ``add_bg_color`` but applied to deletion rows.
         Recommended CC-aligned value: ``"rgb(74,32,32)"`` (dim red).
+    line_numbers:
+        When ``True``, prefix each body row with a CC-style line-number
+        gutter ``<padded_num><sigil>`` (e.g. ``" 5+"``). The number is
+        a row counter that increments on every context / add / del row
+        — mirrors CC's ``numberDiffLines`` (``Fallback.tsx:423``).
+        Defaults to ``False`` for backward compatibility. Has no effect
+        on hunk / file-marker rows.
+    inline_highlight:
+        When ``True``, pair adjacent ``-`` / ``+`` lines and run
+        :class:`difflib.SequenceMatcher` on their whitespace tokens.
+        Changed tokens are rendered in the brighter
+        ``inline_add_color`` / ``inline_del_color``; unchanged tokens
+        inherit the row's diff colour. Lines whose change ratio exceeds
+        CC's ``0.4`` threshold fall back to whole-line colouring.
+        Defaults to ``False`` for backward compatibility.
+    full_width_bg:
+        When ``True`` (and ``add_bg_color`` / ``del_bg_color`` is set),
+        set ``flushBackgroundToWidth=True`` on the outer Box of each
+        add / del row so the per-row colour band spans edge-to-edge
+        across the terminal width. Defaults to ``False`` for backward
+        compatibility.
+    inline_add_color:
+        Brighter colour applied to changed tokens on ``+`` rows when
+        ``inline_highlight=True``. Defaults to ``"greenBright"`` (CC's
+        ``diffAddedWord`` semantics).
+    inline_del_color:
+        Brighter colour applied to changed tokens on ``-`` rows when
+        ``inline_highlight=True``. Defaults to ``"redBright"`` (CC's
+        ``diffRemovedWord`` semantics).
     theme:
         Optional Pygments token → colour mapping forwarded verbatim to
         :func:`HighlightedCode` when highlighting is on. ``None`` lets
@@ -561,6 +1115,18 @@ def StructuredDiff(
         before_sig = signal(before_text)
         after_sig = signal(after_text)
         StructuredDiff(before_sig, after_sig, language="python")
+
+    CC-aligned (all new props on)::
+
+        StructuredDiff(
+            before, after,
+            language="python",
+            line_numbers=True,
+            inline_highlight=True,
+            full_width_bg=True,
+            add_bg_color="rgb(30,70,32)",
+            del_bg_color="rgb(74,32,32)",
+        )
     """
     # Static fast path: both sources plain strings. No function
     # component, no hooks, no live render pipeline required. This is
@@ -581,6 +1147,11 @@ def StructuredDiff(
             highlight_theme=theme,
             add_bg_color=add_bg_color,
             del_bg_color=del_bg_color,
+            line_numbers=line_numbers,
+            inline_highlight=inline_highlight,
+            full_width_bg=full_width_bg,
+            inline_add_color=inline_add_color,
+            inline_del_color=inline_del_color,
         )
         box_props = dict(box_props)
         box_props.pop("flexDirection", None)
@@ -605,5 +1176,10 @@ def StructuredDiff(
         highlight_theme=theme,
         add_bg_color=add_bg_color,
         del_bg_color=del_bg_color,
+        line_numbers=line_numbers,
+        inline_highlight=inline_highlight,
+        full_width_bg=full_width_bg,
+        inline_add_color=inline_add_color,
+        inline_del_color=inline_del_color,
         box_props=box_props,
     )
