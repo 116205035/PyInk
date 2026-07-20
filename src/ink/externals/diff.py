@@ -866,24 +866,35 @@ def _classify_diff_lines(diff_lines: list[str]) -> list[dict[str, Any]]:
     return entries
 
 
-def _assign_line_numbers(entries: list[dict[str, Any]]) -> None:
+def _assign_line_numbers(
+    entries: list[dict[str, Any]],
+    *,
+    start_line: int = 1,
+) -> None:
     """Populate ``line_num`` on each entry using CC's row-counter rule.
 
     Mirrors CC's ``numberDiffLines`` (``Fallback.tsx:423``): a single
-    counter starts at ``1`` and increments on every context / add row.
-    Remove rows carry the *next* add / context row's number (so the
-    paired +/- pair visually share a number) — we follow CC's behaviour
-    exactly by incrementing the counter on remove rows *after* assigning
-    them the pre-increment value. This produces e.g.::
+    counter starts at ``1`` (or ``start_line`` when the caller knows the
+    real 1-indexed source-file line where the diff begins) and
+    increments on every context / add row. Remove rows carry the *next*
+    add / context row's number (so the paired +/- pair visually share a
+    number) — we follow CC's behaviour exactly by incrementing the
+    counter on remove rows *after* assigning them the pre-increment
+    value. This produces e.g. (with ``start_line=5``)::
 
         5   ctx
         5 - old
         5 + new
         6   ctx
 
-    which is what CC renders.
+    which is what CC renders. ``start_line`` lets callers that know the
+    real source line where the diff hunk starts (Jarvis's Edit tool
+    records this in ``ToolResult.metadata["start_line"]``) emit
+    file-accurate gutter numbers instead of the snippet-relative 1, 2,
+    3, … sequence. Default ``1`` preserves backward compatibility for
+    callers that don't care about real line numbers.
     """
-    counter = 1
+    counter = max(1, int(start_line))
     for entry in entries:
         kind = entry["kind"]
         if kind in ("hunk", "marker"):
@@ -1020,6 +1031,7 @@ def _render_diff(
     indent: str = "",
     first_row_prefix: str = "",
     highlight_removed: bool = True,
+    start_line: int = 1,
 ) -> list[Element]:
     """Compute the diff and turn it into a list of row elements.
 
@@ -1083,7 +1095,7 @@ def _render_diff(
     # the gutter width is 0, the inline_parts dict key is set to None,
     # and the renderer falls back to :func:`_render_diff_line`.
     entries = _classify_diff_lines(diff_lines)
-    _assign_line_numbers(entries)
+    _assign_line_numbers(entries, start_line=start_line)
     _pair_inline_highlights(entries, enabled=inline_highlight)
     gutter_width = _compute_gutter_width(entries) if line_numbers else 0
     cc_mode = bool(
@@ -1249,6 +1261,7 @@ def _DiffImpl(**props: Any) -> Element:
     indent: str = props.get("indent", "")
     first_row_prefix: str = props.get("first_row_prefix", "")
     highlight_removed: bool = props.get("highlight_removed", True)
+    start_line: int = props.get("start_line", 1)
     box_props: dict[str, Any] = props["box_props"]
 
     from ink.core.reconciler import Reconciler
@@ -1285,6 +1298,7 @@ def _DiffImpl(**props: Any) -> Element:
             indent=indent,
             first_row_prefix=first_row_prefix,
             highlight_removed=highlight_removed,
+            start_line=start_line,
         )
         if not elements:
             return ""
@@ -1343,6 +1357,7 @@ def StructuredDiff(
     indent: str = "",
     first_row_prefix: str = "",
     highlight_removed: bool = True,
+    start_line: int = 1,
     theme: dict[str, str | None] | None = None,
     **box_props: Any,
 ) -> Element:
@@ -1477,6 +1492,18 @@ def StructuredDiff(
         (``line_numbers`` / ``inline_highlight`` / ``full_width_bg``)
         already emits bodies as plain coloured spans without Pygments
         tokenisation.
+    start_line:
+        1-indexed source-file line number where the diff begins. Used
+        as the starting value of the line-number counter when
+        ``line_numbers=True`` so the gutter shows real source-file
+        lines instead of the snippet-relative 1, 2, 3, … sequence.
+        Default ``1`` preserves backward compatibility (callers that
+        don't know the real file line render snippet-relative numbers).
+        NB: only meaningful when ``line_numbers=True`` — without the
+        gutter the prop has no visible effect. The caller (Jarvis's
+        Edit / Write tool) records this on ``ToolResult.metadata``
+        under ``start_line`` by locating where ``old_string`` /
+        ``new_string`` / inserted content starts in the original file.
     theme:
         Optional Pygments token → colour mapping forwarded verbatim to
         :func:`HighlightedCode` when highlighting is on. ``None`` lets
@@ -1551,6 +1578,7 @@ def StructuredDiff(
             indent=indent,
             first_row_prefix=first_row_prefix,
             highlight_removed=highlight_removed,
+            start_line=start_line,
         )
         box_props = dict(box_props)
         box_props.pop("flexDirection", None)
@@ -1584,5 +1612,6 @@ def StructuredDiff(
         indent=indent,
         first_row_prefix=first_row_prefix,
         highlight_removed=highlight_removed,
+        start_line=start_line,
         box_props=box_props,
     )

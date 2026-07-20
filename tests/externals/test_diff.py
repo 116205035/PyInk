@@ -1698,3 +1698,115 @@ def test_full_width_bg_off_does_not_set_per_leaf_flush() -> None:
         f"expected 0 leaves with flushBackgroundToWidth when full_width_bg=False, "
         f"got {leaves_with_flush}"
     )
+
+
+# ---------------------------------------------------------------------------
+# start_line (07-20-tool-message-rendering-polish follow-up — real file line numbers)
+# ---------------------------------------------------------------------------
+
+
+def test_start_line_offsets_gutter_numbers() -> None:
+    """``start_line=N`` shifts every body row's gutter number by ``N-1``.
+
+    When the caller knows the real source-file line where the diff
+    begins (e.g. Jarvis's Edit tool records it from ``content.index(
+    old_string)``), the gutter should show those file-accurate numbers
+    instead of the snippet-relative 1, 2, 3, … sequence. For a 2-row
+    diff starting at line 50 the rendered gutter is ``50`` / ``51``,
+    not ``1`` / ``2``.
+    """
+    before = "alpha\nbeta\ngamma"
+    after = "alpha\nBETA\ngamma"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            line_numbers=True,
+            start_line=50,
+        )
+    )
+    # The first body row (context "alpha") should now carry gutter "50"
+    # instead of "1". With a 2-digit max line (51 → width 3 per CC's
+    # ``len(str(max))+1`` rule) the gutter is right-aligned to width 3:
+    # ``" 50 "`` (space pad + 50 + space sigil). We check the bare
+    # substring so the assertion is robust to ANSI colour codes.
+    assert " 50 alpha" in out or "50 alpha" in out
+    # The default-counter value ``1`` must NOT appear before ``alpha``
+    # when start_line is shifted — defensive against a regression that
+    # ignores the prop entirely.
+    import re
+
+    assert re.search(r"\b1 alpha\b", out) is None
+
+
+def test_start_line_default_1() -> None:
+    """Without ``start_line`` the counter starts at 1 (backward compat).
+
+    Existing callers that don't pass ``start_line`` must see the same
+    gutter numbers as before — the new prop defaults to ``1`` and the
+    counter increments identically.
+    """
+    before = "alpha\nbeta\ngamma"
+    after = "alpha\nBETA\ngamma"
+    out_default = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            line_numbers=True,
+        )
+    )
+    out_explicit = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            line_numbers=True,
+            start_line=1,
+        )
+    )
+    # The gutter numbering should be identical — both should contain
+    # ``1 alpha`` (the first body row's gutter). Strip ANSI codes for a
+    # robust comparison.
+    def _strip(s: str) -> str:
+        out = s
+        for code in (f"{ESC}[0m", f"{ESC}[32m", f"{ESC}[31m", f"{ESC}[1m"):
+            out = out.replace(code, "")
+        return out
+
+    assert "1 alpha" in _strip(out_default)
+    assert "1 alpha" in _strip(out_explicit)
+    assert _strip(out_default) == _strip(out_explicit)
+
+
+def test_assign_line_numbers_with_start_line() -> None:
+    """``_assign_line_numbers(start_line=N)`` shifts every assigned number.
+
+    Unit-level guard for the counter logic: passing ``start_line=50``
+    should produce ``[None, 50, 51, 52, 53]`` for the same diff that
+    without the prop produces ``[None, 1, 2, 3, 4]``.
+    """
+    from ink.externals.diff import _assign_line_numbers, _classify_diff_lines
+
+    diff_lines = ["@@ -1,3 +1,3 @@", " ctx1", "-del", "+add", " ctx2"]
+    entries = _classify_diff_lines(diff_lines)
+    _assign_line_numbers(entries, start_line=50)
+    nums = [e.get("line_num") for e in entries]
+    assert nums == [None, 50, 51, 52, 53]
+
+
+def test_assign_line_numbers_start_line_below_1_clamps() -> None:
+    """``start_line`` below 1 clamps to 1 — defensive against bad callers.
+
+    ``max(1, int(start_line))`` guards against an off-by-one or a
+    malicious caller passing ``0`` / negative — the gutter would
+    otherwise render ``0`` / ``-1`` which is meaningless to the reader.
+    """
+    from ink.externals.diff import _assign_line_numbers, _classify_diff_lines
+
+    diff_lines = [" ctx1", "-del", "+add"]
+    entries = _classify_diff_lines(diff_lines)
+    _assign_line_numbers(entries, start_line=0)
+    nums = [e.get("line_num") for e in entries]
+    assert nums == [1, 2, 3]
