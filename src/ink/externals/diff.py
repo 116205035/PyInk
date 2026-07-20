@@ -422,6 +422,7 @@ def _render_diff_row_cc(
     full_width_bg: bool,
     line_num: int | None,
     gutter_width: int,
+    indent: str = "",
 ) -> Element:
     """Render a single add / del / context row in CC-alignment mode.
 
@@ -463,6 +464,12 @@ def _render_diff_row_cc(
     gutter_width:
         Width (in characters) the line-number column is right-aligned
         to. ``0`` disables the gutter entirely.
+    indent:
+        Optional literal string prepended to the row (default ``""``).
+        Used by callers that embed the diff under a parent glyph (e.g.
+        Jarvis's archived Edit row: ``⎿`` on the first visual line +
+        matching indent on every body row so the diff lines up under
+        the gutter).
 
     Returns
     -------
@@ -471,6 +478,10 @@ def _render_diff_row_cc(
         CC features are active for this row.
     """
     children: list[Element] = []
+
+    # Indent prefix (parent gutter alignment). Empty by default.
+    if indent:
+        children.append(Text(indent))
 
     # Gutter (line number + sigil). Width 0 means caller opted out.
     if gutter_width > 0:
@@ -732,6 +743,8 @@ def _render_diff(
     full_width_bg: bool = False,
     inline_add_color: str = "greenBright",
     inline_del_color: str = "redBright",
+    show_markers: bool = True,
+    indent: str = "",
 ) -> list[Element]:
     """Compute the diff and turn it into a list of row elements.
 
@@ -746,6 +759,18 @@ def _render_diff(
         show_header=show_header,
         context_lines=context_lines,
     )
+    if not show_markers:
+        # 07-20-tool-message-rendering-polish: skip ``---`` / ``+++``
+        # file-marker lines AND ``@@ ... @@`` hunk headers entirely.
+        # Mirrors Claude Code's ``StructuredDiff`` (``FileEditToolDiff``
+        # never renders the raw markers — only the body rows). We keep
+        # the body lines (+/-/space) so the diff content stays intact.
+        diff_lines = [
+            ln for ln in diff_lines
+            if not ln.startswith("---")
+            and not ln.startswith("+++")
+            and not ln.startswith("@@")
+        ]
 
     # Per-render highlight probe: ``language="text"`` always skips
     # highlighting regardless of pygments availability (mirrors
@@ -830,30 +855,44 @@ def _render_diff(
                     full_width_bg=full_width_bg,
                     line_num=entry.get("line_num"),
                     gutter_width=gutter_width,
+                    indent=indent,
                 )
             )
             continue
 
         # Legacy fast path — no CC features requested. Reuses the
         # pre-CC renderer so byte-for-byte output stays identical.
+        # When ``indent`` is set we wrap the row in an indented Box so
+        # the body lands under a parent gutter (Jarvis's archived
+        # Edit row pattern).
         if kind == "add" or kind == "del":
-            elements.append(
-                _render_diff_line(
-                    raw,
-                    color=color,
-                    language=language,
-                    prefix=sigil,
-                    use_highlight=use_highlight,
-                    theme=highlight_theme,
-                    bg_color=bg,
-                )
+            line_el = _render_diff_line(
+                raw,
+                color=color,
+                language=language,
+                prefix=sigil,
+                use_highlight=use_highlight,
+                theme=highlight_theme,
+                bg_color=bg,
             )
+            if indent:
+                elements.append(
+                    Box(Text(indent), line_el, flexDirection="row")
+                )
+            else:
+                elements.append(line_el)
         else:
             # Context line (leading space) or empty line — inherit the
             # terminal default unless ``context_color`` is set. Empty
             # diff lines (``""``) come from blank source rows; we still
             # emit a Text so the row count matches the diff.
-            elements.append(Text(raw, color=context_color))
+            ctx_el = Text(raw, color=context_color)
+            if indent:
+                elements.append(
+                    Box(Text(indent), ctx_el, flexDirection="row")
+                )
+            else:
+                elements.append(ctx_el)
 
     return elements
 
@@ -906,6 +945,8 @@ def _DiffImpl(**props: Any) -> Element:
     full_width_bg: bool = props.get("full_width_bg", False)
     inline_add_color: str = props.get("inline_add_color", "greenBright")
     inline_del_color: str = props.get("inline_del_color", "redBright")
+    show_markers: bool = props.get("show_markers", True)
+    indent: str = props.get("indent", "")
     box_props: dict[str, Any] = props["box_props"]
 
     from ink.core.reconciler import Reconciler
@@ -938,6 +979,8 @@ def _DiffImpl(**props: Any) -> Element:
             full_width_bg=full_width_bg,
             inline_add_color=inline_add_color,
             inline_del_color=inline_del_color,
+            show_markers=show_markers,
+            indent=indent,
         )
         if not elements:
             return ""
@@ -992,6 +1035,8 @@ def StructuredDiff(
     full_width_bg: bool = False,
     inline_add_color: str = "greenBright",
     inline_del_color: str = "redBright",
+    show_markers: bool = True,
+    indent: str = "",
     theme: dict[str, str | None] | None = None,
     **box_props: Any,
 ) -> Element:
@@ -1082,6 +1127,24 @@ def StructuredDiff(
         Brighter colour applied to changed tokens on ``-`` rows when
         ``inline_highlight=True``. Defaults to ``"redBright"`` (CC's
         ``diffRemovedWord`` semantics).
+    show_markers:
+        When ``True`` (default), render ``---`` / ``+++`` file-marker
+        lines and ``@@ ... @@`` hunk headers from the underlying
+        :func:`difflib.unified_diff` output. When ``False``, skip both
+        — keeping only the ``+`` / ``-`` / context body rows. This
+        mirrors Claude Code's ``StructuredDiff`` (``FileEditToolDiff``
+        never surfaces the raw markers). Defaults to ``True`` for
+        backward compatibility; downstream callers that want CC-parity
+        pass ``show_header=False, show_markers=False`` together.
+    indent:
+        Optional literal string prepended to every body row (default
+        ``""``). Used by callers that embed the diff under a parent
+        glyph (e.g. Jarvis's archived Edit row: ``⎿`` on the first
+        visual line + matching indent on every body row so the diff
+        lines up under the gutter). Hunk and marker rows are not
+        prefixed (they're already filtered out when ``show_markers``
+        is ``False``); the indent only applies to ``+`` / ``-`` /
+        context body rows.
     theme:
         Optional Pygments token → colour mapping forwarded verbatim to
         :func:`HighlightedCode` when highlighting is on. ``None`` lets
@@ -1152,6 +1215,8 @@ def StructuredDiff(
             full_width_bg=full_width_bg,
             inline_add_color=inline_add_color,
             inline_del_color=inline_del_color,
+            show_markers=show_markers,
+            indent=indent,
         )
         box_props = dict(box_props)
         box_props.pop("flexDirection", None)
@@ -1181,5 +1246,7 @@ def StructuredDiff(
         full_width_bg=full_width_bg,
         inline_add_color=inline_add_color,
         inline_del_color=inline_del_color,
+        show_markers=show_markers,
+        indent=indent,
         box_props=box_props,
     )

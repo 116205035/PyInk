@@ -287,6 +287,7 @@ def _build_line_rows(
     rows: list[list[Element]],
     *,
     line_numbers: bool,
+    indent: str = "",
 ) -> list[Element]:
     """Wrap each per-line token list in a row ``Box``.
 
@@ -294,12 +295,29 @@ def _build_line_rows(
     right-aligned gutter. Numbering starts at 1 and the gutter is
     zero-padded to the width of the last line number so columns line
     up regardless of how many lines the snippet has.
+
+    With a non-empty ``indent``, every row is additionally prefixed
+    with a plain ``Text`` leaf carrying that literal string. This lets
+    a caller embed the code block under a ``⎿`` gutter (Jarvis's
+    Edit/Write archived-row rendering): the first visual line shows
+    the gutter glyph, the continuation lines line up under the body
+    via the indent prefix. Mirrors Claude Code's ``MessageResponse``
+    indentation pattern without nesting an extra Box layer.
     """
+    indent_leaf = Text(indent) if indent else None
     if not line_numbers:
-        return [
-            Box(*tokens, flexDirection="row") if tokens else Box(flexDirection="row")
-            for tokens in rows
-        ]
+        out_no_num: list[Element] = []
+        for tokens in rows:
+            children: list[Element] = []
+            if indent_leaf is not None:
+                children.append(indent_leaf)
+            children.extend(tokens)
+            out_no_num.append(
+                Box(*children, flexDirection="row")
+                if children
+                else Box(flexDirection="row")
+            )
+        return out_no_num
     total = len(rows)
     # Width of the largest line number, e.g. ``3`` for a 100-line
     # snippet. Plus a trailing space for visual separation from the
@@ -308,7 +326,12 @@ def _build_line_rows(
     out: list[Element] = []
     for i, tokens in enumerate(rows, start=1):
         gutter = Text(f"{i:>{gutter_width}} ", dimColor=True)
-        out.append(Box(gutter, *tokens, flexDirection="row"))
+        row_children: list[Element] = []
+        if indent_leaf is not None:
+            row_children.append(indent_leaf)
+        row_children.append(gutter)
+        row_children.extend(tokens)
+        out.append(Box(*row_children, flexDirection="row"))
     return out
 
 
@@ -318,6 +341,7 @@ def HighlightedCode(
     language: str = "text",
     theme: dict[str, str | None] | None = None,
     line_numbers: bool = False,
+    indent: str = "",
     **box_props: Any,
 ) -> Element:
     """Render a code string with Pygments-driven syntax highlighting.
@@ -348,6 +372,12 @@ def HighlightedCode(
         When ``True``, prepend a dim right-aligned line-number gutter
         to each row. The gutter width is sized to the largest line
         number so columns line up regardless of snippet length.
+    indent:
+        Optional literal string prepended to every row (default ``""``).
+        Used by callers that embed the code block under a parent glyph
+        (e.g. Jarvis's archived Write row: ``⎿`` on the first visual
+        line + 5-space indent on continuation lines so the code body
+        lines up under the gutter).
     **box_props:
         Forwarded to the outer ``Box`` container (``flexDirection`` is
         always set to ``"column"`` and cannot be overridden — the
@@ -388,7 +418,9 @@ def HighlightedCode(
         # don't render a blank row at the bottom.
         if token_rows and code.endswith("\n"):
             token_rows.pop()
-        line_rows = _build_line_rows(token_rows, line_numbers=line_numbers)
+        line_rows = _build_line_rows(
+            token_rows, line_numbers=line_numbers, indent=indent
+        )
         box_props.pop("flexDirection", None)
         return Box(*line_rows, flexDirection="column", **box_props)
 
@@ -416,7 +448,9 @@ def HighlightedCode(
     # contributor to the Phase 3 "highlighted-code demo pins CPU" bug.
     tokens = _tokenize(code, language, pygments, get_lexer_by_name, guess_lexer)
     token_rows = _group_tokens_by_line(tokens, effective_theme)
-    line_rows = _build_line_rows(token_rows, line_numbers=line_numbers)
+    line_rows = _build_line_rows(
+        token_rows, line_numbers=line_numbers, indent=indent
+    )
 
     # A column of row Boxes; each row Box holds the inline tokens for
     # one source line. ``flexDirection="column"`` is forced here even

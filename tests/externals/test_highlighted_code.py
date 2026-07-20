@@ -444,6 +444,53 @@ def test_line_numbers_blank_lines_still_get_gutter() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Indent (parent-gutter alignment)
+# ---------------------------------------------------------------------------
+
+
+def test_indent_prefixes_every_row_without_line_numbers() -> None:
+    """``indent`` prepends a literal Text leaf to every row.
+
+    07-20-tool-message-rendering-polish: callers that embed the code
+    block under a parent ``⎿`` gutter (Jarvis's archived Write row)
+    pass ``indent="     "`` (5 spaces matching CC's ``MessageResponse``
+    gutter width) so continuation rows line up under the body.
+    """
+    out = _render(
+        HighlightedCode(
+            "a\nb\nc", language="text", indent="     "
+        )
+    )
+    lines = out.split("\n")
+    assert len(lines) == 3
+    for line in lines:
+        # Each line starts with the 5-space indent (no SGR wrap because
+        # plain text indent carries no styling).
+        assert line.startswith("     ")
+        # And the actual source char follows (after reset if any).
+        assert line.rstrip() in ("     a", "     b", "     c")
+
+
+def test_indent_combines_with_line_numbers() -> None:
+    """``indent`` precedes the line-number gutter when both are on."""
+    out = _render(
+        HighlightedCode(
+            "a\nb", language="text", line_numbers=True, indent="  "
+        )
+    )
+    lines = out.split("\n")
+    # Indent first, then the dim gutter, then the body.
+    assert lines[0].startswith(f"  {ESC}[2m1 {ESC}[0m")
+    assert lines[1].startswith(f"  {ESC}[2m2 {ESC}[0m")
+
+
+def test_indent_empty_default_no_prefix() -> None:
+    """``indent=""`` (default) yields no prefix — backward compat."""
+    out = _render(HighlightedCode("a", language="text"))
+    assert out == "a"
+
+
+# ---------------------------------------------------------------------------
 # Multi-line code
 # ---------------------------------------------------------------------------
 

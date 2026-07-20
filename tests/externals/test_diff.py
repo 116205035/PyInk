@@ -246,6 +246,91 @@ def test_show_header_false_suppresses_header_and_divider() -> None:
     assert "+++ after" not in out
 
 
+def test_show_markers_false_suppresses_file_and_hunk_markers() -> None:
+    """``show_markers=False`` skips ``---`` / ``+++`` / ``@@`` rows.
+
+    07-20-tool-message-rendering-polish: Claude Code's
+    ``StructuredDiff`` never surfaces the raw difflib markers — only
+    the body rows. ``show_header=False`` alone is insufficient because
+    difflib still emits ``--- `` / ``+++ `` / ``@@ ... @@`` even with
+    empty filenames. ``show_markers=False`` post-filters those rows
+    so callers that want CC parity pass
+    ``show_header=False, show_markers=False`` together.
+    """
+    before = "a"
+    after = "b"
+    out = _render(
+        StructuredDiff(before, after, show_header=False, show_markers=False)
+    )
+    # File markers absent.
+    assert "--- " not in out
+    assert "+++ " not in out
+    # Hunk header absent.
+    assert "@@" not in out
+    # Body rows preserved.
+    assert "-a" in out
+    assert "+b" in out
+
+
+def test_show_markers_true_default_emits_markers() -> None:
+    """``show_markers=True`` (default) emits ``---`` / ``+++`` / ``@@``.
+
+    Backward-compat regression: existing callers that don't pass
+    ``show_markers`` continue to see the raw difflib markers.
+    """
+    before = "a"
+    after = "b"
+    out = _render(StructuredDiff(before, after, show_header=False))
+    assert "--- " in out
+    assert "+++ " in out
+    assert "@@" in out
+
+
+def test_indent_prefixes_every_body_row() -> None:
+    """``indent`` prepends a literal string to every body row.
+
+    07-20-tool-message-rendering-polish: callers that embed the diff
+    under a parent ``⎿`` gutter (Jarvis's archived Edit row) pass
+    ``indent="     "`` (5 spaces matching CC's ``MessageResponse``
+    gutter width) so the diff body lines up under the gutter.
+    """
+    before = "a"
+    after = "b"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            show_markers=False,
+            indent="     ",
+        )
+    )
+    lines = out.split("\n")
+    # Two body rows (del / add); each starts with the 5-space indent.
+    assert len(lines) == 2
+    for line in lines:
+        assert line.startswith("     ")
+    # The body characters (with their ANSI colour codes) appear after
+    # the indent. We check the substring rather than the suffix so the
+    # SGR reset (``\x1b[0m``) at the end of the line doesn't break the
+    # assertion.
+    assert any("-a" in line for line in lines)
+    assert any("+b" in line for line in lines)
+
+
+def test_indent_empty_default_no_prefix() -> None:
+    """``indent=""`` (default) yields no prefix — backward compat."""
+    before = "a"
+    after = "b"
+    out = _render(
+        StructuredDiff(before, after, show_header=False, show_markers=False)
+    )
+    lines = out.split("\n")
+    # No leading whitespace on either body row.
+    for line in lines:
+        assert not line.startswith(" ")
+
+
 def test_show_header_true_includes_changes_label() -> None:
     before = "a"
     after = "b"
