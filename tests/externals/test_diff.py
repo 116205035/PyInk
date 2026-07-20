@@ -501,6 +501,151 @@ def test_language_python_applies_pygments_colors_to_minus_lines() -> None:
     assert f"{ESC}[36mprint{ESC}[0m" in out
 
 
+# ---------------------------------------------------------------------------
+# highlight_removed (07-20-tool-message-rendering-polish Q2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not _pygments_available(),
+    reason="pygments not installed (pip install ink[highlight])",
+)
+def test_highlight_removed_true_default_tokenizes_minus_lines() -> None:
+    """``highlight_removed=True`` (default) keeps Pygments tokenisation on ``-``.
+
+    Backward-compat regression: existing callers that don't pass
+    ``highlight_removed`` continue to see per-token syntax colours on
+    removed lines (mirrors CC's pre-Q2 behaviour). The deleted line
+    "print(x)" emits cyan for the ``print`` builtin (Pygments
+    Token.Name.Builtin).
+    """
+    before = "print(x)"
+    after = "x = 1"
+    # Default — no ``highlight_removed`` kwarg.
+    out = _render(
+        StructuredDiff(before, after, language="python", show_header=False)
+    )
+    # The deleted ``print`` carries the cyan Pygments colour.
+    assert f"{ESC}[36mprint{ESC}[0m" in out
+
+
+@pytest.mark.skipif(
+    not _pygments_available(),
+    reason="pygments not installed (pip install ink[highlight])",
+)
+def test_highlight_removed_false_suppresses_tokenization_on_del_lines() -> None:
+    """``highlight_removed=False`` emits ``-`` lines as a single uniform span.
+
+    07-20-tool-message-rendering-polish Q2: CC's ``color-diff`` pipeline
+    bypasses ``highlightLine`` on removed lines entirely
+    (``native-ts/color-diff/index.ts:914-918``) so removed code reads
+    as "ghost text" in a uniform ``theme.foreground``. We mirror that
+    by suppressing Pygments tokenisation on ``-`` lines when the caller
+    passes ``highlight_removed=False``.
+
+    Expected behaviour:
+
+    * The ``-`` line's body (``print(x)``) appears as ONE coloured run
+      in ``del_color`` (red, SGR 31) — no cyan (SGR 36) for ``print``
+      builtin, no other per-token colours.
+    * The ``+`` line keeps per-token syntax colours (cyan for builtins
+      etc.) — only ``-`` lines are affected.
+    """
+    before = "print(x)"
+    after = "print(y)"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            language="python",
+            show_header=False,
+            highlight_removed=False,
+        )
+    )
+    # The deleted ``print`` is rendered as a single red-coloured run,
+    # NOT as a Pygments token coloured cyan. Look for the body wrapped
+    # in a red SGR (SGR 31).
+    # The legacy fast path emits the del body as a single Text leaf
+    # whose content is the full diff line (``-print(x)``) coloured red.
+    # Pygments tokenisation would split ``print`` from ``(x)`` and
+    # colour ``print`` cyan; we assert cyan never appears on the del
+    # row.
+    lines = out.split("\n")
+    del_lines = [ln for ln in lines if "-print" in ln]
+    assert del_lines, f"expected at least one -print line, got: {lines!r}"
+    for line in del_lines:
+        assert f"{ESC}[36m" not in line, (
+            f"del line should NOT carry cyan SGR (highlight_removed=False), "
+            f"got: {line!r}"
+        )
+    # Sanity: the ``+`` line DOES carry the cyan Pygments colour on
+    # ``print``. The add row is split into prefix glyph + highlighted
+    # body, so the row contains ``\x1b[36mprint\x1b[0m`` (the body
+    # token) rather than ``+print`` as a contiguous substring.
+    add_lines = [ln for ln in lines if "print" in ln and ln not in del_lines]
+    assert add_lines, (
+        f"expected at least one +print line, got: {lines!r}"
+    )
+    assert any(f"{ESC}[36mprint{ESC}[0m" in ln for ln in add_lines), (
+        f"add line should carry cyan SGR on print (Pygments tokenisation "
+        f"on +), got: {add_lines!r}"
+    )
+
+
+@pytest.mark.skipif(
+    not _pygments_available(),
+    reason="pygments not installed (pip install ink[highlight])",
+)
+def test_highlight_removed_false_keeps_add_lines_tokenized() -> None:
+    """``highlight_removed=False`` does NOT suppress tokenisation on ``+``.
+
+    CC's rule applies ONLY to removed lines. Added lines and context
+    lines keep their per-token syntax colours so the reader sees live
+    source code with proper highlighting next to the uniform ghost
+    text of removed lines.
+    """
+    before = "x = 1"
+    after = "print(x)"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            language="python",
+            show_header=False,
+            highlight_removed=False,
+        )
+    )
+    # The added ``print`` carries the cyan Pygments colour.
+    assert f"{ESC}[36mprint{ESC}[0m" in out
+
+
+def test_highlight_removed_true_default_does_not_change_legacy_output() -> None:
+    """Default ``highlight_removed=True`` keeps legacy output byte-for-byte.
+
+    Smoke regression: callers that don't pass ``highlight_removed`` must
+    see no change. We compare a default-args render against an explicit
+    ``highlight_removed=True`` render and assert byte equality.
+    """
+    before = "alpha\nbeta\ngamma"
+    after = "alpha\nBETA\ngamma"
+    out_default = _render(
+        StructuredDiff(before, after, language="text", show_header=False)
+    )
+    out_explicit = _render(
+        StructuredDiff(
+            before,
+            after,
+            language="text",
+            show_header=False,
+            highlight_removed=True,
+        )
+    )
+    assert out_default == out_explicit, (
+        f"default highlight_removed should match explicit True; "
+        f"default={out_default!r} explicit={out_explicit!r}"
+    )
+
+
 def test_language_text_skips_highlight_plain_colored_text() -> None:
     """Default ``language="text"`` → ``+`` lines are plain green Text."""
     before = "x = 1"

@@ -59,6 +59,17 @@ Three new optional props opt into Claude Code's visual signatures:
 
 All three default to ``False``; existing callers see no optical change.
 
+CC-alignment extension (07-20-tool-message-rendering-polish follow-up,
+Q2 — suppress syntax highlighting on removed lines):
+
+* ``highlight_removed`` controls whether Pygments tokenisation runs on
+  ``-`` lines in the legacy fast path. Defaults to ``True`` for backward
+  compatibility; pass ``False`` to emit ``-`` lines as a single uniform
+  span in ``del_color`` so removed code reads as "ghost text" while
+  added / context lines keep per-token syntax colours. Mirrors CC's
+  ``color-diff`` pipeline (``index.ts:914-918``) where removed lines
+  bypass ``highlightLine`` entirely.
+
 Colour note: the PRD's example theme spelled the dim colour
 ``"brightBlack"``; PyInk's named-colour table
 (see :data:`ink.render.ansi.NAMED_COLORS`) spells that ``"gray"`` /
@@ -1008,6 +1019,7 @@ def _render_diff(
     show_markers: bool = True,
     indent: str = "",
     first_row_prefix: str = "",
+    highlight_removed: bool = True,
 ) -> list[Element]:
     """Compute the diff and turn it into a list of row elements.
 
@@ -1142,14 +1154,24 @@ def _render_diff(
         # ``first_row_prefix`` is set) we wrap the row in a prefixed
         # Box so the body lands under a parent gutter (Jarvis's
         # archived Edit row pattern).
+        #
+        # 07-20-tool-message-rendering-polish (Q2): when
+        # ``highlight_removed=False`` and this is a ``-`` row, skip
+        # Pygments tokenisation so removed lines render as a uniform
+        # ``del_color`` span (CC's ``color-diff`` rule — removed lines
+        # bypass ``highlightLine`` entirely). ``+`` and context rows
+        # keep per-token syntax colours regardless. Default ``True``
+        # preserves backward compatibility.
         prefix = row_prefix if row_prefix else indent
         if kind == "add" or kind == "del":
+            suppress_highlight = kind == "del" and not highlight_removed
+            use_highlight_row = use_highlight and not suppress_highlight
             line_el = _render_diff_line(
                 raw,
                 color=color,
                 language=language,
                 prefix=sigil,
-                use_highlight=use_highlight,
+                use_highlight=use_highlight_row,
                 theme=highlight_theme,
                 bg_color=bg,
             )
@@ -1226,6 +1248,7 @@ def _DiffImpl(**props: Any) -> Element:
     show_markers: bool = props.get("show_markers", True)
     indent: str = props.get("indent", "")
     first_row_prefix: str = props.get("first_row_prefix", "")
+    highlight_removed: bool = props.get("highlight_removed", True)
     box_props: dict[str, Any] = props["box_props"]
 
     from ink.core.reconciler import Reconciler
@@ -1261,6 +1284,7 @@ def _DiffImpl(**props: Any) -> Element:
             show_markers=show_markers,
             indent=indent,
             first_row_prefix=first_row_prefix,
+            highlight_removed=highlight_removed,
         )
         if not elements:
             return ""
@@ -1318,6 +1342,7 @@ def StructuredDiff(
     show_markers: bool = True,
     indent: str = "",
     first_row_prefix: str = "",
+    highlight_removed: bool = True,
     theme: dict[str, str | None] | None = None,
     **box_props: Any,
 ) -> Element:
@@ -1438,6 +1463,20 @@ def StructuredDiff(
         under the glyph's column. Empty (default) preserves the
         legacy behaviour where every body row (including the first)
         uses ``indent``.
+    highlight_removed:
+        Controls whether Pygments tokenisation runs on ``-`` lines in
+        the legacy fast path (i.e. when no CC-features are enabled).
+        Defaults to ``True`` for backward compatibility — ``-`` lines
+        get per-token syntax colours just like ``+`` lines. Pass
+        ``False`` to emit ``-`` lines as a single uniform span in
+        ``del_color`` (CC's ``color-diff`` rule — removed lines bypass
+        ``highlightLine`` entirely, see CC's
+        ``native-ts/color-diff/index.ts:914-918``). ``+`` and context
+        rows keep per-token syntax colours regardless. NB: this prop
+        only affects the legacy fast path; the CC-mode path
+        (``line_numbers`` / ``inline_highlight`` / ``full_width_bg``)
+        already emits bodies as plain coloured spans without Pygments
+        tokenisation.
     theme:
         Optional Pygments token → colour mapping forwarded verbatim to
         :func:`HighlightedCode` when highlighting is on. ``None`` lets
@@ -1511,6 +1550,7 @@ def StructuredDiff(
             show_markers=show_markers,
             indent=indent,
             first_row_prefix=first_row_prefix,
+            highlight_removed=highlight_removed,
         )
         box_props = dict(box_props)
         box_props.pop("flexDirection", None)
@@ -1543,5 +1583,6 @@ def StructuredDiff(
         show_markers=show_markers,
         indent=indent,
         first_row_prefix=first_row_prefix,
+        highlight_removed=highlight_removed,
         box_props=box_props,
     )
