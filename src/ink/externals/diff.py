@@ -79,6 +79,8 @@ from ink.components.text import Text
 from ink.core.element import Element, create_element
 from ink.core.signal import Signal
 from ink.externals.divider import Divider
+from ink.layout._text_width_context import get_current_text_width
+from ink.render.ansi import _SGR_BOLD, _SGR_RESET, _sgr, parse_color
 
 __all__ = ["StructuredDiff"]
 
@@ -442,10 +444,29 @@ def _render_diff_row_cc(
     """Render a single add / del / context row in CC-alignment mode.
 
     Combines the optional line-number gutter, optional inline highlight,
-    and optional full-width background into a single row ``Box``. This
-    path is used when at least one of ``line_numbers`` /
+    and optional full-width background into a single row. This path is
+    used when at least one of ``line_numbers`` /
     ``inline_highlight`` / ``full_width_bg`` is enabled; the legacy
     :func:`_render_diff_line` fast path handles the no-CC-features case.
+
+    Two rendering strategies:
+
+    * **Full-width bg path** (``full_width_bg=True`` AND ``bg_color`` is
+      set): build the entire row as a SINGLE ``Text`` leaf whose
+      callable emits the row prefix + gutter + body + trailing space
+      pad as one string with embedded ANSI fg SGRs. The leaf carries
+      ``backgroundColor=bg_color`` + ``flushBackgroundToWidth=True`` so
+      the renderer's row-level bg painter opens the bg once at the
+      row's first cell and closes it after the last padded cell. This
+      is the ONLY way to get a true full-width bg band with per-token
+      fg highlight: PyInk's per-leaf ``apply_style`` always emits a
+      ``\\x1b[0m`` reset at the end of each styled Text leaf, which
+      kills the bg; concatenating multiple styled leaves therefore
+      breaks the band after the first leaf. The single-leaf approach
+      keeps the bg SGR open across the entire row.
+    * **Multi-leaf path** (no full-width bg): keep the historical
+      Box-of-Text-leaves shape so callers that opt out of the bg band
+      see no behavioural change.
 
     Parameters
     ----------
@@ -470,9 +491,8 @@ def _render_diff_row_cc(
     bg_color:
         Optional per-row background colour. Required for full-width bg.
     full_width_bg:
-        When ``True`` the outer Box carries
-        ``flushBackgroundToWidth=True`` so the bg spans the terminal
-        width.
+        When ``True`` (and ``bg_color`` is set) the row is rendered via
+        the single-Text-leaf path so the bg spans the terminal width.
     line_num:
         Optional 1-indexed row number rendered in the gutter.
         ``None`` suppresses the number (renders spaces).
@@ -496,9 +516,27 @@ def _render_diff_row_cc(
     Returns
     -------
     Element
-        A row ``Box`` (gutter + body) or a single ``Text`` leaf when no
-        CC features are active for this row.
+        A row ``Box`` (gutter + body) for the multi-leaf path, or a
+        single ``Text`` leaf for the full-width-bg path and for the
+        no-features degenerate case.
     """
+    # Full-width bg path: single Text leaf with embedded ANSI escapes.
+    # See the docstring for why this is required (per-leaf ``0m`` resets
+    # kill the bg band in the multi-leaf layout).
+    if full_width_bg and bg_color is not None:
+        return _build_full_width_bg_row(
+            body=body,
+            sigil=sigil,
+            base_color=base_color,
+            inline_parts=inline_parts,
+            inline_color=inline_color,
+            bg_color=bg_color,
+            line_num=line_num,
+            gutter_width=gutter_width,
+            indent=indent,
+            row_prefix=row_prefix,
+        )
+
     children: list[Element] = []
 
     # Row prefix (parent gutter alignment). When the caller passes a
@@ -518,7 +556,7 @@ def _render_diff_row_cc(
                 sigil=sigil,
                 color=base_color,
                 bg_color=bg_color,
-                full_width_bg=full_width_bg and bg_color is not None,
+                full_width_bg=False,
             )
         )
 
@@ -531,24 +569,13 @@ def _render_diff_row_cc(
                 base_color=base_color,
                 inline_color=inline_color,
                 bg_color=bg_color,
-                full_width_bg=full_width_bg and bg_color is not None,
+                full_width_bg=False,
             )
         )
     else:
         body_props: dict[str, Any] = {"color": base_color}
         if bg_color is not None:
             body_props["backgroundColor"] = bg_color
-            # ``full_width_bg=True``: per-leaf ``flushBackgroundToWidth``
-            # so the bg SGR fills the row's full terminal width via the
-            # row-level painter (CC ``Fallback.tsx:334`` signature).
-            # Setting it on the outer Box alone is insufficient — the
-            # ANSI bg fill needs to be carried by each Text leaf that
-            # paints a cell, otherwise the row-level painter runs before
-            # the leaf paints and the leaf's own bg SGR (via the legacy
-            # wrap path) overwrites the flushed band with a text-width
-            # band. Per-leaf flush is the single source of truth.
-            if full_width_bg:
-                body_props["flushBackgroundToWidth"] = True
         children.append(Text(body, **body_props))
 
     # No gutter + plain body + no bg → collapse to a single Text so we
@@ -556,11 +583,132 @@ def _render_diff_row_cc(
     if not children:
         return Text(body, color=base_color)
 
-    box_props: dict[str, Any] = {"flexDirection": "row"}
-    if full_width_bg and bg_color is not None:
-        box_props["backgroundColor"] = bg_color
-        box_props["flushBackgroundToWidth"] = True
-    return Box(*children, **box_props)
+    return Box(*children, flexDirection="row")
+
+
+def _fg_sgr(color: str) -> str:
+    """Return the full CSI-SGR sequence for foreground ``color``.
+
+    Returns ``""`` when ``color`` is empty / unparseable so callers can
+    concatenate unconditionally without emitting stray ``\\x1b[m``
+    shorthands.
+    """
+    body = parse_color(color, type_="foreground")
+    if not body:
+        return ""
+    return _sgr(body)
+
+
+def _build_full_width_bg_row(
+    *,
+    body: str,
+    sigil: str,
+    base_color: str,
+    inline_parts: list[tuple[str, str, bool]] | None,
+    inline_color: str,
+    bg_color: str,
+    line_num: int | None,
+    gutter_width: int,
+    indent: str,
+    row_prefix: str,
+) -> Element:
+    """Build a diff row as a single Text leaf carrying embedded ANSI.
+
+    The leaf's callable returns a string shaped::
+
+        <prefix><gutter><body with per-token fg SGRs><trailing pad>
+
+    with the bg SGR *not* embedded — the bg comes from the leaf's
+    ``backgroundColor`` prop, applied via PyInk's row-level bg painter
+    (``mark_row_background``). The per-token fg SGRs are emitted with
+    NO ``\\x1b[0m`` reset between them; the only reset is the one
+    ``apply_style`` appends after the full string. This keeps the bg
+    band unbroken from the row's first cell to its last padded cell.
+
+    The trailing pad fills the row to the layout-time terminal width
+    (read via :func:`get_current_text_width`) so the band spans the
+    full visible row.
+    """
+    prefix_str = row_prefix if row_prefix else indent
+
+    # Pre-compute the static pieces. The gutter string carries the
+    # padded line number + sigil; the body string is built per-token
+    # from ``inline_parts`` (when set) or as a single base-colour run.
+    if gutter_width > 0:
+        if line_num is None:
+            num_str = " " * gutter_width
+        else:
+            num_str = str(line_num).rjust(gutter_width)
+        gutter_str = f"{num_str}{sigil}"
+    else:
+        gutter_str = ""
+
+    base_fg = _fg_sgr(base_color)
+    inline_fg = _fg_sgr(inline_color)
+    bold_open = _SGR_BOLD if inline_parts is not None else ""
+
+    # Pre-render the body's ANSI-fied string. For inline-highlighted
+    # bodies each token is wrapped in its own fg SGR (no resets between
+    # tokens); for plain bodies the whole body sits under one base-fg
+    # opener. The reset is deferred to the leaf-level ``apply_style``
+    # wrap so the bg stays open.
+    if inline_parts is not None:
+        body_parts: list[str] = []
+        for sep, tok, changed in inline_parts:
+            if sep:
+                body_parts.append(base_fg + sep)
+            if not tok:
+                continue
+            if changed:
+                # Bold + brighter colour for changed tokens. Emit
+                # bold-on, fg, token — no reset, so the next token's
+                # fg SGR overwrites the colour while bold persists.
+                # We deliberately re-emit bold per changed token in
+                # case a prior unchanged token's fg SGR was appended
+                # without bold (SGR colour codes don't reset bold).
+                body_parts.append(bold_open + inline_fg + tok)
+            else:
+                body_parts.append(base_fg + tok)
+        body_str = "".join(body_parts)
+    else:
+        body_str = base_fg + body
+
+    # Pre-compute the static "head" = prefix + gutter + initial fg.
+    # The initial fg opener goes right before the body so the bg (opened
+    # by ``apply_style`` before the entire string) paints the prefix /
+    # gutter cells with no fg colour (terminals render the default fg
+    # against the bg). The body then re-opens the fg as needed.
+    head = prefix_str + gutter_str
+
+    # Pre-compute the visible width of the head + body so the pad
+    # calculation can subtract it from the terminal width. The body's
+    # visible width excludes the embedded ANSI escapes; for the
+    # inline-highlighted case the visible characters are exactly the
+    # concatenation of (sep, tok) pairs.
+    if inline_parts is not None:
+        body_visible = "".join(sep + tok for sep, tok, _ in inline_parts)
+    else:
+        body_visible = body
+    head_visible = prefix_str + gutter_str
+    # Visible width uses PyInk's string_width (CJK / emoji aware).
+    from ink.layout.measure import string_width
+
+    content_w = string_width(head_visible) + string_width(body_visible)
+
+    def _render() -> str:
+        # Layout-time terminal width. ``None`` means unbounded — fall
+        # back to a reasonable default (80) so the pad is at least
+        # non-negative.
+        ctx_w = get_current_text_width()
+        target_w = ctx_w if isinstance(ctx_w, int) and ctx_w > 0 else 80
+        pad = max(0, target_w - content_w)
+        return head + body_str + " " * pad
+
+    return Text(
+        _render,
+        backgroundColor=bg_color,
+        flushBackgroundToWidth=True,
+    )
 
 
 # ---------------------------------------------------------------------------

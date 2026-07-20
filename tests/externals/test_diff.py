@@ -944,6 +944,124 @@ def test_full_width_bg_pads_to_terminal_width() -> None:
     assert f"{ESC}[48;2;30;70;32m" in out
 
 
+def test_full_width_bg_band_covers_gutter_and_content() -> None:
+    """``full_width_bg=True`` paints bg from row start to terminal width.
+
+    Regression for commit ``5d53c5f``'s multi-leaf approach: setting
+    ``flushBackgroundToWidth=True`` on each coloured Text leaf broke
+    the band because PyInk's per-leaf ``apply_style`` emits a
+    ``\\x1b[0m`` reset at the end of every leaf, killing the bg SGR
+    opened by the previous leaf. The visible symptom was: bg covered
+    only the first few cells (the prefix + first leaf), then died.
+
+    The fix builds each diff row as a SINGLE Text leaf carrying the
+    full row string with embedded ANSI fg SGRs (no per-leaf resets).
+    We assert:
+
+    * the bg opener appears exactly once per changed row;
+    * the reset appears exactly once per changed row (at the very end);
+    * the visible width of each changed row equals the layout width
+      (40 cols) so the band genuinely fills the row.
+    """
+    import re
+
+    from ink.layout.measure import string_width
+
+    before = "x = 1"
+    after = "x = 2"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            show_markers=False,
+            line_numbers=True,
+            inline_highlight=True,
+            full_width_bg=True,
+            add_bg_color="rgb(30,70,32)",
+            del_bg_color="rgb(74,32,32)",
+        ),
+        columns=40,
+    )
+    lines = out.split("\n")
+    # Two body rows: one del (red bg) and one add (green bg).
+    assert len(lines) == 2
+    for line, bg_open in (
+        (lines[0], f"{ESC}[48;2;74;32;32m"),
+        (lines[1], f"{ESC}[48;2;30;70;32m"),
+    ):
+        # The bg opener appears exactly once (at the row's first byte).
+        assert line.count(bg_open) == 1, (
+            f"bg opener should appear once per row, got {line.count(bg_open)}: {line!r}"
+        )
+        # The bg opener is at the start of the line (no leading text).
+        assert line.startswith(bg_open), (
+            f"bg opener should be at row start, got: {line!r}"
+        )
+        # The final reset is at the row's end (no trailing content).
+        assert line.endswith(f"{ESC}[0m"), (
+            f"row should end with reset, got: {line!r}"
+        )
+        # Only ONE reset in the entire row — no mid-row resets that
+        # would kill the bg.
+        sgr_run = re.findall(r"\x1b\[[0-9;]*m", line)
+        reset_count = sum(1 for s in sgr_run if s == f"{ESC}[0m")
+        assert reset_count == 1, (
+            f"expected exactly 1 reset per row, got {reset_count}: {line!r}"
+        )
+        # Visible width equals the layout width (40 cols).
+        bare = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        assert string_width(bare) == 40, (
+            f"row visible width should be 40, got {string_width(bare)}: {bare!r}"
+        )
+
+
+def test_full_width_bg_with_indent_and_first_row_prefix() -> None:
+    """``full_width_bg`` + ``indent`` + ``first_row_prefix`` compose.
+
+    The first row carries ``first_row_prefix`` (e.g. Jarvis's ``⎿``
+    parent gutter) in lieu of ``indent``; continuation rows use
+    ``indent``. The bg band must span from column 1 to terminal width
+    on every row regardless of which prefix is in play.
+    """
+    import re
+
+    from ink.layout.measure import string_width
+
+    before = "alpha\nbeta"
+    after = "alpha\nBETA"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            show_markers=False,
+            full_width_bg=True,
+            add_bg_color="rgb(30,70,32)",
+            del_bg_color="rgb(74,32,32)",
+            indent="     ",
+            first_row_prefix="  ⍹  ",  # ⎿-like glyph surrogate
+        ),
+        columns=40,
+    )
+    lines = out.split("\n")
+    # One context row (alpha, no bg) + one del (beta, red bg) + one
+    # add (BETA, green bg).
+    assert len(lines) == 3
+    # First line is the context row "alpha" with first_row_prefix; it
+    # has no bg (context_color=None) so it should not contain any bg
+    # SGR opener.
+    assert f"{ESC}[48" not in lines[0], (
+        f"context row should not carry bg, got: {lines[0]!r}"
+    )
+    # The two bg-carrying rows must each span the full width.
+    for line in lines[1:]:
+        bare = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        assert string_width(bare) == 40, (
+            f"row visible width should be 40, got {string_width(bare)}: {bare!r}"
+        )
+
+
 def test_full_width_bg_off_by_default_keeps_legacy_behaviour() -> None:
     """Without ``full_width_bg`` the bg only covers the text cells."""
     before = "x = 1"
@@ -1234,18 +1352,23 @@ def test_first_row_prefix_works_in_cc_mode() -> None:
         )
 
 
-def test_full_width_bg_propagates_to_each_text_leaf() -> None:
-    """``full_width_bg=True`` flushes bg on every coloured Text leaf.
+def test_full_width_bg_uses_single_text_leaf_per_row() -> None:
+    """``full_width_bg=True`` collapses each row to a single Text leaf.
 
-    07-20-tool-message-rendering-polish follow-up: setting
-    ``flushBackgroundToWidth`` on the outer Box alone is insufficient
-    because ANSI bg fill must be carried by each Text leaf that paints
-    a cell. The per-leaf flush is the single source of truth for the
-    row-level painter.
+    07-20-tool-message-rendering-polish follow-up: the original
+    multi-leaf approach set ``flushBackgroundToWidth=True`` on every
+    coloured Text leaf in a row. That broke the band because PyInk's
+    per-leaf ``apply_style`` emits a ``\\x1b[0m`` reset at the end of
+    each leaf, killing the bg SGR opened by the previous leaf. The
+    fix builds each diff row as a SINGLE Text leaf carrying the row's
+    full visible string with embedded ANSI fg SGRs (no per-leaf
+    resets), plus ``backgroundColor`` + ``flushBackgroundToWidth=True``
+    so the row-level bg painter opens the bg once at the first cell
+    and closes it after the last padded cell.
 
-    We walk the rendered Element tree and assert each add / del leaf
-    carrying ``backgroundColor`` also carries
-    ``flushBackgroundToWidth=True`` when ``full_width_bg=True``.
+    We walk the rendered Element tree and assert each add / del row is
+    a single Text leaf (no Box-of-Text-leaves wrapper) carrying both
+    ``backgroundColor`` and ``flushBackgroundToWidth=True``.
     """
     before = "the quick brown fox"
     after = "the slow brown fox"
@@ -1260,20 +1383,23 @@ def test_full_width_bg_propagates_to_each_text_leaf() -> None:
         add_bg_color="rgb(30,70,32)",
         del_bg_color="rgb(74,32,32)",
     )
-    # Walk the tree and collect every Text leaf that carries an
-    # ``backgroundColor`` prop. Each should also carry
-    # ``flushBackgroundToWidth=True``.
-    leaves_checked = 0
+    # Walk the top-level Box's children; each body row should be a
+    # Text leaf carrying bg + flush. We don't recurse into the Text
+    # leaf (Text leaves' children are raw strings / callables, not
+    # Elements).
+    bg_leaves = 0
 
     def walk(node: Any) -> None:
-        nonlocal leaves_checked
-        # Element leaves have a ``type`` attribute; raw string children
-        # (text content) don't and are skipped.
-        if hasattr(node, "type") and isinstance(node.type, str) and node.type == "text":
+        nonlocal bg_leaves
+        if (
+            hasattr(node, "type")
+            and isinstance(node.type, str)
+            and node.type == "text"
+        ):
             props = node.props or {}
             bg = props.get("backgroundColor")
             if bg is not None:
-                leaves_checked += 1
+                bg_leaves += 1
                 assert props.get("flushBackgroundToWidth") is True, (
                     f"Text leaf with bg={bg!r} missing flushBackgroundToWidth; "
                     f"props={dict(props)!r}"
@@ -1283,12 +1409,11 @@ def test_full_width_bg_propagates_to_each_text_leaf() -> None:
             walk(child)
 
     walk(el)
-    # We expect at least 2 leaves with bg (one add row + one del row,
-    # each with body + gutter at minimum). The exact count depends on
-    # inline highlight pairing, but it must be > 0 — otherwise the
-    # test is silently a no-op.
-    assert leaves_checked > 0, (
-        "no Text leaves with backgroundColor found — test is a no-op"
+    # Expect exactly 2 bg-carrying leaves: one del row + one add row.
+    # Each row is a single Text leaf (not a Box-of-leaves), so the
+    # count equals the number of changed rows.
+    assert bg_leaves == 2, (
+        f"expected 2 single-Text-leaf bg rows (one del + one add), got {bg_leaves}"
     )
 
 
