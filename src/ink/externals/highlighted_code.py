@@ -289,6 +289,7 @@ def _build_line_rows(
     line_numbers: bool,
     indent: str = "",
     first_row_prefix: str = "",
+    start_line: int = 1,
 ) -> list[Element]:
     """Wrap each per-line token list in a row ``Box``.
 
@@ -311,6 +312,14 @@ def _build_line_rows(
     rows still use ``indent`` so all rows line up under the glyph's
     column. Empty (default) preserves the legacy behaviour where every
     row (including the first) uses ``indent``.
+
+    ``start_line`` (default ``1``) shifts the gutter numbering so the
+    first body row carries the 1-indexed source-file line the snippet
+    begins at — mirrors :func:`StructuredDiff`'s ``start_line`` prop.
+    Used by callers that know the real file position (Jarvis's Edit
+    ``insert`` / ``append_section`` actions record this in
+    ``ToolResult.metadata["start_line"]``). Default preserves the
+    snippet-relative ``1, 2, 3, …`` sequence for backward compatibility.
     """
     indent_leaf = Text(indent) if indent else None
     first_row_leaf = Text(first_row_prefix) if first_row_prefix else None
@@ -333,16 +342,21 @@ def _build_line_rows(
         return out_no_num
     total = len(rows)
     # Width of the largest line number, e.g. ``3`` for a 100-line
-    # snippet. Plus a trailing space for visual separation from the
-    # code. Right-aligned via Python format spec.
-    gutter_width = max(1, len(str(total)))
+    # snippet. When ``start_line`` shifts the counter the largest number
+    # is ``start_line + total - 1`` (last row of the snippet), so the
+    # gutter is padded to that width to keep columns aligned across
+    # snippets that begin mid-file. Plus a trailing space for visual
+    # separation from the code. Right-aligned via Python format spec.
+    last_line = max(1, int(start_line)) + total - 1 if total else max(1, int(start_line))
+    gutter_width = max(1, len(str(last_line)))
+    start = max(1, int(start_line))
     out: list[Element] = []
-    for i, tokens in enumerate(rows, start=1):
+    for i, tokens in enumerate(rows, start=start):
         gutter = Text(f"{i:>{gutter_width}} ", dimColor=True)
         row_children: list[Element] = []
         # First row consumes the parent gutter prefix; subsequent rows
         # fall back to the continuation ``indent``.
-        if i == 1 and first_row_leaf is not None:
+        if i == start and first_row_leaf is not None:
             row_children.append(first_row_leaf)
         elif indent_leaf is not None:
             row_children.append(indent_leaf)
@@ -360,6 +374,7 @@ def HighlightedCode(
     line_numbers: bool = False,
     indent: str = "",
     first_row_prefix: str = "",
+    start_line: int = 1,
     **box_props: Any,
 ) -> Element:
     """Render a code string with Pygments-driven syntax highlighting.
@@ -414,6 +429,17 @@ def HighlightedCode(
         component's contract is "one row per source line"). Useful
         props include ``borderStyle`` / ``padding`` / ``width`` /
         ``backgroundColor``.
+    start_line:
+        1-indexed source-file line where the snippet begins (default
+        ``1``). When ``line_numbers=True`` the gutter renders real
+        file line numbers (e.g. ``42``, ``43``, …) instead of the
+        snippet-relative ``1, 2, 3, …`` sequence. Mirrors
+        :func:`StructuredDiff`'s ``start_line`` prop so Jarvis's Edit
+        ``insert`` / ``append_section`` actions — which route through
+        HighlightedCode (empty ``before``) — can carry the same
+        file-accurate gutter information as Edit ``str_replace``.
+        Values ``<= 0`` are clamped to ``1`` defensively; non-int /
+        missing falls back to the default.
 
     Returns
     -------
@@ -453,6 +479,7 @@ def HighlightedCode(
             line_numbers=line_numbers,
             indent=indent,
             first_row_prefix=first_row_prefix,
+            start_line=start_line,
         )
         box_props.pop("flexDirection", None)
         return Box(*line_rows, flexDirection="column", **box_props)
@@ -486,6 +513,7 @@ def HighlightedCode(
         line_numbers=line_numbers,
         indent=indent,
         first_row_prefix=first_row_prefix,
+        start_line=start_line,
     )
 
     # A column of row Boxes; each row Box holds the inline tokens for

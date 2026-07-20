@@ -641,6 +641,124 @@ def test_empty_code_with_line_numbers_renders_single_empty_row() -> None:
     assert out.startswith(f"{ESC}[2m1 {ESC}[0m")
 
 
+# ---------------------------------------------------------------------------
+# start_line — file-accurate gutter numbering
+# ---------------------------------------------------------------------------
+#
+# 07-20-tool-message-rendering-polish (Option A): callers that know the
+# 1-indexed source-file line where a snippet begins (Jarvis's Edit
+# ``insert`` / ``append_section`` actions) can shift the gutter so it
+# renders real file line numbers instead of the snippet-relative 1, 2, 3,
+# … sequence. Mirrors StructuredDiff's ``start_line`` prop.
+
+
+def test_start_line_shifts_first_gutter_number() -> None:
+    """``start_line=5`` → first body row's gutter reads ``5``."""
+    out = _render(
+        HighlightedCode(
+            "a\nb\nc",
+            language="text",
+            line_numbers=True,
+            start_line=5,
+        )
+    )
+    lines = out.split("\n")
+    # Gutter sequence should be 5, 6, 7 — NOT 1, 2, 3.
+    assert lines[0].startswith(f"{ESC}[2m5 {ESC}[0m"), out
+    assert lines[1].startswith(f"{ESC}[2m6 {ESC}[0m"), out
+    assert lines[2].startswith(f"{ESC}[2m7 {ESC}[0m"), out
+
+
+def test_start_line_default_is_one() -> None:
+    """Default ``start_line`` is ``1`` (snippet-relative)."""
+    out = _render(
+        HighlightedCode("a\nb", language="text", line_numbers=True)
+    )
+    lines = out.split("\n")
+    assert lines[0].startswith(f"{ESC}[2m1 {ESC}[0m")
+    assert lines[1].startswith(f"{ESC}[2m2 {ESC}[0m")
+
+
+def test_start_line_pads_to_width_of_last_row() -> None:
+    """Gutter width is sized to ``start_line + total - 1``, not ``total``.
+
+    Defensive against a regression where a 5-line snippet starting at
+    line 48 would render gutter width 1 (last = 5) instead of 2
+    (last = 52).
+    """
+    code = "\n".join(["x"] * 5)  # 5 lines, last gutter should be 52
+    out = _render(
+        HighlightedCode(
+            code, language="text", line_numbers=True, start_line=48
+        )
+    )
+    lines = out.split("\n")
+    # Width 2 → first row is "48 " (right-padded to 2).
+    assert lines[0].startswith(f"{ESC}[2m48 {ESC}[0m"), out
+    assert lines[-1].startswith(f"{ESC}[2m52 {ESC}[0m"), out
+
+
+def test_start_line_zero_or_negative_clamps_to_one() -> None:
+    """``start_line <= 0`` is clamped to ``1`` (defensive)."""
+    for bad in (0, -1, -10):
+        out = _render(
+            HighlightedCode(
+                "a", language="text", line_numbers=True, start_line=bad
+            )
+        )
+        assert out.startswith(f"{ESC}[2m1 {ESC}[0m"), (bad, out)
+
+
+def test_start_line_no_effect_when_line_numbers_off() -> None:
+    """``start_line`` is ignored when ``line_numbers=False``."""
+    out = _render(
+        HighlightedCode(
+            "a\nb",
+            language="text",
+            line_numbers=False,
+            start_line=42,
+        )
+    )
+    # No gutter at all — content only.
+    lines = out.split("\n")
+    assert lines[0] == "a", out
+    assert lines[1] == "b", out
+
+
+def test_start_line_combines_with_indent_and_first_row_prefix() -> None:
+    """``start_line`` threads through the indent / first_row_prefix path."""
+    out = _render(
+        HighlightedCode(
+            "a\nb",
+            language="text",
+            line_numbers=True,
+            indent="  ",
+            first_row_prefix="> ",
+            start_line=10,
+        )
+    )
+    lines = out.split("\n")
+    # First row: first_row_prefix + gutter + content.
+    assert lines[0] == f"> {ESC}[2m10 {ESC}[0ma", out
+    # Continuation: indent + gutter + content.
+    assert lines[1] == f"  {ESC}[2m11 {ESC}[0mb", out
+
+
+def test_start_line_python_path_still_threaded() -> None:
+    """``start_line`` is honoured on the pygments tokenisation path too."""
+    out = _render(
+        HighlightedCode(
+            "def f():\n    pass",
+            language="python",
+            line_numbers=True,
+            start_line=7,
+        )
+    )
+    lines = out.split("\n")
+    assert lines[0].startswith(f"{ESC}[2m7 {ESC}[0m"), out
+    assert lines[1].startswith(f"{ESC}[2m8 {ESC}[0m"), out
+
+
 def test_single_newline_renders_nothing() -> None:
     out = _render(HighlightedCode("\n", language="text"))
     assert out == ""
