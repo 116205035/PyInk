@@ -288,6 +288,7 @@ def _build_line_rows(
     *,
     line_numbers: bool,
     indent: str = "",
+    first_row_prefix: str = "",
 ) -> list[Element]:
     """Wrap each per-line token list in a row ``Box``.
 
@@ -296,20 +297,32 @@ def _build_line_rows(
     zero-padded to the width of the last line number so columns line
     up regardless of how many lines the snippet has.
 
-    With a non-empty ``indent``, every row is additionally prefixed
-    with a plain ``Text`` leaf carrying that literal string. This lets
-    a caller embed the code block under a ``⎿`` gutter (Jarvis's
-    Edit/Write archived-row rendering): the first visual line shows
-    the gutter glyph, the continuation lines line up under the body
-    via the indent prefix. Mirrors Claude Code's ``MessageResponse``
+    With a non-empty ``indent``, every continuation row is additionally
+    prefixed with a plain ``Text`` leaf carrying that literal string.
+    This lets a caller embed the code block under a ``⎿`` gutter
+    (Jarvis's Edit/Write archived-row rendering): the first visual line
+    shows the gutter glyph, the continuation lines line up under the
+    body via the indent prefix. Mirrors Claude Code's ``MessageResponse``
     indentation pattern without nesting an extra Box layer.
+
+    ``first_row_prefix`` (when non-empty) replaces ``indent`` on the
+    first row only — used by callers that want the parent's ``⎿``
+    glyph on the same visual line as the first body row. Continuation
+    rows still use ``indent`` so all rows line up under the glyph's
+    column. Empty (default) preserves the legacy behaviour where every
+    row (including the first) uses ``indent``.
     """
     indent_leaf = Text(indent) if indent else None
+    first_row_leaf = Text(first_row_prefix) if first_row_prefix else None
     if not line_numbers:
         out_no_num: list[Element] = []
-        for tokens in rows:
+        for i, tokens in enumerate(rows):
             children: list[Element] = []
-            if indent_leaf is not None:
+            # First row consumes the parent gutter prefix; subsequent
+            # rows fall back to the continuation ``indent``.
+            if i == 0 and first_row_leaf is not None:
+                children.append(first_row_leaf)
+            elif indent_leaf is not None:
                 children.append(indent_leaf)
             children.extend(tokens)
             out_no_num.append(
@@ -327,7 +340,11 @@ def _build_line_rows(
     for i, tokens in enumerate(rows, start=1):
         gutter = Text(f"{i:>{gutter_width}} ", dimColor=True)
         row_children: list[Element] = []
-        if indent_leaf is not None:
+        # First row consumes the parent gutter prefix; subsequent rows
+        # fall back to the continuation ``indent``.
+        if i == 1 and first_row_leaf is not None:
+            row_children.append(first_row_leaf)
+        elif indent_leaf is not None:
             row_children.append(indent_leaf)
         row_children.append(gutter)
         row_children.extend(tokens)
@@ -342,6 +359,7 @@ def HighlightedCode(
     theme: dict[str, str | None] | None = None,
     line_numbers: bool = False,
     indent: str = "",
+    first_row_prefix: str = "",
     **box_props: Any,
 ) -> Element:
     """Render a code string with Pygments-driven syntax highlighting.
@@ -373,11 +391,23 @@ def HighlightedCode(
         to each row. The gutter width is sized to the largest line
         number so columns line up regardless of snippet length.
     indent:
-        Optional literal string prepended to every row (default ``""``).
-        Used by callers that embed the code block under a parent glyph
-        (e.g. Jarvis's archived Write row: ``⎿`` on the first visual
-        line + 5-space indent on continuation lines so the code body
-        lines up under the gutter).
+        Optional literal string prepended to every continuation row
+        (default ``""``). Used by callers that embed the code block
+        under a parent glyph (e.g. Jarvis's archived Write row: ``⎿``
+        on the first visual line + 5-space indent on continuation
+        lines so the code body lines up under the gutter). When
+        ``first_row_prefix`` is also set, the first row uses
+        ``first_row_prefix`` instead — see below.
+    first_row_prefix:
+        Optional literal string prepended to the *first* row in lieu
+        of ``indent`` (default ``""``). Used by callers that want the
+        parent's ``⎿`` glyph on the same visual line as the first body
+        row (CC's ``MessageResponse`` pattern): pass
+        ``first_row_prefix="  ⎿  "`` and the first row carries it;
+        continuation rows still use ``indent`` so all rows line up
+        under the glyph's column. Empty (default) preserves the
+        legacy behaviour where every row (including the first) uses
+        ``indent``.
     **box_props:
         Forwarded to the outer ``Box`` container (``flexDirection`` is
         always set to ``"column"`` and cannot be overridden — the
@@ -419,7 +449,10 @@ def HighlightedCode(
         if token_rows and code.endswith("\n"):
             token_rows.pop()
         line_rows = _build_line_rows(
-            token_rows, line_numbers=line_numbers, indent=indent
+            token_rows,
+            line_numbers=line_numbers,
+            indent=indent,
+            first_row_prefix=first_row_prefix,
         )
         box_props.pop("flexDirection", None)
         return Box(*line_rows, flexDirection="column", **box_props)
@@ -449,7 +482,10 @@ def HighlightedCode(
     tokens = _tokenize(code, language, pygments, get_lexer_by_name, guess_lexer)
     token_rows = _group_tokens_by_line(tokens, effective_theme)
     line_rows = _build_line_rows(
-        token_rows, line_numbers=line_numbers, indent=indent
+        token_rows,
+        line_numbers=line_numbers,
+        indent=indent,
+        first_row_prefix=first_row_prefix,
     )
 
     # A column of row Boxes; each row Box holds the inline tokens for

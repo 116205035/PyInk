@@ -491,6 +491,106 @@ def test_indent_empty_default_no_prefix() -> None:
 
 
 # ---------------------------------------------------------------------------
+# first_row_prefix (07-20-tool-message-rendering-polish follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_first_row_prefix_replaces_indent_on_first_row_only() -> None:
+    """``first_row_prefix`` is consumed on the first row only.
+
+    07-20-tool-message-rendering-polish follow-up: callers that embed
+    the code block under a parent ``⎿`` gutter (Jarvis's archived
+    Write row) want the glyph on the SAME visual line as the first body
+    row (CC's ``MessageResponse`` pattern). The caller passes
+    ``first_row_prefix="  ⎿  "`` + ``indent="     "``; the renderer
+    must put the prefix on row 1 and the indent on every continuation
+    row.
+    """
+    out = _render(
+        HighlightedCode(
+            "a\nb\nc",
+            language="text",
+            line_numbers=True,
+            indent="     ",
+            first_row_prefix=">>",
+        )
+    )
+    lines = out.split("\n")
+    assert len(lines) == 3
+    # First row starts with ">>" (the first_row_prefix), NOT 5-space indent.
+    assert lines[0].startswith(">>"), (
+        f"first row should start with first_row_prefix, got: {lines[0]!r}"
+    )
+    # Continuation rows start with the 5-space indent, NOT the prefix.
+    for line in lines[1:]:
+        assert line.startswith("     "), (
+            f"continuation row should start with indent, got: {line!r}"
+        )
+        assert not line.startswith(">>"), (
+            f"continuation row should NOT carry first_row_prefix, got: {line!r}"
+        )
+
+
+def test_first_row_prefix_without_indent_only_first_row_prefixed() -> None:
+    """``first_row_prefix`` without ``indent`` → only first row prefixed."""
+    out = _render(
+        HighlightedCode(
+            "a\nb\nc",
+            language="text",
+            first_row_prefix=">>",
+        )
+    )
+    lines = out.split("\n")
+    assert len(lines) == 3
+    # First row carries the prefix.
+    assert lines[0].startswith(">>")
+    # Continuation rows have no prefix at all (indent="").
+    for line in lines[1:]:
+        assert not line.startswith(">>")
+        assert not line.startswith(" "), (
+            f"continuation row unexpectedly prefixed, got: {line!r}"
+        )
+
+
+def test_first_row_prefix_empty_defaults_to_indent_on_first_row() -> None:
+    """``first_row_prefix=""`` (default) → first row uses ``indent``.
+
+    Backward-compat regression: callers that only pass ``indent`` (no
+    ``first_row_prefix``) must see the indent on EVERY row including
+    the first.
+    """
+    out = _render(
+        HighlightedCode(
+            "a\nb",
+            language="text",
+            indent="     ",
+        )
+    )
+    lines = out.split("\n")
+    assert len(lines) == 2
+    for line in lines:
+        assert line.startswith("     ")
+
+
+def test_first_row_prefix_combines_with_line_numbers() -> None:
+    """``first_row_prefix`` precedes the line-number gutter on row 1."""
+    out = _render(
+        HighlightedCode(
+            "a\nb",
+            language="text",
+            line_numbers=True,
+            indent="     ",
+            first_row_prefix=">>",
+        )
+    )
+    lines = out.split("\n")
+    # Row 1: prefix + dim gutter "1 " + body.
+    assert lines[0].startswith(f">>{ESC}[2m1 {ESC}[0m")
+    # Row 2: indent + dim gutter "2 " + body.
+    assert lines[1].startswith(f"     {ESC}[2m2 {ESC}[0m")
+
+
+# ---------------------------------------------------------------------------
 # Multi-line code
 # ---------------------------------------------------------------------------
 

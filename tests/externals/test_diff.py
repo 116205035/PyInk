@@ -1114,3 +1114,218 @@ def test_compute_gutter_width_pads_to_max_plus_one() -> None:
     assert _compute_gutter_width([{"line_num": 9}]) == 2
     # Two-digit max → 2+1=3.
     assert _compute_gutter_width([{"line_num": 99}]) == 3
+
+
+# ---------------------------------------------------------------------------
+# first_row_prefix (07-20-tool-message-rendering-polish follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_first_row_prefix_replaces_indent_on_first_row_only() -> None:
+    """``first_row_prefix`` is consumed on the first body row only.
+
+    07-20-tool-message-rendering-polish follow-up: callers that embed
+    the diff under a parent ``⎿`` gutter (Jarvis's archived Edit row)
+    want the glyph on the SAME visual line as the first body row (CC's
+    ``MessageResponse`` pattern), not on a standalone row above. The
+    caller passes ``first_row_prefix="  ⎿  "`` + ``indent="     "``;
+    the renderer must put the prefix on row 1 and the indent on every
+    continuation row.
+    """
+    before = "alpha"
+    after = "alpha\nbeta\nGamma"  # 1 context + 2 add rows
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            show_markers=False,
+            indent="     ",
+            first_row_prefix=">>",
+        )
+    )
+    lines = out.split("\n")
+    # Three body rows: 1 context + 2 adds. Strip ANSI so the prefix
+    # check is byte-exact.
+    import re
+
+    plain_lines = [re.sub(r"\x1b\[[0-9;]*m", "", ln) for ln in lines]
+    # First row gets the ``first_row_prefix`` ("">>"), NOT the indent.
+    assert plain_lines[0].startswith(">>"), (
+        f"first row should start with first_row_prefix, got: {plain_lines[0]!r}"
+    )
+    # Continuation rows get the ``indent`` (5 spaces), NOT the prefix.
+    for line in plain_lines[1:]:
+        assert line.startswith("     "), (
+            f"continuation row should start with indent, got: {line!r}"
+        )
+        assert not line.startswith(">>"), (
+            f"continuation row should NOT carry first_row_prefix, got: {line!r}"
+        )
+
+
+def test_first_row_prefix_empty_defaults_to_indent_on_first_row() -> None:
+    """``first_row_prefix=""`` (default) → first row uses ``indent``.
+
+    Backward-compat regression: callers that only pass ``indent`` (no
+    ``first_row_prefix``) must see the indent on EVERY row including
+    the first.
+    """
+    before = "x"
+    after = "y"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            show_markers=False,
+            indent="     ",
+        )
+    )
+    lines = out.split("\n")
+    # Two body rows (del + add); both start with the indent.
+    assert len(lines) == 2
+    for line in lines:
+        assert line.startswith("     ")
+
+
+def test_first_row_prefix_works_in_cc_mode() -> None:
+    """``first_row_prefix`` threads through ``cc_mode`` path correctly.
+
+    When CC features (``line_numbers`` / ``inline_highlight`` /
+    ``full_width_bg``) are on, the row renderer is :func:`_render_diff_row_cc`
+    rather than the legacy fast path. The first-row prefix wiring must
+    still apply — first row gets ``first_row_prefix``, continuation
+    rows get ``indent``.
+    """
+    before = "the quick brown fox"
+    after = "the slow brown fox"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            show_markers=False,
+            line_numbers=True,
+            inline_highlight=True,
+            full_width_bg=True,
+            add_bg_color="rgb(30,70,32)",
+            del_bg_color="rgb(74,32,32)",
+            indent="     ",
+            first_row_prefix="  ⎿  ",
+        ),
+        columns=60,
+    )
+    lines = out.split("\n")
+    import re
+
+    plain_lines = [re.sub(r"\x1b\[[0-9;]*m", "", ln) for ln in lines]
+    # First row carries the ``⎿`` glyph from the first_row_prefix.
+    assert "⎿" in plain_lines[0], (
+        f"first row missing ⎿ glyph, got: {plain_lines[0]!r}"
+    )
+    # Continuation rows carry only the indent (5 spaces).
+    for line in plain_lines[1:]:
+        assert line.startswith("     "), (
+            f"continuation row missing indent, got: {line!r}"
+        )
+        assert "⎿" not in line, (
+            f"continuation row should NOT carry ⎿, got: {line!r}"
+        )
+
+
+def test_full_width_bg_propagates_to_each_text_leaf() -> None:
+    """``full_width_bg=True`` flushes bg on every coloured Text leaf.
+
+    07-20-tool-message-rendering-polish follow-up: setting
+    ``flushBackgroundToWidth`` on the outer Box alone is insufficient
+    because ANSI bg fill must be carried by each Text leaf that paints
+    a cell. The per-leaf flush is the single source of truth for the
+    row-level painter.
+
+    We walk the rendered Element tree and assert each add / del leaf
+    carrying ``backgroundColor`` also carries
+    ``flushBackgroundToWidth=True`` when ``full_width_bg=True``.
+    """
+    before = "the quick brown fox"
+    after = "the slow brown fox"
+    el = StructuredDiff(
+        before,
+        after,
+        show_header=False,
+        show_markers=False,
+        line_numbers=True,
+        inline_highlight=True,
+        full_width_bg=True,
+        add_bg_color="rgb(30,70,32)",
+        del_bg_color="rgb(74,32,32)",
+    )
+    # Walk the tree and collect every Text leaf that carries an
+    # ``backgroundColor`` prop. Each should also carry
+    # ``flushBackgroundToWidth=True``.
+    leaves_checked = 0
+
+    def walk(node: Any) -> None:
+        nonlocal leaves_checked
+        # Element leaves have a ``type`` attribute; raw string children
+        # (text content) don't and are skipped.
+        if hasattr(node, "type") and isinstance(node.type, str) and node.type == "text":
+            props = node.props or {}
+            bg = props.get("backgroundColor")
+            if bg is not None:
+                leaves_checked += 1
+                assert props.get("flushBackgroundToWidth") is True, (
+                    f"Text leaf with bg={bg!r} missing flushBackgroundToWidth; "
+                    f"props={dict(props)!r}"
+                )
+        children = getattr(node, "children", None) or []
+        for child in children:
+            walk(child)
+
+    walk(el)
+    # We expect at least 2 leaves with bg (one add row + one del row,
+    # each with body + gutter at minimum). The exact count depends on
+    # inline highlight pairing, but it must be > 0 — otherwise the
+    # test is silently a no-op.
+    assert leaves_checked > 0, (
+        "no Text leaves with backgroundColor found — test is a no-op"
+    )
+
+
+def test_full_width_bg_off_does_not_set_per_leaf_flush() -> None:
+    """Without ``full_width_bg`` Text leaves don't carry the flush prop.
+
+    Backward-compat regression: callers that don't opt into
+    ``full_width_bg`` continue to see the legacy per-leaf bg behaviour
+    (no flush, the bg SGR only covers the text cells).
+    """
+    before = "the quick brown fox"
+    after = "the slow brown fox"
+    el = StructuredDiff(
+        before,
+        after,
+        show_header=False,
+        show_markers=False,
+        line_numbers=True,
+        inline_highlight=True,
+        # ``full_width_bg`` defaults to False
+        add_bg_color="rgb(30,70,32)",
+        del_bg_color="rgb(74,32,32)",
+    )
+    leaves_with_flush = 0
+
+    def walk(node: Any) -> None:
+        nonlocal leaves_with_flush
+        if hasattr(node, "type") and isinstance(node.type, str) and node.type == "text":
+            props = node.props or {}
+            if props.get("flushBackgroundToWidth") is True:
+                leaves_with_flush += 1
+        children = getattr(node, "children", None) or []
+        for child in children:
+            walk(child)
+
+    walk(el)
+    assert leaves_with_flush == 0, (
+        f"expected 0 leaves with flushBackgroundToWidth when full_width_bg=False, "
+        f"got {leaves_with_flush}"
+    )

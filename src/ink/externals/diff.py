@@ -238,6 +238,7 @@ def _build_inline_highlighted_spans(
     base_color: str,
     inline_color: str,
     bg_color: str | None,
+    full_width_bg: bool = False,
 ) -> list[Element]:
     """Render a row's body as a list of inline-highlighted ``Text`` spans.
 
@@ -258,6 +259,8 @@ def _build_inline_highlighted_spans(
             sep_props: dict[str, Any] = {"color": base_color}
             if bg_color is not None:
                 sep_props["backgroundColor"] = bg_color
+                if full_width_bg:
+                    sep_props["flushBackgroundToWidth"] = True
             spans.append(Text(sep, **sep_props))
         if not tok:
             continue
@@ -268,11 +271,15 @@ def _build_inline_highlighted_spans(
             }
             if bg_color is not None:
                 tok_props["backgroundColor"] = bg_color
+                if full_width_bg:
+                    tok_props["flushBackgroundToWidth"] = True
             spans.append(Text(tok, **tok_props))
         else:
             base_props: dict[str, Any] = {"color": base_color}
             if bg_color is not None:
                 base_props["backgroundColor"] = bg_color
+                if full_width_bg:
+                    base_props["flushBackgroundToWidth"] = True
             spans.append(Text(tok, **base_props))
     if not spans:
         # Edge case: both lines are empty / whitespace only. Emit a
@@ -288,6 +295,7 @@ def _line_number_gutter(
     sigil: str,
     color: str,
     bg_color: str | None = None,
+    full_width_bg: bool = False,
 ) -> Text:
     """Build a CC-style line-number gutter ``Text`` leaf.
 
@@ -305,6 +313,12 @@ def _line_number_gutter(
     props: dict[str, Any] = {"color": color}
     if bg_color is not None:
         props["backgroundColor"] = bg_color
+        # Per-leaf ``flushBackgroundToWidth`` mirrors the row Box flag so
+        # the bg band fills the terminal width regardless of which leaf
+        # the renderer visits first. See :func:`_render_diff_row_cc`
+        # for the full explanation.
+        if full_width_bg:
+            props["flushBackgroundToWidth"] = True
     return Text(body, **props)
 
 
@@ -423,6 +437,7 @@ def _render_diff_row_cc(
     line_num: int | None,
     gutter_width: int,
     indent: str = "",
+    row_prefix: str = "",
 ) -> Element:
     """Render a single add / del / context row in CC-alignment mode.
 
@@ -465,11 +480,18 @@ def _render_diff_row_cc(
         Width (in characters) the line-number column is right-aligned
         to. ``0`` disables the gutter entirely.
     indent:
-        Optional literal string prepended to the row (default ``""``).
-        Used by callers that embed the diff under a parent glyph (e.g.
-        Jarvis's archived Edit row: ``⎿`` on the first visual line +
-        matching indent on every body row so the diff lines up under
-        the gutter).
+        Optional literal string prepended to continuation rows (default
+        ``""``). Used by callers that embed the diff under a parent
+        glyph (e.g. Jarvis's archived Edit row: ``⎿`` on the first
+        visual line + matching indent on every continuation row so the
+        diff lines up under the gutter). The caller picks which row is
+        the "first" by passing a non-empty ``row_prefix`` for it; rows
+        that don't get ``row_prefix`` fall back to ``indent``.
+    row_prefix:
+        Optional literal string prepended to *this* row in lieu of
+        ``indent`` (default ``""``). The caller uses this to attach the
+        parent's ``⎿`` glyph to the first body row — see
+        :func:`_render_diff` for the first-row wiring.
 
     Returns
     -------
@@ -479,9 +501,13 @@ def _render_diff_row_cc(
     """
     children: list[Element] = []
 
-    # Indent prefix (parent gutter alignment). Empty by default.
-    if indent:
-        children.append(Text(indent))
+    # Row prefix (parent gutter alignment). When the caller passes a
+    # non-empty ``row_prefix`` (e.g. Jarvis's ``"  ⎿  "`` parent gutter)
+    # it replaces the default ``indent`` on this row; otherwise we use
+    # ``indent`` for continuation-row alignment.
+    prefix = row_prefix if row_prefix else indent
+    if prefix:
+        children.append(Text(prefix))
 
     # Gutter (line number + sigil). Width 0 means caller opted out.
     if gutter_width > 0:
@@ -492,6 +518,7 @@ def _render_diff_row_cc(
                 sigil=sigil,
                 color=base_color,
                 bg_color=bg_color,
+                full_width_bg=full_width_bg and bg_color is not None,
             )
         )
 
@@ -504,12 +531,24 @@ def _render_diff_row_cc(
                 base_color=base_color,
                 inline_color=inline_color,
                 bg_color=bg_color,
+                full_width_bg=full_width_bg and bg_color is not None,
             )
         )
     else:
         body_props: dict[str, Any] = {"color": base_color}
         if bg_color is not None:
             body_props["backgroundColor"] = bg_color
+            # ``full_width_bg=True``: per-leaf ``flushBackgroundToWidth``
+            # so the bg SGR fills the row's full terminal width via the
+            # row-level painter (CC ``Fallback.tsx:334`` signature).
+            # Setting it on the outer Box alone is insufficient — the
+            # ANSI bg fill needs to be carried by each Text leaf that
+            # paints a cell, otherwise the row-level painter runs before
+            # the leaf paints and the leaf's own bg SGR (via the legacy
+            # wrap path) overwrites the flushed band with a text-width
+            # band. Per-leaf flush is the single source of truth.
+            if full_width_bg:
+                body_props["flushBackgroundToWidth"] = True
         children.append(Text(body, **body_props))
 
     # No gutter + plain body + no bg → collapse to a single Text so we
@@ -745,6 +784,7 @@ def _render_diff(
     inline_del_color: str = "redBright",
     show_markers: bool = True,
     indent: str = "",
+    first_row_prefix: str = "",
 ) -> list[Element]:
     """Compute the diff and turn it into a list of row elements.
 
@@ -815,6 +855,13 @@ def _render_diff(
         line_numbers or inline_highlight or (full_width_bg and (add_bg_color or del_bg_color))
     )
 
+    # ``first_row_prefix`` (parent ``⎿`` gutter alignment): when set,
+    # the first body row carries the prefix instead of ``indent`` so
+    # the parent's ``⎿`` glyph sits on the same line as the first body
+    # row (CC ``MessageResponse`` pattern). Once we've consumed it on
+    # the first body row, subsequent rows fall back to ``indent``.
+    first_row_pending = bool(first_row_prefix)
+
     # Body: one Element per diff line.
     for entry in entries:
         kind = entry["kind"]
@@ -843,6 +890,11 @@ def _render_diff(
             sigil = " "
             inline_color = ""
 
+        # First body row consumes the parent ``⎿`` gutter prefix; all
+        # subsequent rows fall back to the continuation ``indent``.
+        row_prefix = first_row_prefix if first_row_pending else ""
+        first_row_pending = False
+
         if cc_mode:
             elements.append(
                 _render_diff_row_cc(
@@ -856,15 +908,18 @@ def _render_diff(
                     line_num=entry.get("line_num"),
                     gutter_width=gutter_width,
                     indent=indent,
+                    row_prefix=row_prefix,
                 )
             )
             continue
 
         # Legacy fast path — no CC features requested. Reuses the
         # pre-CC renderer so byte-for-byte output stays identical.
-        # When ``indent`` is set we wrap the row in an indented Box so
-        # the body lands under a parent gutter (Jarvis's archived
-        # Edit row pattern).
+        # When ``indent`` is set (or this is the first body row and
+        # ``first_row_prefix`` is set) we wrap the row in a prefixed
+        # Box so the body lands under a parent gutter (Jarvis's
+        # archived Edit row pattern).
+        prefix = row_prefix if row_prefix else indent
         if kind == "add" or kind == "del":
             line_el = _render_diff_line(
                 raw,
@@ -875,9 +930,9 @@ def _render_diff(
                 theme=highlight_theme,
                 bg_color=bg,
             )
-            if indent:
+            if prefix:
                 elements.append(
-                    Box(Text(indent), line_el, flexDirection="row")
+                    Box(Text(prefix), line_el, flexDirection="row")
                 )
             else:
                 elements.append(line_el)
@@ -887,9 +942,9 @@ def _render_diff(
             # diff lines (``""``) come from blank source rows; we still
             # emit a Text so the row count matches the diff.
             ctx_el = Text(raw, color=context_color)
-            if indent:
+            if prefix:
                 elements.append(
-                    Box(Text(indent), ctx_el, flexDirection="row")
+                    Box(Text(prefix), ctx_el, flexDirection="row")
                 )
             else:
                 elements.append(ctx_el)
@@ -947,6 +1002,7 @@ def _DiffImpl(**props: Any) -> Element:
     inline_del_color: str = props.get("inline_del_color", "redBright")
     show_markers: bool = props.get("show_markers", True)
     indent: str = props.get("indent", "")
+    first_row_prefix: str = props.get("first_row_prefix", "")
     box_props: dict[str, Any] = props["box_props"]
 
     from ink.core.reconciler import Reconciler
@@ -981,6 +1037,7 @@ def _DiffImpl(**props: Any) -> Element:
             inline_del_color=inline_del_color,
             show_markers=show_markers,
             indent=indent,
+            first_row_prefix=first_row_prefix,
         )
         if not elements:
             return ""
@@ -1037,6 +1094,7 @@ def StructuredDiff(
     inline_del_color: str = "redBright",
     show_markers: bool = True,
     indent: str = "",
+    first_row_prefix: str = "",
     theme: dict[str, str | None] | None = None,
     **box_props: Any,
 ) -> Element:
@@ -1137,14 +1195,26 @@ def StructuredDiff(
         backward compatibility; downstream callers that want CC-parity
         pass ``show_header=False, show_markers=False`` together.
     indent:
-        Optional literal string prepended to every body row (default
-        ``""``). Used by callers that embed the diff under a parent
-        glyph (e.g. Jarvis's archived Edit row: ``⎿`` on the first
-        visual line + matching indent on every body row so the diff
-        lines up under the gutter). Hunk and marker rows are not
-        prefixed (they're already filtered out when ``show_markers``
-        is ``False``); the indent only applies to ``+`` / ``-`` /
-        context body rows.
+        Optional literal string prepended to every continuation body row
+        (default ``""``). Used by callers that embed the diff under a
+        parent glyph (e.g. Jarvis's archived Edit row: ``⎿`` on the
+        first visual line + matching indent on every continuation row
+        so the diff lines up under the gutter). Hunk and marker rows
+        are not prefixed (they're already filtered out when
+        ``show_markers`` is ``False``); the indent only applies to
+        ``+`` / ``-`` / context body rows. When ``first_row_prefix`` is
+        also set, the first body row uses ``first_row_prefix`` instead
+        — see below.
+    first_row_prefix:
+        Optional literal string prepended to the *first* body row in
+        lieu of ``indent`` (default ``""``). Used by callers that want
+        the parent's ``⎿`` glyph on the same visual line as the first
+        body row (CC's ``MessageResponse`` pattern): pass
+        ``first_row_prefix="  ⎿  "`` and the first row carries it;
+        continuation rows still use ``indent`` so all rows line up
+        under the glyph's column. Empty (default) preserves the
+        legacy behaviour where every body row (including the first)
+        uses ``indent``.
     theme:
         Optional Pygments token → colour mapping forwarded verbatim to
         :func:`HighlightedCode` when highlighting is on. ``None`` lets
@@ -1217,6 +1287,7 @@ def StructuredDiff(
             inline_del_color=inline_del_color,
             show_markers=show_markers,
             indent=indent,
+            first_row_prefix=first_row_prefix,
         )
         box_props = dict(box_props)
         box_props.pop("flexDirection", None)
@@ -1248,5 +1319,6 @@ def StructuredDiff(
         inline_del_color=inline_del_color,
         show_markers=show_markers,
         indent=indent,
+        first_row_prefix=first_row_prefix,
         box_props=box_props,
     )
