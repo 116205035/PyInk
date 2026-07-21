@@ -451,6 +451,7 @@ def _render_diff_row_cc(
     gutter_width: int,
     indent: str = "",
     row_prefix: str = "",
+    bg_width: int | None = None,
 ) -> Element:
     """Render a single add / del / context row in CC-alignment mode.
 
@@ -526,6 +527,13 @@ def _render_diff_row_cc(
         ``indent`` (default ``""``). The caller uses this to attach the
         parent's ``⎿`` glyph to the first body row — see
         :func:`_render_diff` for the first-row wiring.
+    bg_width:
+        Optional fixed target width the bg band pads to (only relevant
+        on the ``full_width_bg`` path). ``None`` (default) preserves
+        the legacy "pad to layout-time terminal width" behaviour. An
+        explicit ``int`` overrides the runtime query. See
+        :func:`_build_full_width_bg_row`'s ``bg_width`` docstring for
+        the full rationale (Jarvis-specific deviation from CC).
 
     Returns
     -------
@@ -549,6 +557,7 @@ def _render_diff_row_cc(
             gutter_width=gutter_width,
             indent=indent,
             row_prefix=row_prefix,
+            bg_width=bg_width,
         )
 
     children: list[Element] = []
@@ -644,6 +653,7 @@ def _build_full_width_bg_row(
     gutter_width: int,
     indent: str,
     row_prefix: str,
+    bg_width: int | None = None,
 ) -> Element:
     r"""Build a diff row as a single Text leaf carrying embedded ANSI.
 
@@ -703,6 +713,17 @@ def _build_full_width_bg_row(
         ``⎿`` glyph). The prefix area is painted in the default
         terminal colours — no bg SGR — so the parent gutter stays
         uncoloured.
+    bg_width:
+        Optional fixed target width the bg band pads to. ``None``
+        (default) preserves the legacy behaviour — query the layout-
+        time terminal width via :func:`get_current_text_width` and
+        pad to that many columns. When set to an ``int``, the bg pad
+        uses this value verbatim and skips the runtime query. Used by
+        callers that want the bg band narrower than the terminal
+        (e.g. Jarvis's ``int(columns * 0.85)`` convention — diff bg
+        is intentionally narrower than the full-width user-message bg
+        so the two blocks form a visual hierarchy; CC itself pads to
+        terminal width, so this is a Jarvis-specific deviation).
 
     Returns
     -------
@@ -776,11 +797,22 @@ def _build_full_width_bg_row(
     )
 
     def _render() -> str:
-        # Layout-time terminal width. ``None`` means unbounded — fall
-        # back to a reasonable default (80) so the pad is at least
-        # non-negative.
-        ctx_w = get_current_text_width()
-        target_w = ctx_w if isinstance(ctx_w, int) and ctx_w > 0 else 80
+        # Target width the bg band pads to.
+        #
+        # ``bg_width`` (explicit override) wins first — callers use it
+        # to narrow the band below the terminal width (Jarvis's
+        # ``int(columns * 0.85)`` convention — CC itself pads to the
+        # full terminal width, so this override is a Jarvis-specific
+        # deviation; see StructuredDiff's ``bg_width`` docstring).
+        #
+        # Without an override we fall back to the layout-time terminal
+        # width — ``None`` means unbounded, in which case we assume 80
+        # so the pad is at least non-negative.
+        if bg_width is not None:
+            target_w = bg_width
+        else:
+            ctx_w = get_current_text_width()
+            target_w = ctx_w if isinstance(ctx_w, int) and ctx_w > 0 else 80
         pad = max(0, target_w - content_w)
         # Layout:
         #   <prefix_str>           # default bg, default fg
@@ -1059,6 +1091,7 @@ def _render_diff(
     first_row_prefix: str = "",
     highlight_removed: bool = True,
     start_line: int = 1,
+    bg_width: int | None = None,
 ) -> list[Element]:
     """Compute the diff and turn it into a list of row elements.
 
@@ -1183,6 +1216,7 @@ def _render_diff(
                     gutter_width=gutter_width,
                     indent=indent,
                     row_prefix=row_prefix,
+                    bg_width=bg_width,
                 )
             )
             continue
@@ -1289,6 +1323,7 @@ def _DiffImpl(**props: Any) -> Element:
     first_row_prefix: str = props.get("first_row_prefix", "")
     highlight_removed: bool = props.get("highlight_removed", True)
     start_line: int = props.get("start_line", 1)
+    bg_width: int | None = props.get("bg_width")
     box_props: dict[str, Any] = props["box_props"]
 
     from ink.core.reconciler import Reconciler
@@ -1326,6 +1361,7 @@ def _DiffImpl(**props: Any) -> Element:
             first_row_prefix=first_row_prefix,
             highlight_removed=highlight_removed,
             start_line=start_line,
+            bg_width=bg_width,
         )
         if not elements:
             return ""
@@ -1385,6 +1421,7 @@ def StructuredDiff(
     first_row_prefix: str = "",
     highlight_removed: bool = True,
     start_line: int = 1,
+    bg_width: int | None = None,
     theme: dict[str, str | None] | None = None,
     **box_props: Any,
 ) -> Element:
@@ -1531,6 +1568,25 @@ def StructuredDiff(
         Edit / Write tool) records this on ``ToolResult.metadata``
         under ``start_line`` by locating where ``old_string`` /
         ``new_string`` / inserted content starts in the original file.
+    bg_width:
+        Optional fixed target width the ``+`` / ``-`` bg band pads to.
+        ``None`` (default) preserves the legacy behaviour — at layout
+        time the renderer queries the active terminal width via
+        :func:`ink.layout.get_current_text_width` and pads each row's
+        bg to that many columns (mirrors CC's "pad to terminal width"
+        rule). When set to an ``int``, the bg pad uses this value
+        verbatim and skips the runtime query. Used by callers that
+        want the bg band narrower than the terminal width so the diff
+        block reads as a lighter visual layer than a sibling full-
+        width block (e.g. Jarvis's user-message bg). Jarvis picks
+        ``int(columns * 0.85)`` — at 120 cols the diff bg pads to 102,
+        leaving 18 cols of user-message bg visible on the right; at
+        80 cols the diff bg pads to 68, leaving 12 cols. NB: this is
+        a **Jarvis-specific deviation** — CC itself pads to the full
+        terminal width (see ``research/cc-diff-bg-width.md`` for the
+        CC reference). Only meaningful when ``full_width_bg=True`` and
+        ``add_bg_color`` / ``del_bg_color`` is set; without the bg
+        band the prop has no visible effect.
     theme:
         Optional Pygments token → colour mapping forwarded verbatim to
         :func:`HighlightedCode` when highlighting is on. ``None`` lets
@@ -1606,6 +1662,7 @@ def StructuredDiff(
             first_row_prefix=first_row_prefix,
             highlight_removed=highlight_removed,
             start_line=start_line,
+            bg_width=bg_width,
         )
         box_props = dict(box_props)
         box_props.pop("flexDirection", None)
@@ -1640,5 +1697,6 @@ def StructuredDiff(
         first_row_prefix=first_row_prefix,
         highlight_removed=highlight_removed,
         start_line=start_line,
+        bg_width=bg_width,
         box_props=box_props,
     )

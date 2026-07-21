@@ -1370,6 +1370,149 @@ def test_cc_props_off_by_default_match_legacy_output() -> None:
     assert "+BETA" in plain
 
 
+def test_structured_diff_bg_width_param_pads_to_explicit_value() -> None:
+    """``bg_width=40`` caps the bg band at 40 columns regardless of layout width.
+
+    Regression for the 07-21-diff-bg-width-shrink task: the renderer's
+    ``_build_full_width_bg_row._render`` used to query
+    :func:`get_current_text_width` unconditionally. The task adds an
+    explicit ``bg_width`` override so callers (Jarvis) can narrow the
+    diff bg below the terminal width — the diff block then reads as a
+    lighter visual layer than a sibling full-width user-message block.
+
+    We render a one-line edit at ``columns=120`` with ``bg_width=40``
+    and assert every bg-carrying row's *visible* width equals 40 (not
+    120). This is the acceptance-criteria checkpoint for AC #1 in the
+    PRD.
+    """
+    import re
+
+    from ink.layout.measure import string_width
+
+    before = "a\nb"
+    after = "a\nc"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            show_markers=False,
+            full_width_bg=True,
+            add_bg_color="rgb(34,92,43)",
+            del_bg_color="rgb(122,41,54)",
+            bg_width=40,
+        ),
+        columns=120,
+    )
+    lines = out.split("\n")
+    # Two body rows: one del (``-b``) and one add (``+c``). Both carry
+    # a bg band that should pad to 40 — not the 120-col layout width.
+    bg_rows = [
+        line for line in lines
+        if f"{ESC}[48;2;122;41;54m" in line or f"{ESC}[48;2;34;92;43m" in line
+    ]
+    assert len(bg_rows) == 2, (
+        f"expected 2 bg-carrying rows, got {len(bg_rows)}: {lines!r}"
+    )
+    for line in bg_rows:
+        bare = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        actual_w = string_width(bare)
+        assert actual_w == 40, (
+            f"bg row should pad to bg_width=40, got visible width {actual_w}; "
+            f"row: {bare!r}"
+        )
+
+
+def test_structured_diff_bg_width_none_pads_to_terminal_width() -> None:
+    """``bg_width=None`` preserves the legacy "pad to terminal width" behaviour.
+
+    Regression guard for AC #2 in the 07-21-diff-bg-width-shrink PRD:
+    the new ``bg_width`` prop must default to ``None`` so existing
+    callers that don't pass it see no optical change. Render a
+    one-line edit at ``columns=40`` with ``bg_width`` unset and assert
+    the bg-carrying rows pad to 40 (the layout width).
+    """
+    import re
+
+    from ink.layout.measure import string_width
+
+    before = "a\nb"
+    after = "a\nc"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            show_markers=False,
+            full_width_bg=True,
+            add_bg_color="rgb(34,92,43)",
+            del_bg_color="rgb(122,41,54)",
+            # bg_width intentionally unset — legacy behaviour.
+        ),
+        columns=40,
+    )
+    lines = out.split("\n")
+    bg_rows = [
+        line for line in lines
+        if f"{ESC}[48;2;122;41;54m" in line or f"{ESC}[48;2;34;92;43m" in line
+    ]
+    assert len(bg_rows) == 2, (
+        f"expected 2 bg-carrying rows, got {len(bg_rows)}: {lines!r}"
+    )
+    for line in bg_rows:
+        bare = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        actual_w = string_width(bare)
+        assert actual_w == 40, (
+            f"bg row should pad to terminal width (40), got visible width "
+            f"{actual_w}; row: {bare!r}"
+        )
+
+
+def test_structured_diff_bg_width_smaller_than_content_keeps_full_content() -> None:
+    """``bg_width`` below the row's content width doesn't truncate content.
+
+    Edge case: when the caller passes a ``bg_width`` smaller than the
+    visible content width, the pad formula ``max(0, target_w -
+    content_w)`` clamps to zero (no trailing pad) and the content is
+    left intact. The bg band still opens and closes around the content;
+    only the trailing pad disappears.
+    """
+    import re
+
+    from ink.layout.measure import string_width
+
+    # A moderately long line so content width exceeds bg_width.
+    before = "short"
+    after = "a meaningfully long line of code"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            show_markers=False,
+            full_width_bg=True,
+            add_bg_color="rgb(34,92,43)",
+            del_bg_color="rgb(122,41,54)",
+            bg_width=10,  # well below any row's content width
+        ),
+        columns=120,
+    )
+    lines = out.split("\n")
+    bg_rows = [
+        line for line in lines
+        if f"{ESC}[48;2;122;41;54m" in line or f"{ESC}[48;2;34;92;43m" in line
+    ]
+    assert bg_rows, f"expected at least one bg-carrying row, got: {lines!r}"
+    for line in bg_rows:
+        bare = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        # Each row's visible width must be at least the content width
+        # (we don't truncate content), and never go negative.
+        actual_w = string_width(bare)
+        assert actual_w >= 1, (
+            f"row collapsed to zero width; bare: {bare!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers for CC-alignment
 # ---------------------------------------------------------------------------
