@@ -113,6 +113,14 @@ def Static(
         # Track how many items we have already flushed. ``ref`` keeps the
         # value stable across effect re-runs without subscribing.
         last_flushed = ref(0)
+        # Register with the host Instance so ``Instance.reset_static()``
+        # can zero us in one pass. Without this, a Jarvis ``/clear`` or
+        # ``/agent`` switch could not reset ``last_flushed`` from outside
+        # the closure — the new agent's history would never flush because
+        # ``_flush`` sees ``len(current) <= start`` and returns. See
+        # ``Instance.reset_static`` docstring for the full flow.
+        if hasattr(inst, "_register_static_ref"):
+            inst._register_static_ref(last_flushed)
 
         def _read_source() -> list[T]:
             if isinstance(items_source, Signal):

@@ -77,6 +77,7 @@ class Instance:
         "static_lines",
         "_static_dirty",
         "_static_rows_approx",
+        "_static_refs",
         "_unmounted",
         "_mount_complete",
         "_exit_event",
@@ -135,6 +136,13 @@ class Instance:
         # for the overflow formula (regression: Jarvis StatusBar stuck
         # on "Initializing..." after history load on medium-tall terminals).
         self._static_rows_approx: int = 0
+        # Registered ``last_flushed`` refs from every mounted
+        # :func:`ink.components.static.Static` instance. Each Static
+        # pushes its closure-local ref here on mount via
+        # :meth:`_register_static_ref` so :meth:`reset_static` can zero
+        # them in one pass without reaching into the component closure.
+        # Cleared on unmount (see :meth:`_do_unmount_tree`).
+        self._static_refs: list = []
         self._unmounted: bool = False
         self._mount_complete: bool = False
         self._exit_event: threading.Event = threading.Event()
@@ -250,6 +258,86 @@ class Instance:
             self._static_dirty = True
         # Synchronous paint so static text appears immediately.
         self._paint_now()
+
+    def _register_static_ref(self, ref) -> None:
+        """Register a Static component's ``last_flushed`` ref.
+
+        Called by :func:`ink.components.static.Static` on mount so
+        :meth:`reset_static` can zero every registered ref in one pass
+        without reaching into the component closure. The ref is a
+        :class:`ink.core.signal.ref` wrapping an ``int``; we keep it as
+        ``list`` of opaque refs to avoid importing ``Ref`` into this
+        module (would create a circular dependency — ``signal`` already
+        imports nothing from render, and we want to keep it that way).
+
+        Safe to call from inside ``StaticImpl`` (component mount path)
+        — runs under ``self._lock`` so a concurrent ``reset_static``
+        cannot observe a half-registered list.
+        """
+        with self._lock:
+            self._static_refs.append(ref)
+
+    def reset_static(self) -> None:
+        """Reset scrollback + all Static flush state.
+
+        User-initiated clear gesture (Jarvis ``/clear`` and ``/agent``
+        switch). Emits three escape sequences in order:
+
+        1. ``\\x1b[3J`` — erase the scrollback buffer above the viewport
+           (xterm / iTerm2 / Windows Terminal / modern tmux; silently
+           no-op on legacy ``conhost``).
+        2. ``\\x1b[2J`` — erase the visible viewport. This sequence is
+           normally FORBIDDEN by the cursor contract
+           (see ``jarvis/.trellis/spec/frontend/pyink-cursor-contract.md``)
+           because in inline mode it pushes the viewport content into
+           scrollback. Here we *want* it gone — the user explicitly
+           asked to clear. We emit ``\\x1b[3J`` *first* so the pre-existing
+           scrollback is already gone before ``\\x1b[2J`` can push more.
+        3. ``\\x1b[H`` — cursor to home (row 1, column 1).
+
+        ... and resets PyInk state so the next paint is a full repaint:
+
+        * ``current_frame = ""`` — :meth:`_paint_now` will treat the
+          next paint as a first paint (``write_diff(None, new_frame)``).
+        * ``_static_rows_approx = 0`` — the cursor-up cap formula in
+          :meth:`_paint_now` would otherwise under-count reachable rows
+          and the next frame could paint in the wrong place.
+        * ``static_lines`` cleared + ``_static_dirty = False`` —
+          defensive; should be empty already after the previous paint.
+        * Every registered Static ref's ``last_flushed`` zeroed — the
+          next ``_flush`` effect run will write items from index 0.
+
+        After ``reset_static`` returns, the caller typically swaps the
+        Signal feeding ``<Static>`` (e.g. ``messages.value = [welcome]``)
+        in the same atomic step. The signal write triggers the existing
+        ``_flush`` effect, which sees ``last_flushed == 0`` and writes
+        the new items via :meth:`write_static` → :meth:`_paint_now` →
+        fresh initial paint anchored at cursor home.
+        """
+        with self._lock:
+            if self._unmounted:
+                return
+            # Escape sequences — emitted in this specific order so that
+            # the \x1b[2J (which can push viewport content into scrollback
+            # on some terminals) doesn't leave orphaned agent-A lines in
+            # scrollback. \x1b[3J first nukes existing scrollback, then
+            # \x1b[2J does the visible clear, then \x1b[H parks cursor.
+            self.stdout.write("\x1b[3J\x1b[2J\x1b[H")
+            self.stdout.flush()
+            # PyInk state reset.
+            self.current_frame = ""
+            self._static_rows_approx = 0
+            self.static_lines.clear()
+            self._static_dirty = False
+            for static_ref in self._static_refs:
+                try:
+                    static_ref.value = 0
+                except (AttributeError, TypeError):
+                    # Defensive: a misbehaving ref shouldn't crash the
+                    # reset. The Static closure owns the ref so a failed
+                    # zero here just means that one component re-flushes
+                    # from its old position (visual glitch, not a crash).
+                    pass
 
     def cleanup(self) -> None:
         """unmount + remove from atexit registry. Safe to call multiple times."""
@@ -539,6 +627,11 @@ class Instance:
             clear_box_refs(self.mounted_tree)
             self.reconciler.unmount(self.mounted_tree)
             self.mounted_tree = None
+        # Drop registered Static refs — their owning components just got
+        # unmounted above, so the refs are unreachable from anywhere
+        # except this list. ``rerender`` re-populates it as the new tree
+        # mounts its own Static instances.
+        self._static_refs.clear()
 
     def _clear_frame_for_exit(self) -> None:
         with self._lock:

@@ -304,3 +304,127 @@ def test_instance_write_static_after_unmount_is_silent() -> None:
     inst.unmount()
     # Should not raise; should not write anything.
     inst.write_static("late\n")
+
+
+# ---------------------------------------------------------------------------
+# Instance.reset_static — user-initiated clear gesture
+# ---------------------------------------------------------------------------
+
+
+def test_reset_static_emits_clear_escape_sequences() -> None:
+    """reset_static writes \\x1b[3J + \\x1b[2J + \\x1b[H to stdout."""
+    inst, out = _render_silent(Text("frame"), columns=20, rows=3)
+    out.truncate(0)
+    out.seek(0)
+    inst.reset_static()
+    written = out.getvalue()
+    # Order matters: \x1b[3J before \x1b[2J so the pre-clear of scrollback
+    # happens before \x1b[2J potentially pushes viewport into scrollback.
+    assert "\x1b[3J" in written
+    assert "\x1b[2J" in written
+    assert "\x1b[H" in written
+    assert written.index("\x1b[3J") < written.index("\x1b[2J")
+    inst.unmount()
+
+
+def test_reset_static_zeros_state() -> None:
+    """After reset_static, current_frame is empty + _static_rows_approx is 0."""
+    inst, out = _render_silent(Text("frame"), columns=20, rows=3)
+    # Force some static + frame state to accumulate.
+    inst.write_static("line1\nline2\n")
+    assert inst._static_rows_approx > 0
+    assert inst.current_frame != ""
+    inst.reset_static()
+    assert inst.current_frame == ""
+    assert inst._static_rows_approx == 0
+    assert inst.static_lines == []
+    assert inst._static_dirty is False
+    inst.unmount()
+
+
+def test_reset_static_zeros_registered_static_refs() -> None:
+    """A mounted Static's last_flushed should be 0 after reset_static."""
+    log = signal(["a", "b", "c"])
+
+    def App() -> Any:
+        return Box(
+            Static(log, lambda item, idx: Text(item)),
+            flexDirection="column",
+        )
+
+    inst, out = _render_silent(App(), columns=20, rows=10)
+    # After mount, last_flushed should be 3 (all items flushed).
+    assert len(inst._static_refs) == 1
+    assert inst._static_refs[0].value == 3
+    inst.reset_static()
+    # reset_static zeroes every registered ref.
+    assert inst._static_refs[0].value == 0
+    inst.unmount()
+
+
+def test_reset_static_next_flush_writes_from_index_zero() -> None:
+    """After reset_static, swapping the items source writes the new list from index 0."""
+    log = signal(["old_a", "old_b", "old_c"])
+
+    def App() -> Any:
+        return Box(
+            Static(log, lambda item, idx: Text(item)),
+            flexDirection="column",
+        )
+
+    inst, out = _render_silent(App(), columns=40, rows=10)
+    initial = out.getvalue()
+    # All old items present at mount.
+    for item in ("old_a", "old_b", "old_c"):
+        assert item in initial
+
+    # Reset + swap items in one atomic step.
+    out.truncate(0)
+    out.seek(0)
+    inst.reset_static()
+    log.value = ["new_x", "new_y"]
+    # Allow the reactive flush + paint to land.
+    time.sleep(0.2)
+    repaint = out.getvalue()
+    # The new items flush from index 0 — they appear in stdout.
+    assert "new_x" in repaint
+    assert "new_y" in repaint
+    # last_flushed has advanced to 2 (the new list length).
+    assert inst._static_refs[0].value == 2
+    inst.unmount()
+
+
+def test_reset_static_without_static_mounted_is_safe() -> None:
+    """Calling reset_static when no Static is mounted does not crash."""
+    inst, out = _render_silent(Text("frame"), columns=20, rows=3)
+    # No Static → _static_refs is empty. reset_static still emits escapes
+    # and zeros PyInk state.
+    inst.reset_static()
+    assert inst.current_frame == ""
+    assert inst._static_rows_approx == 0
+    inst.unmount()
+
+
+def test_reset_static_after_unmount_is_silent() -> None:
+    inst, _out = _render_silent(Text("frame"), columns=20, rows=3)
+    inst.unmount()
+    # Should not raise; should not write anything.
+    inst.reset_static()
+
+
+def test_unmount_clears_static_refs() -> None:
+    """unmount drops all registered Static refs so a stale list doesn't accumulate."""
+    log = signal(["a"])
+
+    def App() -> Any:
+        return Box(
+            Static(log, lambda item, idx: Text(item)),
+            flexDirection="column",
+        )
+
+    inst, _out = _render_silent(App(), columns=20, rows=5)
+    assert len(inst._static_refs) == 1
+    inst.unmount()
+    # After unmount the refs are dropped — defensive cleanup so a
+    # subsequent rerender/mount starts from an empty list.
+    assert inst._static_refs == []
