@@ -327,6 +327,41 @@ def test_reset_static_emits_clear_escape_sequences() -> None:
     inst.unmount()
 
 
+def test_reset_static_emits_scroll_clear_newlines() -> None:
+    """reset_static pushes viewport into scrollback via raw newlines.
+
+    Cross-terminal fallback for the case where the terminal doesn't
+    honour ``\\x1b[3J`` (or honours it but ``\\x1b[2J`` is somehow
+    racing the escape flush). The scroll-clear emits ``\\n`` at least
+    ``rows`` times so the terminal physically scrolls every visible
+    line off-screen, then ``\\r`` to return the cursor to column 1
+    before the escape sequences run.
+    """
+    rows = 3
+    inst, out = _render_silent(Text("frame"), columns=20, rows=rows)
+    out.truncate(0)
+    out.seek(0)
+    inst.reset_static()
+    written = out.getvalue()
+    # At least `rows` newlines appear (the scroll-clear pushes the
+    # viewport into scrollback).
+    assert written.count("\n") >= rows
+    # A CR appears so the cursor returns to column 1 before escapes.
+    assert "\r" in written
+    # The escapes are still present.
+    assert "\x1b[3J" in written
+    assert "\x1b[2J" in written
+    assert "\x1b[H" in written
+    # Ordering: scroll-clear newlines land BEFORE the escapes. The
+    # escapes need the cursor already advanced past the old viewport
+    # (otherwise \x1b[2J would just push the still-visible content
+    # into scrollback again on hosts where \x1b[3J is a no-op).
+    first_newline = written.index("\n")
+    first_3j = written.index("\x1b[3J")
+    assert first_newline < first_3j
+    inst.unmount()
+
+
 def test_reset_static_zeros_state() -> None:
     """After reset_static, current_frame is empty + _static_rows_approx is 0."""
     inst, out = _render_silent(Text("frame"), columns=20, rows=3)

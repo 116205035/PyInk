@@ -38,6 +38,7 @@ Render-loop architecture:
 from __future__ import annotations
 
 import atexit
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -57,6 +58,8 @@ if TYPE_CHECKING:
     from ink.render.pipeline import RenderOptions
 
 __all__ = ["Instance"]
+
+logger = logging.getLogger(__name__)
 
 
 class Instance:
@@ -281,19 +284,27 @@ class Instance:
         """Reset scrollback + all Static flush state.
 
         User-initiated clear gesture (Jarvis ``/clear`` and ``/agent``
-        switch). Emits three escape sequences in order:
+        switch). Emits scroll-clear + escape sequences in order:
 
-        1. ``\\x1b[3J`` — erase the scrollback buffer above the viewport
+        1. **Scroll-clear fallback**: write ``\\n`` * (rows + 2) to push
+           the current viewport contents into the scrollback region of
+           the terminal, then ``\\r`` to return cursor to column 1.
+           This is the cross-terminal fallback — every terminal (legacy
+           ``conhost`` included) understands raw ``\\n`` and scrolls
+           accordingly, so even when the escapes below are no-ops the
+           viewport will be visually cleared.
+        2. ``\\x1b[3J`` — erase the scrollback buffer above the viewport
            (xterm / iTerm2 / Windows Terminal / modern tmux; silently
-           no-op on legacy ``conhost``).
-        2. ``\\x1b[2J`` — erase the visible viewport. This sequence is
+           no-op on legacy ``conhost`` — scroll-clear already handled
+           it).
+        3. ``\\x1b[2J`` — erase the visible viewport. This sequence is
            normally FORBIDDEN by the cursor contract
            (see ``jarvis/.trellis/spec/frontend/pyink-cursor-contract.md``)
            because in inline mode it pushes the viewport content into
            scrollback. Here we *want* it gone — the user explicitly
-           asked to clear. We emit ``\\x1b[3J`` *first* so the pre-existing
-           scrollback is already gone before ``\\x1b[2J`` can push more.
-        3. ``\\x1b[H`` — cursor to home (row 1, column 1).
+           asked to clear. Scroll-clear + ``\\x1b[3J`` already ran, so
+           nothing is left to push into scrollback.
+        4. ``\\x1b[H`` — cursor to home (row 1, column 1).
 
         ... and resets PyInk state so the next paint is a full repaint:
 
@@ -314,14 +325,37 @@ class Instance:
         the new items via :meth:`write_static` → :meth:`_paint_now` →
         fresh initial paint anchored at cursor home.
         """
+        logger.info(
+            "[Instance.reset_static] CALLING id=%r unmounted=%r",
+            id(self), self._unmounted,
+        )
         with self._lock:
             if self._unmounted:
+                logger.info(
+                    "[Instance.reset_static] EARLY-RETURN id=%r: unmounted",
+                    id(self),
+                )
                 return
-            # Escape sequences — emitted in this specific order so that
-            # the \x1b[2J (which can push viewport content into scrollback
-            # on some terminals) doesn't leave orphaned agent-A lines in
-            # scrollback. \x1b[3J first nukes existing scrollback, then
-            # \x1b[2J does the visible clear, then \x1b[H parks cursor.
+            # Resolve terminal rows for the scroll-clear budget. Defaults
+            # to 24 when unknown — over-estimate is harmless since each
+            # newline just scrolls the terminal.
+            rows = self._resolve_rows() or 24
+            # Step 1 — scroll-clear fallback: push the entire viewport
+            # into scrollback by emitting (rows + 2) newlines, then CR
+            # back to column 1. Every terminal understands raw \n, so
+            # this works whether or not VT processing / \x1b[3J is
+            # honoured by the host terminal.
+            self.stdout.write("\n" * (rows + 2))
+            self.stdout.write("\r")
+            # Step 2 — escape sequences — emitted in this specific order
+            # so that the \x1b[2J (which can push viewport content into
+            # scrollback on some terminals) doesn't leave orphaned
+            # agent-A lines in scrollback. \x1b[3J first nukes existing
+            # scrollback, then \x1b[2J does the visible clear, then
+            # \x1b[H parks cursor. Scroll-clear has already emptied the
+            # viewport, so these act as a hardening + cursor-home step
+            # on Windows Terminal / xterm and as no-ops on legacy
+            # terminals (where scroll-clear did the heavy lifting).
             self.stdout.write("\x1b[3J\x1b[2J\x1b[H")
             self.stdout.flush()
             # PyInk state reset.
@@ -338,6 +372,10 @@ class Instance:
                     # zero here just means that one component re-flushes
                     # from its old position (visual glitch, not a crash).
                     pass
+        logger.info(
+            "[Instance.reset_static] RETURNED id=%r rows=%r",
+            id(self), rows,
+        )
 
     def cleanup(self) -> None:
         """unmount + remove from atexit registry. Safe to call multiple times."""
