@@ -584,6 +584,24 @@ class Instance:
                 # erase + repaint that walks the cursor back to frame
                 # origin.
                 if force_repaint or (height_delta >= 1 and available_rows):
+                    if force_repaint:
+                        # Anchor cursor to viewport bottom before erase +
+                        # paint. Windows Terminal (and most VT-100
+                        # terminals) re-wrap scrollback content on resize,
+                        # which shifts the cursor's visual position away
+                        # from the old frame's bottom row. Without
+                        # re-anchoring, ``repaint_frame``'s relative
+                        # cursor math (walk-up + ``\x1b[0J``) operates on
+                        # scrollback rows instead of the viewport — the
+                        # new frame visually lands mid-scrollback and
+                        # hides the re-wrapped content above (Root D:
+                        # "status_bar hides markdown table after shrink").
+                        #
+                        # ``\x1b[<N>B`` (cursor-down) is clamped by the
+                        # terminal to the last row of the viewport, so an
+                        # oversized N (999) is safe regardless of viewport
+                        # height. ``\r`` returns the cursor to column 1.
+                        self.stdout.write("\x1b[999B\r")
                     repaint_frame(
                         prev_frame, new_frame, self.stdout, available_rows, cols,
                     )

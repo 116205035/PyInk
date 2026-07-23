@@ -537,3 +537,56 @@ def test_force_repaint_uses_clear_to_end_when_old_frame_wider_than_cols() -> Non
     )
 
 
+def test_force_repaint_anchors_cursor_at_viewport_bottom() -> None:
+    """``_force_repaint`` makes ``_paint_now`` emit a large cursor-down +
+    CR *before* the erase + paint walk, anchoring the cursor to the
+    viewport bottom.
+
+    Root D (resize hides scrollback content): Windows Terminal re-wraps
+    scrollback on resize, which shifts the cursor's visual position away
+    from the old frame's bottom. Without re-anchoring, the erase +
+    paint walk lands on scrollback rows and the new frame visually
+    covers the re-wrapped content above.
+
+    ``\\x1b[<N>B`` is clamped by the terminal to the viewport's last
+    row; the literal 999 is large enough to cover any realistic
+    viewport height while staying within VT-100 parameter range.
+    """
+    inst, out = _render_silent(Text("fixed"), columns=20, rows=3)
+    try:
+        out.truncate(0)
+        out.seek(0)
+        inst._force_repaint = True  # type: ignore[attr-defined]
+        inst._paint_now()  # type: ignore[attr-defined]
+        repaint = out.getvalue()
+        # Cursor-down 999 + CR must be present when force_repaint fires.
+        assert "\x1b[999B\r" in repaint, (
+            f"expected cursor-anchor sequence, got: {repaint!r}"
+        )
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_non_force_repaint_does_not_emit_cursor_anchor() -> None:
+    """Without ``_force_repaint``, ``_paint_now`` must NOT emit the
+    ``\\x1b[999B\\r`` cursor-anchor sequence — it's a resize-only
+    behaviour. Regular repaints route through incremental ``write_diff``
+    and rely on the cursor already being parked at the frame's bottom.
+
+    Validation: a normal rerender that changes content emits a diff
+    without the anchor sequence.
+    """
+    inst, out = _render_silent(Text("first"), columns=20, rows=3)
+    try:
+        out.truncate(0)
+        out.seek(0)
+        # Plain rerender — no force_repaint flag set.
+        inst.rerender(Text("second"))  # type: ignore[attr-defined]
+        repaint = out.getvalue()
+        assert "\x1b[999B" not in repaint, (
+            f"cursor-anchor leaked into non-force path: {repaint!r}"
+        )
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+

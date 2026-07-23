@@ -6,6 +6,43 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — resize no longer hides scrollback content (Root D)
+
+Windows Terminal (and most VT-100 terminals) re-wrap scrollback content
+on resize: a markdown table that fit on one line at 100 cols gets
+passively wrapped to two lines at 60 cols, etc. This re-wrap shifts
+the cursor's *visual* position — the cursor's absolute row stays put
+in the terminal's internal coordinate system, but relative to the
+re-wrapped viewport it has drifted away from the old frame's bottom
+row.
+
+PyInk's `repaint_frame` uses purely relative cursor math (walk-up
+`old_visual - 1` rows, emit `\x1b[0J`, walk back down/up to align the
+new frame). When the cursor has drifted, the walk-up lands inside the
+scrollback, `\x1b[0J` clears scrollback rows, and the new frame is
+painted mid-scrollback — visually covering the re-wrapped table above.
+Symptom: shrink the terminal → the markdown table that was visible
+above the live frame disappears behind the frame.
+
+The fix anchors the cursor to the viewport bottom **before** the
+erase + paint walk. In `_paint_now`'s `force_repaint` branch we now
+emit `\x1b[999B\r` (cursor-down by a large constant + carriage
+return). The terminal clamps cursor-down to the last row of the
+viewport, so 999 is safe regardless of viewport height. From the
+correctly-anchored starting position, `repaint_frame`'s relative
+math works as intended.
+
+Side effect: if the static region is small (live frame sits mid-
+viewport), the first resize after mount will snap the frame down to
+the viewport bottom, leaving a blank gap above. The trade-off is
+acceptable — in Jarvis's typical session the frame is already at the
+viewport bottom, so the snap is invisible.
+
+Non-TTY note: `\x1b[999B` is always written to the byte stream, even
+when stdout is a `StringIO` (tests). This is necessary — the byte
+contract is what the terminal consumes, and tests that drive PyInk
+through `StringIO` verify the byte stream, not visual effect.
+
 ### Fixed — terminal resize now redraws the live area
 
 Two independent root causes prevented the live area from visually updating
