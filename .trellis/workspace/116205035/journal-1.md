@@ -723,3 +723,36 @@ PyInk Markdown 渲染对标 claude-code，拆 3 个 PR 完成：PR1 基础改造
 ### Next Steps
 
 - None - task complete
+
+
+## Session 21: PyInk gutter zero-pad + long-line wrap fix follow-through
+
+**Date**: 2026-07-23
+**Task**: PyInk gutter zero-pad + long-line wrap fix follow-through
+**Branch**: `main`
+
+### Summary
+
+Completed zero-padded line-number gutter fix for HighlightedCode + StructuredDiff. Changed 3 format strings from space-right-align to zero-fill (highlighted_code.py:433 f"{i:0{w}} ", diff.py:324 + 966 rjust(w, "0")). Gutter width calculation unchanged (natural width for HighlightedCode, CC's len(str(max))+1 for StructuredDiff). 1-digit width remains identical (no-op). Continuation rows stay all-spaces. Added 5 new tests + updated 2 existing; 175/175 pass. End-to-end verified via diag_gutter.py (094–103 perfectly aligned), diag_jarvis.py (Jarvis write summary integration), diag_diff.py (StructuredDiff 01-/01+ and 0137-/0137+). Follows the previous b2ca2b2 wrap fix — same area of code.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `27b76f0` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
