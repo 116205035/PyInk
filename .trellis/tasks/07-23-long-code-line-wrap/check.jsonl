@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/frontend/rendering-contracts.md", "reason": "校验重构后的 HighlightedCode/StructuredDiff 仍符合 factory 组件的 width 契约——factory 不能读 layout-time width context，wrap 必须靠 _measure_paragraph 内部的 wrap_text 自然启动，不能用 get_current_text_width() 在 factory 里手动切行。"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "校验 tokens_to_ansi_string helper 是否复用了已有 ANSI emit 路径（ink.render.ansi），而非重新实现；校验 StructuredDiff 改动是否复用了已有的 bg band 渲染逻辑；校验短行渲染是否字节级一致（snapshot 测试）。"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "校验跨层数据流：factory emit 的单 Text+ANSI → layout 的 wrap_text 切行 → paint 层正确渲染 ANSI + bg band。特别检查 wrapped rows 上 bg color 是否正确延续（measure.py 的 _split_visible_chunks 必须能识别 ANSI bg 序列并正确处理宽度）。"}

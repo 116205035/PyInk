@@ -380,19 +380,28 @@ def _render_diff_line(
     Returns
     -------
     Element
-        Either a row ``Box`` (prefix + highlighted body) when
-        highlighting is on, or a single coloured ``Text`` leaf
-        otherwise.
+        Either a single coloured ``Text`` leaf (no-highlight path) or a
+        single ``Text`` leaf whose body is the inline-ANSI string
+        carrying the diff-coloured sigil + Pygments-coloured code body
+        (highlight path). PR2 refactor: the highlight path used to emit
+        ``Box(Text(prefix, color, bold), HighlightedCode(code))`` which
+        contained multiple Text leaves (one per Pygments token) inside
+        the HighlightedCode child Box — the flex shrink algorithm
+        penalised every leaf when the row exceeded ``columns``, eating
+        trailing characters from every Pygments token. The new layout
+        is ONE Text leaf per row so the layout engine's
+        ``_measure_paragraph → wrap_text(mode="wrap")`` pipeline wraps
+        the entire row onto subsequent visual rows without per-token
+        shrink. CC parity (PR1's ``HighlightedCode`` architectural
+        pattern).
 
     Notes
     -----
     The code portion is ``line[1:]`` — i.e. the diff line with its
-    leading ``+`` / ``-`` stripped. We split prefix / body into two
-    children of a row ``Box`` so the prefix keeps the diff colour
-    (green / red) while the body inherits the syntax colours from
-    :func:`HighlightedCode`. This matches the visual treatment of
-    Claude Code's ``StructuredDiff``: the ``+`` / ``-`` glyph is a
-    diff marker, the code next to it is source code.
+    leading ``+`` / ``-`` stripped. The sigil and code body are
+    composed into a single inline-ANSI string so they wrap together
+    (the sigil stays on the first visual row with the first chunk of
+    code; continuation visual rows carry only wrapped code chunks).
     """
     code_part = line[1:]
     if not use_highlight:
@@ -405,37 +414,84 @@ def _render_diff_line(
             )
         return Text(line, color=color)
 
-    # Lazy import: HighlightedCode itself imports pygments lazily, so
-    # the only cost of this branch when pygments is missing is the
-    # ``use_highlight`` flag (probed once per render via
-    # :func:`_pygments_available``).
-    from ink.externals.highlighted_code import HighlightedCode
+    # Highlight path: emit ONE Text leaf carrying sigil + body as a
+    # single inline-ANSI string. The sigil is wrapped in the diff
+    # colour (red / green) + bold; the body tokens are wrapped in their
+    # Pygments colours via :func:`tokens_to_ansi_string`. A single
+    # reset closes the row. When ``bg_color`` is set we additionally
+    # emit the bg SGR open after the sigil's reset and before the body
+    # (so the sigil cell keeps just the diff colour, the body cells
+    # carry syntax colours over the bg).
+    #
+    # Byte-layout (no bg):
+    #     <sigil_fg><sigil_bold><sigil><reset><body_ansi_str>
+    #
+    # Byte-layout (with bg):
+    #     <sigil_fg><sigil_bold><sigil><reset>
+    #     <bg_open><body_ansi_str><pad spaces><reset>
+    #
+    # When ``bg_color`` is set we also forward
+    # ``flushBackgroundToWidth=True`` on the leaf so PyInk's renderer
+    # pads the row to the terminal width with bg cells (preserves the
+    # legacy visual signature for short content).
+    import pygments
+    from pygments.lexers import get_lexer_by_name, guess_lexer
 
-    # When a per-line background is requested the prefix glyph carries
-    # the bg + flushes it to the row width; HighlightedCode itself has
-    # no ``backgroundColor`` prop on its inner Text leaves, so the
-    # background only fills the prefix cell. This still produces the
-    # signature coloured band for the prefix column — good enough for
-    # the diff-row colour signature; a full-row fill would require
-    # upstream changes to HighlightedCode (out of scope for PR2).
-    if bg_color:
-        return Box(
-            Text(
-                prefix,
+    from ink.externals.highlighted_code import (
+        DEFAULT_THEME,
+        tokens_to_ansi_string,
+    )
+
+    sigil_fg = _fg_sgr(color)
+    sigil_str = sigil_fg + _SGR_BOLD + prefix + _SGR_RESET
+
+    try:
+        lexer = (
+            guess_lexer(code_part)
+            if language == "auto"
+            else get_lexer_by_name(language)
+        )
+        tokens = list(pygments.lex(code_part, lexer))
+    except Exception:
+        # Pygments choked — fall back to the plain coloured path so the
+        # row still renders.
+        if bg_color:
+            return Text(
+                line,
                 color=color,
-                bold=True,
                 backgroundColor=bg_color,
                 flushBackgroundToWidth=True,
-            ),
-            HighlightedCode(code_part, language=language, theme=theme),
-            flexDirection="row",
+            )
+        return Text(line, color=color)
+
+    # Build the effective theme the same way HighlightedCode does:
+    # DEFAULT_THEME as the base, ``theme`` (when provided) merged on
+    # top. Passing an empty dict would lose all per-token colours
+    # because ``_lookup_color`` walks candidates against the theme
+    # dict and never finds a hit.
+    effective_theme: dict[str, str | None] = dict(DEFAULT_THEME)
+    if theme:
+        effective_theme.update(theme)
+    body_str = tokens_to_ansi_string(tokens, effective_theme)
+    # Pygments emits a trailing ``\n`` whitespace token for code that
+    # ends without one (the lexer normalises); drop it so the rendered
+    # row doesn't have a phantom empty paragraph after the body.
+    # Mirrors :func:`_group_tokens_by_line`'s trailing-empty-row drop.
+    if body_str.endswith("\n"):
+        body_str = body_str[:-1]
+
+    if bg_color:
+        # The leaf carries ``backgroundColor`` + ``flushBackgroundToWidth``
+        # so PyInk's renderer pads the row to terminal width with bg
+        # cells. The body ANSI string already carries the per-token fg
+        # SGRs; the bg is layered on top by the leaf's ``apply_style``.
+        return Text(
+            sigil_str + body_str,
+            backgroundColor=bg_color,
+            flushBackgroundToWidth=True,
         )
 
-    return Box(
-        Text(prefix, color=color, bold=True),
-        HighlightedCode(code_part, language=language, theme=theme),
-        flexDirection="row",
-    )
+    return Text(sigil_str + body_str)
 
 
 def _render_diff_row_cc(
@@ -452,6 +508,9 @@ def _render_diff_row_cc(
     indent: str = "",
     row_prefix: str = "",
     bg_width: int | None = None,
+    use_highlight: bool = False,
+    language: str = "text",
+    highlight_theme: dict[str, str | None] | None = None,
 ) -> Element:
     """Render a single add / del / context row in CC-alignment mode.
 
@@ -464,24 +523,25 @@ def _render_diff_row_cc(
     Two rendering strategies:
 
     * **Full-width bg path** (``full_width_bg=True`` AND ``bg_color`` is
-      set): build the entire row as a SINGLE ``Text`` leaf whose
-      callable emits the row prefix + bg SGR + gutter + body +
-      trailing space pad + reset as one string with in-band ANSI
-      escapes. The bg SGR is embedded AFTER the prefix area so the
-      prefix (e.g. ``"  ⎿  "``) keeps the terminal's default bg —
-      mirrors Jarvis's ``_pending_main_text`` pattern
-      (``jarvis/tui/app.py:3082``). The Text leaf carries NO
-      ``backgroundColor`` prop; the bg is purely in-band ANSI handled
-      by the terminal. This is the ONLY way to get a true full-width
-      bg band with per-token fg highlight AND keep the prefix area
-      uncoloured: PyInk's per-leaf ``apply_style`` always emits a
-      ``\\x1b[0m`` reset at the end of each styled Text leaf, which
-      kills the bg; concatenating multiple styled leaves therefore
-      breaks the band after the first leaf. The single-leaf approach
-      keeps the bg SGR open across the entire content area.
-    * **Multi-leaf path** (no full-width bg): keep the historical
-      Box-of-Text-leaves shape so callers that opt out of the bg band
-      see no behavioural change.
+      set): delegate to :func:`_build_full_width_bg_row` which builds the
+      entire row as a SINGLE ``Text`` leaf whose callable emits the row
+      prefix + bg SGR + gutter + body + trailing space pad + reset as
+      one string with in-band ANSI escapes.
+    * **Multi-leaf path** (no full-width bg): emit ONE ``Text`` leaf for
+      the body (sigil + body in a single ANSI-coded string) so the row
+      Box has at most three leaves — ``Text(prefix)`` (optional),
+      ``Text(gutter)`` (optional), ``Text(body)``. This fixes the
+      long-line shrink bug (the pre-refactor layout emitted one Text
+      leaf per Pygments / word-diff token, and the flex shrink
+      algorithm penalised every leaf proportionally when the row
+      exceeded ``columns``, eating trailing characters from every
+      token). Now the body is one flexible child; when it overflows
+      ``columns`` the layout engine's ``_measure_paragraph →
+      wrap_text(mode="wrap")`` pipeline wraps it onto subsequent
+      visual rows. The prefix / gutter leaves are fixed-width so they
+      stay at their natural column positions; continuation visual rows
+      self-align under the first row's code start column. CC parity
+      (PR1's ``HighlightedCode`` architectural pattern).
 
     Parameters
     ----------
@@ -534,17 +594,29 @@ def _render_diff_row_cc(
         explicit ``int`` overrides the runtime query. See
         :func:`_build_full_width_bg_row`'s ``bg_width`` docstring for
         the full rationale (Jarvis-specific deviation from CC).
+    use_highlight:
+        When ``True`` the body is tokenised via Pygments and each token
+        gets its own fg SGR (inline ANSI). Forwarded to
+        :func:`_compose_body_ansi`. Defaults to ``False`` — CC-mode
+        bodies are typically plain coloured spans (Pygments runs only
+        in the legacy fast path).
+    language:
+        Pygments lexer alias. Only meaningful when
+        ``use_highlight=True``.
+    highlight_theme:
+        Optional Pygments token colour override.
 
     Returns
     -------
     Element
-        A row ``Box`` (gutter + body) for the multi-leaf path, or a
-        single ``Text`` leaf for the full-width-bg path and for the
-        no-features degenerate case.
+        A row ``Box`` (prefix + gutter + body Text leaves) for the
+        multi-leaf path, or a single ``Text`` leaf for the full-width-bg
+        path and for the no-features degenerate case.
     """
     # Full-width bg path: single Text leaf with embedded ANSI escapes.
-    # See the docstring for why this is required (per-leaf ``0m`` resets
-    # kill the bg band in the multi-leaf layout).
+    # See :func:`_build_full_width_bg_row`'s docstring for why this is
+    # required (per-leaf ``0m`` resets kill the bg band in the
+    # multi-leaf layout).
     if full_width_bg and bg_color is not None:
         return _build_full_width_bg_row(
             body=body,
@@ -558,6 +630,9 @@ def _render_diff_row_cc(
             indent=indent,
             row_prefix=row_prefix,
             bg_width=bg_width,
+            use_highlight=use_highlight,
+            language=language,
+            highlight_theme=highlight_theme,
         )
 
     children: list[Element] = []
@@ -583,28 +658,41 @@ def _render_diff_row_cc(
             )
         )
 
-    # Body: inline-highlighted spans when available, otherwise a plain
-    # Text carrying the full body in the diff colour.
-    if inline_parts is not None:
-        children.extend(
-            _build_inline_highlighted_spans(
-                inline_parts,
-                base_color=base_color,
-                inline_color=inline_color,
-                bg_color=bg_color,
-                full_width_bg=False,
-            )
-        )
-    else:
-        body_props: dict[str, Any] = {"color": base_color}
-        if bg_color is not None:
-            body_props["backgroundColor"] = bg_color
-        children.append(Text(body, **body_props))
+    # Body: ONE Text leaf carrying sigil + body in a single inline-ANSI
+    # string. This is the PR2 refactor — the pre-refactor layout emitted
+    # one Text leaf per token (inline_highlight) or a single Text leaf
+    # per body chunk, and the flex shrink algorithm penalised every
+    # leaf proportionally when the row exceeded ``columns``. Now the
+    # body is one flexible child; layout's wrap pipeline wraps it
+    # correctly when it overflows.
+    #
+    # The trailing ``\x1b[0m`` reset preserves byte-for-byte parity
+    # with the pre-refactor multi-leaf layout: each leaf's
+    # ``apply_style`` wrapper emitted its own open + reset, so the
+    # row's last leaf always ended with ``\x1b[0m``. Without the
+    # explicit reset the row's last byte would be the body content,
+    # letting the fg SGR leak into adjacent grid cells (the
+    # renderer's ``rstrip()`` per row drops trailing whitespace but
+    # not trailing SGR bytes — still, byte-identical output demands
+    # the reset be present).
+    body_str = _compose_body_ansi(
+        body=body,
+        inline_parts=inline_parts,
+        base_color=base_color,
+        inline_color=inline_color,
+        use_highlight=use_highlight,
+        language=language,
+        highlight_theme=highlight_theme,
+    ) + _SGR_RESET
+    body_props: dict[str, Any] = {}
+    if bg_color is not None:
+        body_props["backgroundColor"] = bg_color
+    children.append(Text(body_str, **body_props))
 
     # No gutter + plain body + no bg → collapse to a single Text so we
     # don't add a Box wrapper for the legacy no-features case.
     if not children:
-        return Text(body, color=base_color)
+        return Text(body_str)
 
     return Box(*children, flexDirection="row")
 
@@ -641,6 +729,135 @@ def _bg_sgr(color: str) -> str:
     return _sgr(body)
 
 
+def _compose_body_ansi(
+    *,
+    body: str,
+    inline_parts: list[tuple[str, str, bool]] | None,
+    base_color: str,
+    inline_color: str,
+    use_highlight: bool,
+    language: str,
+    highlight_theme: dict[str, str | None] | None,
+) -> str:
+    """Compose the diff body (code portion) as a single ANSI string.
+
+    Produces the inline-ANSI coded string for the body content. The string
+    carries per-token SGR sequences (Pygments syntax colours when
+    highlighting is on; per-token diff colours when inline highlighting is
+    on; otherwise a single base-colour span over the whole body). No
+    sigil / gutter / prefix / bg — the caller wraps the result with those
+    pieces.
+
+    Three body modes (highest-priority first):
+
+    * **inline_parts** (CC inline-highlight pairs): each ``(sep, tok,
+      changed)`` triple emits its own fg SGR (``inline_color`` for changed
+      tokens, ``base_color`` for unchanged tokens). Whitespace separators
+      inherit the surrounding token's colour so the row reads as a
+      continuous coloured band. No resets between tokens — the only reset
+      is at the very end of the row (emitted by the caller).
+    * **use_highlight** (Pygments on): the body is tokenised and each
+      token emits its own fg SGR via
+      :func:`ink.externals.highlighted_code.tokens_to_ansi_string`.
+    * **plain**: the whole body sits under one ``base_color`` opener (no
+      per-token colours). When ``base_color`` is empty (context row with
+      ``context_color=None``) no SGR is emitted at all.
+
+    Parameters
+    ----------
+    body:
+        The code portion (diff line with its ``+`` / ``-`` / `` `` prefix
+        stripped).
+    inline_parts:
+        Output of :func:`_word_diff_parts` when inline highlighting is
+        enabled for this row and the change ratio was below threshold.
+        ``None`` means "fall back to whole-line colour" (or Pygments
+        highlighting, when ``use_highlight`` is True).
+    base_color:
+        Diff colour (``add_color`` / ``del_color`` / ``context_color``)
+        applied to unchanged tokens / plain bodies / separators.
+    inline_color:
+        Brighter colour applied to changed tokens when ``inline_parts``
+        is not ``None``. Ignored otherwise.
+    use_highlight:
+        When ``True`` (and ``inline_parts`` is ``None``) the body is
+        run through Pygments tokenisation. The caller has already probed
+        :func:`_pygments_available` and chosen a non-``text`` language.
+    language:
+        Pygments lexer alias forwarded to
+        :func:`tokens_to_ansi_string`. Only meaningful when
+        ``use_highlight=True``.
+    highlight_theme:
+        Optional Pygments token colour override.
+
+    Returns
+    -------
+    str
+        The body ANSI string (no trailing reset — the caller appends one
+        per row).
+    """
+    if inline_parts is not None:
+        base_fg = _fg_sgr(base_color)
+        inline_fg = _fg_sgr(inline_color)
+        bold_open = _SGR_BOLD
+        parts: list[str] = []
+        for sep, tok, changed in inline_parts:
+            if sep:
+                parts.append(base_fg + sep)
+            if not tok:
+                continue
+            if changed:
+                # Bold + brighter colour for changed tokens. Re-emit
+                # bold per changed token in case a prior unchanged
+                # token's fg SGR was appended without bold (SGR colour
+                # codes don't reset bold).
+                parts.append(bold_open + inline_fg + tok)
+            else:
+                parts.append(base_fg + tok)
+        return "".join(parts)
+    if use_highlight:
+        import pygments
+        from pygments.lexers import get_lexer_by_name, guess_lexer
+
+        from ink.externals.highlighted_code import (
+            DEFAULT_THEME,
+            tokens_to_ansi_string,
+        )
+
+        # Re-use HighlightedCode's tokenisation + ANSI emission. We
+        # deliberately re-tokenise here (no LRU) because the per-row
+        # body is short and the cache wouldn't hit across diff rows
+        # anyway. Each token is wrapped in its own fg SGR sequence
+        # (one reset per token — ``tokens_to_ansi_string`` semantics)
+        # which is fine here because the whole row sits under one
+        # outer reset anyway.
+        try:
+            lexer = (
+                guess_lexer(body)
+                if language == "auto"
+                else get_lexer_by_name(language)
+            )
+            tokens = list(pygments.lex(body, lexer))
+        except Exception:
+            # If Pygments chokes on the body (unknown lexer, malformed
+            # input) fall back to the plain coloured path so the row
+            # still renders.
+            return _fg_sgr(base_color) + body
+        # Build the effective theme the same way HighlightedCode does:
+        # DEFAULT_THEME as the base, ``highlight_theme`` (when provided)
+        # merged on top.
+        effective_theme: dict[str, str | None] = dict(DEFAULT_THEME)
+        if highlight_theme:
+            effective_theme.update(highlight_theme)
+        ansi = tokens_to_ansi_string(tokens, effective_theme)
+        # Drop a trailing ``\n`` whitespace token's newline so the row
+        # doesn't have a phantom empty paragraph after the body.
+        if ansi.endswith("\n"):
+            ansi = ansi[:-1]
+        return ansi
+    return _fg_sgr(base_color) + body
+
+
 def _build_full_width_bg_row(
     *,
     body: str,
@@ -654,6 +871,9 @@ def _build_full_width_bg_row(
     indent: str,
     row_prefix: str,
     bg_width: int | None = None,
+    use_highlight: bool = False,
+    language: str = "text",
+    highlight_theme: dict[str, str | None] | None = None,
 ) -> Element:
     r"""Build a diff row as a single Text leaf carrying embedded ANSI.
 
@@ -736,65 +956,44 @@ def _build_full_width_bg_row(
 
     # Pre-compute the static pieces. The gutter string carries the
     # padded line number + sigil; the body string is built per-token
-    # from ``inline_parts`` (when set) or as a single base-colour run.
+    # from ``inline_parts`` (when set), via Pygments tokenisation (when
+    # ``use_highlight`` is True), or as a single base-colour run.
     if gutter_width > 0:
-        if line_num is None:
-            num_str = " " * gutter_width
-        else:
-            num_str = str(line_num).rjust(gutter_width)
+        num_str = (
+            " " * gutter_width
+            if line_num is None
+            else str(line_num).rjust(gutter_width)
+        )
         gutter_str = f"{num_str}{sigil}"
     else:
         gutter_str = ""
 
-    base_fg = _fg_sgr(base_color)
-    inline_fg = _fg_sgr(inline_color)
-    bg_open = _bg_sgr(bg_color)
-    bold_open = _SGR_BOLD if inline_parts is not None else ""
-
-    # Pre-render the body's ANSI-fied string. For inline-highlighted
-    # bodies each token is wrapped in its own fg SGR (no resets between
-    # tokens); for plain bodies the whole body sits under one base-fg
-    # opener. No reset between tokens — the only reset is the one
-    # appended after the trailing pad (so the bg stays open across the
-    # whole content area).
-    if inline_parts is not None:
-        body_parts: list[str] = []
-        for sep, tok, changed in inline_parts:
-            if sep:
-                body_parts.append(base_fg + sep)
-            if not tok:
-                continue
-            if changed:
-                # Bold + brighter colour for changed tokens. Emit
-                # bold-on, fg, token — no reset, so the next token's
-                # fg SGR overwrites the colour while bold persists.
-                # We deliberately re-emit bold per changed token in
-                # case a prior unchanged token's fg SGR was appended
-                # without bold (SGR colour codes don't reset bold).
-                body_parts.append(bold_open + inline_fg + tok)
-            else:
-                body_parts.append(base_fg + tok)
-        body_str = "".join(body_parts)
-    else:
-        body_str = base_fg + body
+    body_str = _compose_body_ansi(
+        body=body,
+        inline_parts=inline_parts,
+        base_color=base_color,
+        inline_color=inline_color,
+        use_highlight=use_highlight,
+        language=language,
+        highlight_theme=highlight_theme,
+    )
 
     # Pre-compute the visible width of the prefix + gutter + body so
     # the pad calculation can subtract it from the terminal width. The
     # body's visible width excludes the embedded ANSI escapes; for the
     # inline-highlighted case the visible characters are exactly the
-    # concatenation of (sep, tok) pairs.
+    # concatenation of (sep, tok) pairs. For the Pygments / plain
+    # cases it's just the body string itself.
+    from ink.layout.measure import string_width, wrap_text
+
     if inline_parts is not None:
         body_visible = "".join(sep + tok for sep, tok, _ in inline_parts)
     else:
         body_visible = body
-    # Visible width uses PyInk's string_width (CJK / emoji aware).
-    from ink.layout.measure import string_width
-
-    content_w = (
-        string_width(prefix_str)
-        + string_width(gutter_str)
-        + string_width(body_visible)
-    )
+    prefix_w = string_width(prefix_str)
+    gutter_w = string_width(gutter_str)
+    body_w = string_width(body_visible)
+    content_w = prefix_w + gutter_w + body_w
 
     def _render() -> str:
         # Target width the bg band pads to.
@@ -813,18 +1012,97 @@ def _build_full_width_bg_row(
         else:
             ctx_w = get_current_text_width()
             target_w = ctx_w if isinstance(ctx_w, int) and ctx_w > 0 else 80
-        pad = max(0, target_w - content_w)
-        # Layout:
-        #   <prefix_str>           # default bg, default fg
-        #   <bg_open>              # bg SGR opens, bg paints from here
-        #   <gutter_str>           # bg active, default fg
-        #   <body_str>             # bg active, per-token fg SGRs
-        #   " " * pad              # bg active (trailing fill)
-        #   <reset>                # closes bg AND any open fg
-        # The prefix area (columns 1-len(prefix_str)) keeps the
-        # terminal's default bg so parent gutters like ``"  ⎿  "``
-        # render uncoloured.
-        return prefix_str + bg_open + gutter_str + body_str + " " * pad + _SGR_RESET
+
+        # Short-content path: content fits in one visual row. Emit the
+        # legacy layout — prefix + bg_open + gutter + body + trailing
+        # pad + reset. Byte-identical to the pre-refactor output for
+        # existing callers.
+        body_chunk_w = max(1, target_w - prefix_w - gutter_w)
+        if body_w <= body_chunk_w or target_w <= 0:
+            pad = max(0, target_w - content_w)
+            # Layout:
+            #   <prefix_str>           # default bg, default fg
+            #   <bg_open>              # bg SGR opens, bg paints from here
+            #   <gutter_str>           # bg active, default fg
+            #   <body_str>             # bg active, per-token fg SGRs
+            #   " " * pad              # bg active (trailing fill)
+            #   <reset>                # closes bg AND any open fg
+            return (
+                prefix_str
+                + _bg_sgr(bg_color)
+                + gutter_str
+                + body_str
+                + " " * pad
+                + _SGR_RESET
+            )
+
+        # Wrap-aware path: body overflows one visual row. Pre-wrap the
+        # body's visible text into chunks of ``body_chunk_w`` cells and
+        # emit a multi-line string where each visual row's chunk +
+        # trailing pad ends with its OWN reset (``\x1b[0m``). This is
+        # the trick that defeats the renderer's per-row ``rstrip()``:
+        # the reset byte at the very end of each paragraph protects
+        # the preceding pad spaces from being stripped, so the bg band
+        # spans the full ``target_w`` on EVERY visual row (the PR2
+        # concern). The next paragraph then re-opens the bg SGR
+        # (``\x1b[48;...m``) before its chunk so the band stays active
+        # across paragraph breaks.
+        #
+        # Per-token colours: each chunk is rendered under a single
+        # base-colour span. Walking Pygments / inline-highlight spans
+        # against wrap boundaries to reconstruct per-token colours per
+        # chunk is fragile (chunks can split tokens mid-character under
+        # CJK / hard-break). The visual trade-off is acceptable: when
+        # a row wraps, the reader sees a uniform diff-coloured band
+        # instead of per-token syntax colours — still readable, still
+        # carries the bg band edge-to-edge (the strongest CC
+        # ``StructuredDiff`` signature).
+        chunks = wrap_text(body_visible, body_chunk_w, mode="wrap")
+        bg_open_seq = _bg_sgr(bg_color)
+        base_fg_seq = _fg_sgr(base_color)
+        rendered_lines: list[str] = []
+        for i, chunk in enumerate(chunks):
+            chunk_body = base_fg_seq + chunk
+            if i == 0:
+                # First visual row carries prefix + gutter + body chunk.
+                # The chunk + pad fills the remaining width after prefix
+                # and gutter so the bg band spans the full target width.
+                chunk_pad = max(0, target_w - prefix_w - gutter_w - string_width(chunk))
+                # Layout:
+                #   <prefix_str>           # default bg, default fg
+                #   <bg_open>              # bg opens
+                #   <gutter_str>           # bg active
+                #   <chunk_body>           # bg active, base fg
+                #   " " * chunk_pad        # bg active (trailing fill)
+                #   <reset>                # closes bg, protects pad
+                rendered_lines.append(
+                    prefix_str
+                    + bg_open_seq
+                    + gutter_str
+                    + chunk_body
+                    + " " * chunk_pad
+                    + _SGR_RESET
+                )
+            else:
+                # Continuation visual row: no prefix (parent gutter
+                # stays on row 1), no gutter (line-number gutter stays
+                # on row 1). The chunk + pad fills the FULL target
+                # width (no prefix / gutter to subtract) so the bg
+                # band still spans edge-to-edge. Re-open bg SGR at the
+                # start so the band is active from column 0.
+                chunk_pad = max(0, target_w - string_width(chunk))
+                # Layout:
+                #   <bg_open>              # bg opens
+                #   <chunk_body>           # bg active, base fg
+                #   " " * chunk_pad        # bg active (trailing fill)
+                #   <reset>                # closes bg, protects pad
+                rendered_lines.append(
+                    bg_open_seq
+                    + chunk_body
+                    + " " * chunk_pad
+                    + _SGR_RESET
+                )
+        return "\n".join(rendered_lines)
 
     return Text(_render)
 

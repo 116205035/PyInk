@@ -97,6 +97,33 @@ When you've made similar changes to multiple files:
 
 ---
 
+## Gotcha: Shared Helpers for Cross-Cutting Rendering Concerns
+
+**Problem**: Two factories need the same non-trivial transformation
+(e.g. Pygments `[(token_type, value), ...]` → ANSI-coded string). Each
+factory reimplementing it locally risks silent divergence: one factory
+honours a theme key, the other doesn't; one splits multi-line token
+values on `\n`, the other doesn't; one emits a trailing reset, the
+other doesn't. The visual output drifts without any test catching it.
+
+**Concrete example**: `tokens_to_ansi_string` in
+`src/ink/externals/highlighted_code.py` is the canonical Pygments-tokens
+→ ANSI converter. `StructuredDiff` (`src/ink/externals/diff.py`)
+imports and reuses it instead of writing its own. When the converter's
+behaviour changes (new token type, multi-line edge case), both
+factories get the fix.
+
+**Prevention checklist**:
+- [ ] Before writing a tokeniser / formatter / normaliser, search for an
+  existing one in `src/ink/externals/` and `src/ink/`
+- [ ] If two factories share a transformation, extract it next to the
+  primary consumer and re-export, rather than copy-pasting
+- [ ] Cross-reference the shared helper in the relevant contract spec
+  (e.g. `frontend/rendering-contracts.md` Section 3 for the tokens→ANSI
+  converter) so future contributors find it
+
+---
+
 ## Checklist Before Commit
 
 - [ ] Searched for existing similar code

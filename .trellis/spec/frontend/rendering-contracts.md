@@ -210,10 +210,217 @@ the `pyink-markdown-render-polish` task.
 
 ---
 
+## 3. Factory Component Row Composition: One Text Leaf per Source Line
+
+### Contract
+
+A factory component that renders tokenised / code content as a column of
+rows (one row per source line) MUST emit **ONE `Text` leaf per source
+line**, with per-token styling carried as **inline ANSI SGR sequences
+inside that leaf's string**. It MUST NOT emit one `Text` leaf per
+Pygments token (or per sigil / gutter / prefix fragment) inside a
+`flexDirection="row"` Box.
+
+This is the `<Text><Ansi>{code}</Ansi></Text>` pattern from Claude
+Code's `HighlightedCode` (`Fallback.tsx:69`): a single styled leaf per
+line, no per-token children.
+
+### Why
+
+When a row Box has multiple `Text` leaf children and the row's total
+width exceeds `columns`, the flex layout invokes its **shrink
+algorithm** (`src/ink/layout/flex.py`). The shrink algorithm penalises
+*every flexible child* proportionally to recover the budget — and each
+`Text` leaf is a flexible child. Trailing characters are silently eaten
+from every leaf until the row fits.
+
+The bug is **silent**: no error, no warning, no visual indicator. Code
+just renders with missing characters:
+
+- `print` → `pri`
+- `item['code']` → `it['co'`
+- `'break_high'` → `'break'`
+
+CJK accelerates the trigger (each char is width 2, so a line reaches
+`columns` faster) but is NOT the root cause — `string_width` /
+`wcswidth` are correct throughout. The root cause is per-token leaves
+becoming independent flex items.
+
+With ONE `Text` leaf per source line, the entire source line is a
+single flexible child. When it overflows `columns`, the layout engine's
+`_measure_paragraph → wrap_text(mode="wrap")` pipeline wraps the leaf
+onto subsequent visual rows (reusing the existing ANSI-aware word-break
+/ hard-break logic). Continuation rows self-align under the first row's
+code start column. **Zero factory-level wrap code is required.**
+
+### Wrong vs Correct
+
+#### Wrong — one Text leaf per token
+
+```python
+def _build_line_rows_wrong(token_rows, **kw):
+    out = []
+    for row_tokens in token_rows:           # row_tokens: [(type, value), ...]
+        leaves = [
+            Text(_token_to_ansi(v, _lookup_color(t, theme)), color=...)
+            for t, v in row_tokens          # ← one leaf per token
+        ]
+        out.append(Box(*leaves, flexDirection="row"))
+    return out
+```
+
+Each leaf is a flexible child. When the row exceeds `columns`, flex
+shrink eats trailing chars from *every* leaf → silent corruption.
+
+#### Correct — one Text leaf per source line, inline ANSI
+
+```python
+from ink.externals.highlighted_code import tokens_to_ansi_string
+
+def _build_line_rows_correct(token_rows, theme, **kw):
+    # Convert each source line's tokens to ONE ANSI-coded string.
+    ansi_rows = [tokens_to_ansi_string(row, theme) for row in token_rows]
+    out = []
+    for ansi_str in ansi_rows:
+        out.append(Box(Text(ansi_str), flexDirection="row"))  # ← single leaf
+    return out
+```
+
+The entire source line is one flexible child. Overflow wraps via
+`_measure_paragraph`; no chars are lost.
+
+### Canonical tokens → ANSI converter
+
+`src/ink/externals/highlighted_code.py:tokens_to_ansi_string` is the
+canonical helper. It:
+
+- Walks each `(token_type, value)` pair, looks up the colour via
+  `_lookup_color` (most-specific Pygments token path wins), and wraps
+  the value in `\x1b[<fg>m<value>\x1b[0m`.
+- Splits multi-line token values (docstrings, block comments) on `\n`
+  and re-emits each fragment with its own SGR span so a reset can't
+  bleed across the newline onto the next row.
+- Returns a single string carrying inline ANSI escapes — CC's
+  `<Ansi>{code}</Ansi>` parity.
+
+Re-use this helper from any factory that needs to render Pygments
+tokens as a single leaf. `StructuredDiff` imports it directly (see
+`src/ink/externals/diff.py:_compose_body_ansi`).
+
+### Background bands on wrapped rows (StructuredDiff)
+
+When a row also carries a background colour band that must span the
+terminal width on *every* visual row of a wrapped line (CC's
+`StructuredDiff` signature), the band is encoded as **in-band ANSI**
+inside the same single `Text` leaf — NOT via `backgroundColor` +
+`flushBackgroundToWidth` on the leaf. The reason: PyInk's bg painter
+would apply bg to every cell the leaf touches, including the row's
+prefix area (parent `⎿` gutter), which must keep the default terminal
+bg.
+
+Byte-layout for a wrapped row (`src/ink/externals/diff.py:1039-1105`):
+
+```
+<line 1>  <prefix><bg_open><gutter><chunk_body><pad spaces><reset>
+<line 2>  <bg_open><chunk_body><pad spaces><reset>
+<line 3>  <bg_open><chunk_body><pad spaces><reset>
+```
+
+Two non-obvious tricks:
+
+1. **Trailing reset as pad-shield.** Each visual row's chunk + trailing
+   pad ends with its OWN `\x1b[0m` reset. The reset byte at the very
+   end of each paragraph defeats the renderer's per-row `rstrip()`: it
+   is a non-whitespace byte, so the preceding pad spaces survive the
+   strip and the bg band fills `target_w` on every visual row. Without
+   this, wrapped rows would lose their right-side bg fill.
+2. **Bg re-open per continuation row.** Each continuation row re-opens
+   the bg SGR (`\x1b[48;...m`) at column 0 so the band is active from
+   the start of the row, not just from the chunk's first character.
+
+The factory pre-wraps the body via `wrap_text(body_visible,
+body_chunk_w, mode="wrap")` and emits one paragraph per chunk — but
+note this is a **bg-band-specific** concern. The default code-wrap case
+(no bg) relies entirely on the layout engine's wrap pipeline; the
+factory does not wrap.
+
+### Who must follow this
+
+Any factory that renders tokenised or code content as rows. Current
+consumers:
+
+- `src/ink/externals/highlighted_code.py:_build_line_rows` — one `Text`
+  per source line via `tokens_to_ansi_string` (PR1 of
+  `07-23-long-code-line-wrap`).
+- `src/ink/externals/diff.py:_build_diff_row` / `_compose_body_ansi` /
+  `_build_full_width_bg_row` — one `Text` per diff row, sigil + body
+  composed into a single inline-ANSI string (PR2 of
+  `07-23-long-code-line-wrap`).
+- Future factories that tokenise content (logs, JSON viewers, REPL
+  output, …) must follow the same pattern.
+
+### Common Mistake: Per-token leaves silently corrupt long lines
+
+**Symptom**: A highlighted code block or diff renders with missing
+characters on long lines. CJK-heavy lines trigger it most often. No
+error is raised; no warning is logged. Short lines render fine, which
+hides the bug in casual testing.
+
+**Cause**: The factory emitted one `Text` leaf per Pygments token
+inside a `flexDirection="row"` Box. Each leaf became a flexible child
+of the row; when the row exceeded `columns`, the flex shrink algorithm
+ate trailing chars from every leaf to fit the budget.
+
+**Fix**: Convert the per-line emission to a single `Text` leaf whose
+body is the per-line ANSI-coded string produced by
+`tokens_to_ansi_string`. The layout engine's wrap pipeline handles
+overflow with zero character loss.
+
+**Detection**: Add a wrap test that renders a line wider than `columns`
+and asserts that tokens at the end of the line (`print`, `item['code']`,
+`break_high`) appear intact in the output. A short-line-only test
+suite will not catch this regression.
+
+### Tests Required
+
+- Long line (≥ 2× `columns`) wraps to multiple visual rows with **zero
+  character loss**: assert that tokens at the line's end appear in the
+  rendered output.
+- Single token wider than `columns` hard-breaks (no overflow, no
+  infinite loop).
+- Line exactly at `columns` does not wrap spuriously.
+- CJK-heavy line wraps correctly (each char width 2).
+- For StructuredDiff specifically: bg band spans the full terminal
+  width on every visual row of a wrapped `+` / `-` line; line-number
+  gutter appears only on the first visual row.
+
+### Reference Consumers
+
+- `src/ink/externals/highlighted_code.py` — `_build_line_rows` emits
+  one `Text` per source line; `tokens_to_ansi_string` is the canonical
+  tokens → ANSI converter. Tests: `tests/externals/test_highlighted_code.py`
+  (`test_long_python_line_wraps_without_char_loss` and neighbours).
+- `src/ink/externals/diff.py` — `_build_diff_row` /
+  `_compose_body_ansi` / `_build_full_width_bg_row` emit one `Text` per
+  diff row with inline ANSI (including the bg-band-on-wrapped-rows
+  trick at lines 1039-1105). Tests: `tests/externals/test_diff.py`
+  (`test_long_plus_line_wraps_without_char_loss`,
+  `test_full_width_bg_band_extends_across_wrapped_visual_rows`, and
+  neighbours).
+
+---
+
 ## Related
 
 - `src/ink/layout/_text_width_context.py` — width context implementation
-- `src/ink/layout/measure.py` — `string_width()` implementation
-- `src/ink/externals/markdown.py` — reference consumer (uses both contracts)
+- `src/ink/layout/measure.py` — `string_width()` + `wrap_text()` implementation
+- `src/ink/layout/flex.py` — flex shrink algorithm (the silent-corruption
+  mechanism described in Section 3)
+- `src/ink/externals/highlighted_code.py` — reference consumer (Sections 1+3)
+- `src/ink/externals/diff.py` — reference consumer (Section 3, including
+  bg-band-on-wrapped-rows)
+- `src/ink/externals/markdown.py` — reference consumer (Sections 1+2)
 - `.trellis/tasks/07-11-pyink-markdown-render-polish/research/` — research
-  notes that established these contracts
+  notes that established Sections 1 and 2
+- `.trellis/tasks/07-23-long-code-line-wrap/prd.md` — full bug analysis +
+  architectural decision that established Section 3

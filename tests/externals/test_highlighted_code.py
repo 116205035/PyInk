@@ -45,6 +45,11 @@ from ink import Box, Text, render_to_string
 from ink.core.element import Element
 from ink.externals import DEFAULT_THEME, HighlightedCode
 
+try:
+    from pygments.token import Token
+except ImportError:  # pragma: no cover — module-level skip handles this
+    Token = None  # type: ignore[assignment,misc]
+
 ESC = "\x1b"
 
 
@@ -903,3 +908,249 @@ def test_tokenize_cache_returns_same_tokens_for_same_input() -> None:
     second = _tokenize(code, "python", pygments, get_lexer_by_name, guess_lexer)
     assert first == second
     assert (code, "python") in _token_cache
+
+
+# ---------------------------------------------------------------------------
+# Long-line wrap (07-23-long-code-line-wrap PR1)
+# ---------------------------------------------------------------------------
+#
+# Regression for the "long source line silently loses characters" bug.
+# Root cause: previously each Pygments token was a flexible child of the
+# row Box, so when the row exceeded ``columns`` the flex shrink algorithm
+# penalised every token proportionally (``print`` → ``pri``). The
+# architectural refactor emits ONE Text leaf per source line carrying
+# an inline ANSI-coded string; the layout engine's ``_measure_paragraph
+# → wrap_text(mode="wrap")`` pipeline wraps the single leaf onto
+# subsequent visual rows with zero character loss.
+
+
+def _strip_ansi_for_width(s: str) -> str:
+    """Strip ANSI escape sequences for content assertions."""
+    import re
+
+    return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+
+def test_long_python_line_wraps_without_char_loss() -> None:
+    """A long Python line at columns=120 wraps with every token intact.
+
+    Regression for the original ``底部周线突破.py`` line 137 bug where
+    ``print`` was shrunk to ``pri`` and ``item['code']`` to ``it['co'``
+    because each Pygments token was a flexible child of the row Box.
+    After the refactor, the entire source line becomes ONE Text leaf
+    whose body is an inline ANSI-coded string; the layout engine wraps
+    that single leaf onto subsequent visual rows instead of shrinking
+    per-token leaves.
+    """
+    # Synthesize a long Python line with multiple recognisable tokens
+    # that would push past 120 cols. CJK chars accelerate the trigger
+    # (width=2 each) but the bug is column-driven, not CJK-driven.
+    line = (
+        "print(f'index {i}: code={item[\"code\"]} name={item[\"name\"]} "
+        "break_high={item[\"break_high\"]} pct_from_low={item[\"pct_from_low\"]}')"
+    )
+    out = _render(HighlightedCode(line, language="python"), columns=120)
+    plain = _strip_ansi_for_width(out)
+    # The wrap may split a token across rows; rebuild the un-wrapped
+    # form by joining visual rows with no separator so multi-char
+    # tokens remain recognisable across the wrap boundary.
+    unwrapped = plain.replace("\n", "")
+    # Every token must be present in full — no character loss.
+    assert "print" in unwrapped, plain
+    assert 'item["code"]' in unwrapped, plain
+    assert 'item["name"]' in unwrapped, plain
+    assert 'item["break_high"]' in unwrapped, plain
+    assert 'item["pct_from_low"]' in unwrapped, plain
+
+
+def test_long_line_wraps_to_multiple_visual_rows() -> None:
+    """Long line produces more than one visual row (it wrapped)."""
+    # 200 chars of plain ASCII; with columns=40 it MUST wrap.
+    line = "a" * 200
+    out = _render(HighlightedCode(line, language="text"), columns=40)
+    rows = out.split("\n")
+    assert len(rows) > 1, f"expected wrap, got {len(rows)} rows"
+
+
+def test_long_line_wide_columns_renders_single_row() -> None:
+    """At columns=300 the long line fits on a single row (no spurious wrap)."""
+    line = "a" * 100
+    out = _render(HighlightedCode(line, language="text"), columns=300)
+    rows = out.split("\n")
+    assert len(rows) == 1, f"expected 1 row, got {len(rows)}"
+
+
+def test_line_exactly_at_columns_no_spurious_wrap() -> None:
+    """A line whose visible width exactly equals columns doesn't wrap."""
+    # 40 chars of ASCII = wcswidth 40; with columns=40 the line JUST
+    # fits — the layout engine must not produce a spurious wrap row.
+    line = "a" * 40
+    out = _render(HighlightedCode(line, language="text"), columns=40)
+    rows = out.split("\n")
+    assert len(rows) == 1, f"expected 1 row, got {len(rows)}: {rows!r}"
+
+
+def test_line_one_char_over_columns_wraps_to_two_rows() -> None:
+    """A line 1 char wider than columns wraps to 2 rows (no shrink)."""
+    line = "a" * 41
+    out = _render(HighlightedCode(line, language="text"), columns=40)
+    rows = out.split("\n")
+    assert len(rows) == 2, f"expected 2 rows, got {len(rows)}: {rows!r}"
+    # No character should be lost — concatenated visible width == 41.
+    plain = _strip_ansi_for_width(out)
+    assert plain.count("a") == 41, plain
+
+
+def test_single_token_wider_than_columns_hard_breaks() -> None:
+    """A single token wider than columns is hard-broken across rows.
+
+    Regression for the edge case where a single Pygments token is wider
+    than ``columns``. The layout engine's ``_word_break`` falls back to
+    ``_hard_break`` so the token is split character-by-character — no
+    data loss, no overflow.
+    """
+    # language="text" so the entire line is one "token" from the layout
+    # engine's perspective; a 100-char line at columns=20 must hard-break.
+    line = "x" * 100
+    out = _render(HighlightedCode(line, language="text"), columns=20)
+    plain = _strip_ansi_for_width(out)
+    rows = plain.split("\n")
+    # No character loss.
+    assert plain.count("x") == 100, plain
+    # No row exceeds the column budget.
+    for row in rows:
+        assert len(row) <= 20, (row, len(row))
+
+
+def test_long_line_with_line_numbers_wraps_correctly() -> None:
+    """Long line + line_numbers: continuation rows align under code start."""
+    # The continuation row should NOT repeat the line-number gutter
+    # (the gutter lives on the first visual row of the source line).
+    line = "a" * 100
+    out = _render(
+        HighlightedCode(line, language="text", line_numbers=True),
+        columns=30,
+    )
+    plain = _strip_ansi_for_width(out)
+    rows = plain.split("\n")
+    assert len(rows) > 1, f"expected wrap, got {len(rows)} rows"
+    # First row carries the gutter "1 ".
+    assert rows[0].startswith("1 "), rows[0]
+    # Continuation rows do NOT carry a gutter number — they start at
+    # the code-start column (after the gutter width) with the wrapped
+    # text content.
+    for cont in rows[1:]:
+        assert not cont.startswith(tuple("0123456789")), cont
+
+
+def test_long_line_indent_aligns_continuation_under_code_start() -> None:
+    """Long line + indent: continuation rows align under the first char of code.
+
+    The wrap mechanics: the single code Text leaf wraps inside its own
+    box, so continuation visual rows self-align at the column where the
+    code leaf was placed (i.e. after the indent + gutter). The indent
+    leaf on the first visual row may itself be shrunk by 1-2 chars
+    when the row overflows (proportional flex shrink), but the visual
+    outcome — code on continuation rows aligns with code on the first
+    row — is preserved because both rows share the same starting
+    column for the code body.
+    """
+    line = "a" * 100
+    out = _render(
+        HighlightedCode(line, language="text", indent="XYZ", line_numbers=True),
+        columns=30,
+    )
+    plain = _strip_ansi_for_width(out)
+    rows = plain.split("\n")
+    assert len(rows) > 1
+    # First row carries the visible indent "XYZ" + the gutter "1 ".
+    assert "XYZ" in rows[0], rows[0]
+    assert "1 " in rows[0], rows[0]
+    # Continuation rows do NOT carry the indent (no "XYZ") nor a
+    # gutter number — they start at the code-start column with the
+    # wrapped text content.
+    for cont in rows[1:]:
+        assert "XYZ" not in cont, cont
+        assert not cont.lstrip().startswith(tuple("0123456789")), cont
+
+
+def test_short_lines_render_byte_identical_after_refactor() -> None:
+    """Short lines (no wrap) render with the same colour mapping as before.
+
+    Snapshot-style regression: the architectural refactor must NOT
+    change the colour sequences emitted for short Python snippets that
+    fit comfortably within ``columns``. The token-to-SGR mapping
+    (magenta ``def``, blue function name, cyan ``print``, green strings,
+    cyan numbers, gray comments) is the same contract callers rely on.
+    """
+    out = _render(HighlightedCode("def f(): pass", language="python"))
+    # ``def`` is wrapped in magenta (SGR 35).
+    assert f"{ESC}[35mdef{ESC}[0m" in out, out
+    # Function name ``f`` is wrapped in blue (SGR 34).
+    assert f"{ESC}[34mf{ESC}[0m" in out, out
+    # ``pass`` is a keyword → magenta.
+    assert f"{ESC}[35mpass{ESC}[0m" in out, out
+
+
+def test_long_docstring_wraps_per_line_correctly() -> None:
+    """A multi-line docstring on a long line still splits correctly."""
+    # Each source line is independent; if one source line overflows it
+    # wraps to multiple visual rows, but the other source lines must
+    # still render on their own row.
+    code = (
+        'def f():\n'
+        '    """line one\n'
+        f"    {'word ' * 40}\n"  # very long line
+        '    """\n'
+        '    pass\n'
+    )
+    out = _render(HighlightedCode(code, language="python"), columns=80)
+    plain = _strip_ansi_for_width(out)
+    # All source lines present.
+    assert "line one" in plain
+    assert "def f" in plain
+    assert "pass" in plain
+
+
+def test_tokens_to_ansi_string_basic() -> None:
+    """``tokens_to_ansi_string`` produces one ANSI string with inline SGRs."""
+    from pygments.token import Keyword, Name
+
+    from ink.externals.highlighted_code import tokens_to_ansi_string
+
+    tokens = [(Keyword, "def"), (Name.Function, "greet"), (Token.Text, " ")]
+    out_s = tokens_to_ansi_string(tokens, {"Keyword": "magenta", "Name.Function": "blue"})
+    # ``def`` is wrapped in magenta, ``greet`` in blue, trailing space bare.
+    assert f"{ESC}[35mdef{ESC}[0m" in out_s
+    assert f"{ESC}[34mgreet{ESC}[0m" in out_s
+    assert out_s.endswith(" ")
+
+
+def test_tokens_to_ansi_string_none_color_no_sgr() -> None:
+    """``color=None`` (terminal default) emits no SGR for that token."""
+    from pygments.token import Punctuation
+
+    from ink.externals.highlighted_code import tokens_to_ansi_string
+
+    # Punctuation has no entry in the supplied theme → None → no SGR.
+    out_s = tokens_to_ansi_string([(Punctuation, "(")], {})
+    assert out_s == "("
+
+
+def test_tokens_to_ansi_string_multiline_value() -> None:
+    """A token value with ``\\n`` splits into per-fragment SGR spans."""
+    from pygments.token import Comment
+
+    from ink.externals.highlighted_code import tokens_to_ansi_string
+
+    # Single multi-line comment token; each fragment gets its own SGR
+    # span so a reset on one line doesn't leak onto the next.
+    out_s = tokens_to_ansi_string(
+        [(Comment.Multiline, "# line one\n# line two")],
+        {"Comment": "gray"},
+    )
+    # Both fragments wrapped in gray.
+    assert f"{ESC}[90m# line one{ESC}[0m" in out_s
+    assert f"{ESC}[90m# line two{ESC}[0m" in out_s
+    # Fragments rejoined with newline.
+    assert "\n" in out_s

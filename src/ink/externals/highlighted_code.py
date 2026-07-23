@@ -1,10 +1,21 @@
 """``HighlightedCode`` — Pygments-driven syntax highlighting (Phase 3 PR2).
 
 Mirrors :mod:`ink-syntax-highlight`: turn a code string into a tree of
-``Text`` leaves, one per token, each carrying the colour mapped from the
-token's Pygments type via the active :data:`theme`. The output is a
-column of rows (one per source line); each row is a ``Box`` of inline
-``Text`` tokens so adjacent tokens on the same line stay side-by-side.
+row ``Box`` elements (one per source line). Each row carries ONE
+``Text`` leaf whose body is a single ANSI-coded string carrying inline
+SGR sequences for every Pygments token on that source line — CC's
+``<Text><Ansi>{code}</Ansi></Text>`` parity. The architectural
+refactor (one Text leaf per source line, not one Text per token) is
+the fix for the long-line shrink bug: previously each token was a
+flexible child of the row Box, so when a row exceeded ``columns`` the
+flex shrink algorithm penalised every token proportionally and ate
+trailing characters from every Pygments token (``print`` → ``pri``,
+``item['code']`` → ``it['co'``). Now the entire source line is one
+flexible child; when it overflows ``columns`` the layout engine's
+``_measure_paragraph → wrap_text(mode="wrap")`` pipeline wraps the
+single leaf onto subsequent visual rows (with the existing ANSI-aware
+word-break / hard-break logic) and continuation rows self-align under
+the first row's code start column. Zero factory-level wrap code.
 
 Pygments is an *optional* dependency. The factory ``import``\\ s it lazily
 inside the function body; if the package is missing we raise an
@@ -23,14 +34,17 @@ Design (per PRD PR2 scope):
   in a parent that re-renders.
 * Tokenise once with :func:`pygments.lex`, walk each ``(token_type,
   value)`` pair, look up the colour in ``theme`` (most-specific
-  Pygments token path wins; see :func:`_lookup_color`), and emit a
-  ``Text`` leaf. Token values can contain newlines (docstrings,
-  multi-line comments) — we split on ``\\n`` so each physical line
-  ends up in its own row ``Box``.
+  Pygments token path wins; see :func:`_lookup_color`), and emit
+  per-token SGR sequences wrapped around the token value. Token
+  values can contain newlines (docstrings, multi-line comments) — we
+  split on ``\\n`` so each physical line ends up in its own row
+  ``Box``. The SGR sequences are concatenated into a single ANSI
+  string per source line via :func:`tokens_to_ansi_string`.
 * ``language="text"`` (the default) skips Pygments entirely and emits
-  a single plain ``Text`` body — there is no point tokenising plain
-  text and it gives callers an obvious "off switch". ``language="auto"``
-  defers to :func:`pygments.lexers.guess_lexer`, which needs a few
+  a plain string per source line (no SGR sequences) — there is no
+  point tokenising plain text and it gives callers an obvious "off
+  switch". ``language="auto"`` defers to
+  :func:`pygments.lexers.guess_lexer`, which needs a few
   representative lines to be reliable.
 * ``line_numbers=True`` prepends a dim right-aligned gutter to each
   row. We use ``dimColor=True`` rather than a colour so the gutter
@@ -65,8 +79,9 @@ from typing import Any
 from ink.components.box import Box
 from ink.components.text import Text
 from ink.core.element import Element
+from ink.render.ansi import _SGR_RESET, _sgr, parse_color
 
-__all__ = ["HighlightedCode", "DEFAULT_THEME"]
+__all__ = ["HighlightedCode", "DEFAULT_THEME", "tokens_to_ansi_string"]
 
 #: Default Pygments-token → PyInk-colour mapping. Keys are the *short*
 #: forms of Pygments token paths (``"Keyword"``, ``"Name.Function"``,
@@ -192,23 +207,73 @@ def _lookup_color(token_type: Any, theme: dict[str, str | None]) -> str | None:
     return None
 
 
-def _token_text(value: str, color: str | None) -> Element:
-    """Build a ``Text`` leaf for a single token value.
+def _fg_sgr(color: str | None) -> str:
+    """Return the foreground CSI-SGR sequence for ``color`` or ``""``.
 
-    ``color=None`` is emitted as a plain ``Text`` (no SGR sequence);
-    callers rely on this to honour the terminal default for tokens
-    like ``Punctuation`` / ``Text``.
+    Returns the empty string when ``color`` is falsy / unparseable so
+    callers can concatenate unconditionally without emitting stray
+    ``\\x1b[m`` shorthands (which some terminals treat as a reset).
     """
-    if color is None:
-        return Text(value)
-    return Text(value, color=color)
+    if not color:
+        return ""
+    body = parse_color(color, type_="foreground")
+    if not body:
+        return ""
+    return _sgr(body)
+
+
+def _token_to_ansi(value: str, color: str | None) -> str:
+    """Wrap a single token value in its foreground SGR sequence.
+
+    ``color=None`` (terminal default) emits no SGR — the value is
+    returned verbatim. Otherwise the value is wrapped as
+    ``\\x1b[<fg>m<value>\\x1b[0m`` (one reset per token so adjacent
+    tokens with different colours don't bleed).
+    """
+    open_seq = _fg_sgr(color)
+    if not open_seq:
+        return value
+    return open_seq + value + _SGR_RESET
+
+
+def tokens_to_ansi_string(
+    tokens: list[tuple[Any, str]],
+    theme: dict[str, str | None],
+) -> str:
+    """Convert a list of Pygments ``(token_type, value)`` pairs to one ANSI string.
+
+    Each token is wrapped in its own foreground SGR sequence (looked up
+    via :func:`_lookup_color`); a token whose colour resolves to
+    ``None`` (terminal default) is emitted verbatim with no SGR. The
+    fragments are concatenated into a single string carrying inline
+    ANSI escapes — CC's ``<Ansi>{code}</Ansi>`` parity.
+
+    Multi-line token values (values containing ``\\n``) are split on
+    ``\\n`` and each fragment is processed with its own ANSI span so
+    an SGR sequence from one line can't bleed across the newline onto
+    the next (a stray ``\\x1b[0m`` after a newline would dim the wrong
+    row). The fragments are rejoined with ``\\n`` so the caller still
+    sees a single string but with per-line ANSI isolation.
+    """
+    parts: list[str] = []
+    for token_type, value in tokens:
+        color = _lookup_color(token_type, theme)
+        if "\n" not in value:
+            parts.append(_token_to_ansi(value, color))
+            continue
+        # Multi-line value: each fragment carries its own SGR span so
+        # the reset at end-of-fragment doesn't leak onto the next line.
+        fragments = value.split("\n")
+        rendered = [_token_to_ansi(frag, color) if frag else frag for frag in fragments]
+        parts.append("\n".join(rendered))
+    return "".join(parts)
 
 
 def _group_tokens_by_line(
     tokens: list[tuple[Any, str]],
     theme: dict[str, str | None],
-) -> list[list[Element]]:
-    """Re-flow a flat token list into per-line ``Text`` lists.
+) -> list[str]:
+    """Re-flow a flat token list into per-line ANSI strings.
 
     Pygments may emit token values that contain newlines (docstrings,
     multi-line comments, the ``\\n`` whitespace tokens between source
@@ -216,28 +281,35 @@ def _group_tokens_by_line(
     fragments across rows so the rendered output preserves the source's
     physical line structure. Empty trailing rows are dropped so a final
     newline doesn't produce a blank row at the bottom.
+
+    Each returned entry is a single ANSI-coded string carrying inline
+    SGR sequences for every Pygments token on that source line — the
+    architectural refactor that fixes the long-line shrink bug (each
+    source line becomes ONE ``Text`` leaf so the flex shrink algorithm
+    no longer penalises per-token leaves).
     """
-    rows: list[list[Element]] = [[]]
+    rows: list[list[tuple[Any, str]]] = [[]]
     for token_type, value in tokens:
-        color = _lookup_color(token_type, theme)
         # Fast path: value has no newline → single fragment, no split.
         if "\n" not in value:
-            rows[-1].append(_token_text(value, color))
+            rows[-1].append((token_type, value))
             continue
         # Multi-line value: split on \n, emitting each fragment on the
         # current row and starting a new row at every newline. Empty
         # fragments (consecutive newlines, or a value starting with
-        # newline) are skipped to avoid emitting empty Text leaves.
+        # newline) are skipped to avoid emitting empty Text leaves —
+        # matches the language="text" fast path's
+        # ``if token_rows and code.endswith("\n")`` trailing-row drop.
         fragments = value.split("\n")
         for i, frag in enumerate(fragments):
             if frag:
-                rows[-1].append(_token_text(frag, color))
+                rows[-1].append((token_type, frag))
             if i < len(fragments) - 1:
                 rows.append([])
     # Drop a single trailing empty row that comes from a final newline.
     if rows and not rows[-1]:
         rows.pop()
-    return rows
+    return [tokens_to_ansi_string(row, theme) for row in rows]
 
 
 #: LRU cache for Pygments tokenisation. Keyed on ``(code, language)``.
@@ -284,14 +356,24 @@ def _tokenize(
 
 
 def _build_line_rows(
-    rows: list[list[Element]],
+    rows: list[str],
     *,
     line_numbers: bool,
     indent: str = "",
     first_row_prefix: str = "",
     start_line: int = 1,
 ) -> list[Element]:
-    """Wrap each per-line token list in a row ``Box``.
+    """Wrap each per-line ANSI string in a row ``Box``.
+
+    Each entry of ``rows`` is a single ANSI-coded string (the output of
+    :func:`tokens_to_ansi_string` / the ``language="text"`` fast path's
+    plain source line). The string is wrapped in ONE ``Text`` leaf so
+    the source line becomes a single flexible child of the row Box —
+    the architectural refactor that lets long lines wrap (via the
+    layout engine's ``_measure_paragraph → wrap_text(mode="wrap")``
+    path) instead of being shrunk by the flex algorithm. CC parity:
+    CC's ``HighlightedCode`` is ``<Text><Ansi>{code}</Ansi></Text>``,
+    one Text per source line, no per-token leaves.
 
     With ``line_numbers=True``, every row is prefixed with a dim
     right-aligned gutter. Numbering starts at 1 and the gutter is
@@ -325,7 +407,7 @@ def _build_line_rows(
     first_row_leaf = Text(first_row_prefix) if first_row_prefix else None
     if not line_numbers:
         out_no_num: list[Element] = []
-        for i, tokens in enumerate(rows):
+        for i, ansi_str in enumerate(rows):
             children: list[Element] = []
             # First row consumes the parent gutter prefix; subsequent
             # rows fall back to the continuation ``indent``.
@@ -333,12 +415,8 @@ def _build_line_rows(
                 children.append(first_row_leaf)
             elif indent_leaf is not None:
                 children.append(indent_leaf)
-            children.extend(tokens)
-            out_no_num.append(
-                Box(*children, flexDirection="row")
-                if children
-                else Box(flexDirection="row")
-            )
+            children.append(Text(ansi_str))
+            out_no_num.append(Box(*children, flexDirection="row"))
         return out_no_num
     total = len(rows)
     # Width of the largest line number, e.g. ``3`` for a 100-line
@@ -351,7 +429,7 @@ def _build_line_rows(
     gutter_width = max(1, len(str(last_line)))
     start = max(1, int(start_line))
     out: list[Element] = []
-    for i, tokens in enumerate(rows, start=start):
+    for i, ansi_str in enumerate(rows, start=start):
         gutter = Text(f"{i:>{gutter_width}} ", dimColor=True)
         row_children: list[Element] = []
         # First row consumes the parent gutter prefix; subsequent rows
@@ -361,7 +439,7 @@ def _build_line_rows(
         elif indent_leaf is not None:
             row_children.append(indent_leaf)
         row_children.append(gutter)
-        row_children.extend(tokens)
+        row_children.append(Text(ansi_str))
         out.append(Box(*row_children, flexDirection="row"))
     return out
 
@@ -445,10 +523,11 @@ def HighlightedCode(
     -------
     Element
         A ``box`` host element (column of row ``Box`` elements, each
-        containing the per-token ``Text`` leaves for that source line).
-        No function component is involved — the factory is purely
-        declarative, which makes ``Box(HighlightedCode(...), Text(...))``
-        safe to call from any context.
+        containing a single ``Text`` leaf whose body is the ANSI-coded
+        source line). No function component is involved — the factory
+        is purely declarative, which makes
+        ``Box(HighlightedCode(...), Text(...))`` safe to call from any
+        context.
 
     Raises
     ------
@@ -467,13 +546,14 @@ def HighlightedCode(
     # Plain-text fast path: no Pygments dependency, no colour lookup.
     # Split into rows directly so the line-number machinery is shared
     # with the highlighted branch (one row per source line, optional
-    # numbered gutter).
+    # numbered gutter). Each entry is a plain string (no SGR sequences)
+    # so the single-Text-leaf path renders the line verbatim.
     if language in ("text", ""):
-        token_rows = [[Text(line)] for line in code.split("\n")]
+        token_rows = code.split("\n")
         # Drop a trailing empty row produced by a final newline so we
         # don't render a blank row at the bottom.
         if token_rows and code.endswith("\n"):
-            token_rows.pop()
+            token_rows = token_rows[:-1]
         line_rows = _build_line_rows(
             token_rows,
             line_numbers=line_numbers,

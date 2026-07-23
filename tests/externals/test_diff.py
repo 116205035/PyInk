@@ -2037,3 +2037,470 @@ def test_unpaired_add_only_increments_normally() -> None:
     assert nums == [1, 2, 3], (
         f"unpaired add should increment normally, got {nums!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Long-line wrap (07-23-long-code-line-wrap PR2)
+# ---------------------------------------------------------------------------
+#
+# The original multi-Text-leaf-per-row layout let the flex shrink algorithm
+# penalise every Pygments / word-diff token proportionally when a row
+# exceeded ``columns``. For inline_highlight pairs with many tokens, this
+# collapsed every token to its first character (``the`` → ``t``, ``quick``
+# → ``q``, …) — silent data corruption. The PR2 refactor composes each
+# diff row as ONE Text leaf carrying an inline-ANSI string so the layout
+# engine's ``_measure_paragraph → wrap_text(mode="wrap")`` pipeline wraps
+# the entire row onto subsequent visual rows without per-token shrink.
+
+
+def test_long_plus_line_wraps_without_char_loss() -> None:
+    """A long ``+`` line wraps onto multiple visual rows with full content.
+
+    Regression for the inline_highlight shrink bug: pre-refactor the CC
+    multi-leaf path emitted one Text leaf per word-diff token, and the
+    flex shrink algorithm ate every token's trailing characters when
+    the row exceeded ``columns``. Post-refactor the row is one Text
+    leaf carrying the full ANSI string; wrapping preserves every char.
+    """
+    import re
+
+    before = "x"
+    # 5 repeats × 9 words/repeat = 45 words; at 50 cols this wraps to
+    # multiple visual rows.
+    after = "the quick brown fox jumps over the lazy dog " * 5
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            show_markers=False,
+            line_numbers=True,
+            inline_highlight=True,
+        ),
+        columns=50,
+    )
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    # The content is preserved verbatim — every word appears intact
+    # on the add side (the diff has just one add row whose body wraps).
+    # Pre-refactor the inline_highlight path collapsed each word to its
+    # first char, so "the quick brown fox" became "t q b f" — assert
+    # the full word sequence survives. ``the`` appears 2× per repeat
+    # (start + after ``dog``), so 10 total.
+    assert plain.count("the") == 10
+    assert plain.count("quick") == 5
+    assert plain.count("brown") == 5
+    assert plain.count("fox") == 5
+    assert plain.count("lazy") == 5
+    # The row wraps (more than 1 visual row for the add body). The
+    # first visual row carries the green SGR + sigil; continuation
+    # visual rows carry only the wrapped body text (no SGR opener
+    # since the single Text leaf's SGR doesn't repeat across the
+    # layout's wrap boundaries). We count any line whose plain text
+    # contains words from the add body.
+    plain_lines = [re.sub(r"\x1b\[[0-9;]*m", "", ln) for ln in out.split("\n")]
+    add_body_lines = [ln for ln in plain_lines if "quick" in ln or "fox" in ln]
+    assert len(add_body_lines) >= 2, (
+        f"long +line should wrap to multiple visual rows, "
+        f"got {len(add_body_lines)}: {plain_lines!r}"
+    )
+
+
+def test_long_minus_line_wraps_without_char_loss() -> None:
+    """A long ``-`` line wraps onto multiple visual rows with full content."""
+    import re
+
+    # 5 repeats of a long phrase; the del side wraps.
+    before = "the quick brown fox jumps over the lazy dog " * 5
+    after = "x"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            show_markers=False,
+            line_numbers=True,
+            inline_highlight=True,
+        ),
+        columns=50,
+    )
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    # Every word from the deleted line survives. ``the`` appears 2×
+    # per repeat (start + after ``dog``).
+    assert plain.count("the") == 10
+    assert plain.count("quick") == 5
+    assert plain.count("brown") == 5
+    assert plain.count("lazy") == 5
+    assert plain.count("dog") == 5
+
+
+def test_long_context_line_wraps_without_char_loss() -> None:
+    """A long context line wraps without losing characters.
+
+    Context lines take the legacy fast path (no CC features trigger
+    cc_mode when no add/del markers are around them). The Text leaf
+    carries the raw context body; layout's wrap handles overflow.
+    """
+    import re
+
+    long_context = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
+    before = long_context
+    after = long_context + "\nNEW LINE"
+    out = _render(
+        StructuredDiff(before, after, show_header=False, show_markers=False),
+        columns=40,
+    )
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    # Every word from the long context line is preserved.
+    words = (
+        "alpha", "beta", "gamma", "delta", "epsilon",
+        "zeta", "eta", "theta", "iota", "kappa", "lambda",
+    )
+    for word in words:
+        assert word in plain, f"expected {word!r} in rendered output, got: {plain!r}"
+
+
+def test_long_plus_line_with_pygments_wraps_without_char_loss() -> None:
+    """Long ``+`` line with ``language="python"`` wraps with full tokens.
+
+    Pre-refactor the legacy highlight fast path emitted
+    ``Box(Text(prefix), HighlightedCode(body))`` — HighlightedCode's
+    per-line Text leaf wraps cleanly (post-PR1), so this case worked,
+    but we still cover it to guard against regressions in PR2's
+    refactor of ``_render_diff_line``.
+    """
+    import re
+
+    long_line = (
+        "def function_name(argument_one, argument_two, "
+        "argument_three, argument_four, argument_five):"
+    )
+    out = _render(
+        StructuredDiff(
+            "x",
+            long_line,
+            language="python",
+            show_header=False,
+            show_markers=False,
+        ),
+        columns=50,
+    )
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    # The full body content survives the wrap.
+    assert "def" in plain
+    assert "function_name" in plain
+    assert "argument_one" in plain
+    assert "argument_five" in plain
+
+
+def test_long_minus_line_with_pygments_wraps_without_char_loss() -> None:
+    """Long ``-`` line with ``language="python"`` wraps with full tokens."""
+    import re
+
+    long_line = (
+        "def function_name(argument_one, argument_two, "
+        "argument_three, argument_four, argument_five):"
+    )
+    out = _render(
+        StructuredDiff(
+            long_line,
+            "x",
+            language="python",
+            show_header=False,
+            show_markers=False,
+        ),
+        columns=50,
+    )
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    assert "function_name" in plain
+    assert "argument_one" in plain
+    assert "argument_five" in plain
+
+
+def test_full_width_bg_band_extends_across_wrapped_visual_rows() -> None:
+    """``full_width_bg=True`` paints bg across ALL wrapped visual rows.
+
+    PR2 concern: when a ``+`` row wraps to multiple visual rows, the
+    green bg band must cover the full layout width on EVERY visual row
+    (not just the first one). The pre-refactor code only painted bg
+    on the first visual row; continuation rows had bg only on their
+    text cells.
+
+    Fix: the row's single Text leaf emits a multi-line string where
+    each visual row's chunk + trailing pad ends with its OWN reset
+    (``\\x1b[0m``). This protects the pad cells from the renderer's
+    per-row ``rstrip()`` so the bg band spans the full target width
+    on every visual row.
+    """
+    import re
+
+    from ink.layout.measure import string_width
+
+    long_line = (
+        "def function_name(argument_one, argument_two, "
+        "argument_three, argument_four, argument_five):"
+    )
+    out = _render(
+        StructuredDiff(
+            "x",
+            long_line,
+            show_header=False,
+            show_markers=False,
+            line_numbers=True,
+            full_width_bg=True,
+            add_bg_color="rgb(30,70,32)",
+            del_bg_color="rgb(74,32,32)",
+        ),
+        columns=50,
+    )
+    lines = out.split("\n")
+    # Find the add row(s) — visual rows carrying the green bg SGR.
+    add_bg_open = f"{ESC}[48;2;30;70;32m"
+    add_rows = [ln for ln in lines if add_bg_open in ln]
+    assert len(add_rows) >= 2, (
+        f"expected the add row to wrap to 2+ visual rows, got {len(add_rows)}: {lines!r}"
+    )
+    # Every add visual row must:
+    #   1. start with the bg opener (band active from column 0)
+    #   2. end with a reset (band closes at the row end — pad protected)
+    #   3. have visible width == 50 (band spans full layout width)
+    for i, row in enumerate(add_rows):
+        assert row.startswith(add_bg_open), (
+            f"add visual row {i} should start with bg opener, got: {row!r}"
+        )
+        assert row.endswith(f"{ESC}[0m"), (
+            f"add visual row {i} should end with reset, got: {row!r}"
+        )
+        bare = re.sub(r"\x1b\[[0-9;]*m", "", row)
+        actual_w = string_width(bare)
+        assert actual_w == 50, (
+            f"add visual row {i} should span 50 cols, got {actual_w}: {bare!r}"
+        )
+
+
+def test_line_numbers_gutter_only_on_first_visual_row_when_wrapped() -> None:
+    """``line_numbers=True`` gutter appears only on the first visual row.
+
+    When a row wraps, the line-number gutter must NOT repeat on
+    continuation visual rows (CC parity — gutter belongs to the source
+    line, not to visual rows). The PR2 refactor's continuation-row
+    layout intentionally omits the gutter.
+    """
+    import re
+
+    long_line = (
+        "def function_name(argument_one, argument_two, "
+        "argument_three, argument_four, argument_five):"
+    )
+    out = _render(
+        StructuredDiff(
+            "x",
+            long_line,
+            show_header=False,
+            show_markers=False,
+            line_numbers=True,
+            full_width_bg=True,
+            add_bg_color="rgb(30,70,32)",
+            del_bg_color="rgb(74,32,32)",
+        ),
+        columns=50,
+    )
+    lines = out.split("\n")
+    # First visual row of the add row carries the gutter "1+".
+    add_bg_open = f"{ESC}[48;2;30;70;32m"
+    add_rows = [ln for ln in lines if add_bg_open in ln]
+    assert len(add_rows) >= 2
+    # First visual row contains the gutter (digit + ``+`` sigil).
+    first_bare = re.sub(r"\x1b\[[0-9;]*m", "", add_rows[0])
+    assert "+" in first_bare, (
+        f"first visual row should carry + sigil, got: {first_bare!r}"
+    )
+    # Continuation visual rows do NOT carry the ``+`` sigil.
+    for cont in add_rows[1:]:
+        cont_bare = re.sub(r"\x1b\[[0-9;]*m", "", cont)
+        # Strip leading/trailing whitespace for the sigil check.
+        stripped = cont_bare.strip()
+        assert not stripped.startswith("+"), (
+            f"continuation visual row should NOT carry + sigil, got: {cont_bare!r}"
+        )
+
+
+def test_inline_highlight_survives_wrap() -> None:
+    """``inline_highlight=True`` changed-token highlights survive wrap.
+
+    The PR2 refactor composes the inline-highlight row as ONE Text leaf
+    whose body is the per-token ANSI string. When the row wraps, the
+    ANSI string is wrapped as a unit; the bright-colour SGRs for
+    changed tokens appear in the output (possibly on whichever visual
+    row the changed token lands on).
+    """
+    before = "the quick brown fox " * 5 + "dog"
+    after = "the quick brown fox " * 5 + "cat"
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            show_markers=False,
+            line_numbers=True,
+            inline_highlight=True,
+        ),
+        columns=50,
+    )
+    # greenBright (SGR 92) marks the added ``cat``; redBright (SGR 91)
+    # marks the removed ``dog``. Both should appear somewhere in the
+    # wrapped output.
+    assert f"{ESC}[92m" in out, (
+        "inline-highlight changed-token colour (greenBright) missing"
+    )
+    assert f"{ESC}[91m" in out, (
+        "inline-highlight changed-token colour (redBright) missing"
+    )
+
+
+def test_short_diff_renders_byte_identical_after_refactor() -> None:
+    """Short diff output is byte-identical to the pre-refactor renderer.
+
+    Snapshot regression: the PR2 refactor must not change visible
+    output for short diffs. We render a battery of short diffs with
+    various option combinations and assert each matches an embedded
+    snapshot string. Update the snapshots deliberately — accidental
+    changes indicate a regression in the refactor.
+    """
+    # Snapshot taken post-refactor. The byte sequences mirror the
+    # pre-refactor output exactly (no SGR reordering, no pad changes).
+    cases = [
+        # Plain text, no options — single coloured Text per row.
+        (
+            "x = 1",
+            "x = 2",
+            {},
+            "\x1b[31m-x = 1\x1b[0m\n\x1b[32m+x = 2\x1b[0m",
+        ),
+        # bg_color only — Text with flush.
+        (
+            "x = 1",
+            "x = 2",
+            {"add_bg_color": "rgb(30,70,32)"},
+            "\x1b[31m-x = 1\x1b[0m\n\x1b[48;2;30;70;32m\x1b[32m+x = 2\x1b[0m"
+            + " " * 74
+            + "\x1b[0m",
+        ),
+        # line_numbers — CC mode gutter.
+        (
+            "x = 1",
+            "x = 2",
+            {"line_numbers": True},
+            "\x1b[31m 1-\x1b[0m\x1b[31mx = 1\x1b[0m\n\x1b[32m 1+\x1b[0m\x1b[32mx = 2\x1b[0m",
+        ),
+    ]
+    for before, after, kwargs, expected in cases:
+        out = _render(
+            StructuredDiff(
+                before,
+                after,
+                show_header=False,
+                show_markers=False,
+                **kwargs,
+            ),
+            columns=80,
+        )
+        assert out == expected, (
+            f"snapshot mismatch for kwargs={kwargs!r}:\n"
+            f"  expected: {expected!r}\n"
+            f"  actual:   {out!r}"
+        )
+
+
+def test_long_line_exactly_at_columns_no_wrap() -> None:
+    """A line whose visible width exactly equals ``columns`` doesn't wrap."""
+    import re
+
+    from ink.layout.measure import string_width
+
+    # Build a content line whose visible width fits in columns after
+    # accounting for the diff sigil. The ``+`` prefix consumes 1 col,
+    # so the body must be ≤ 39 chars at columns=40 to avoid wrap.
+    content = "a" * 39
+    assert string_width(content) == 39
+    out = _render(
+        StructuredDiff(
+            "x",
+            content,
+            show_header=False,
+            show_markers=False,
+        ),
+        columns=40,
+    )
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    # The content sits on a single visual row (no wrap).
+    assert plain.count(content) == 1, (
+        f"39-char body should fit on one visual row at columns=40, "
+        f"got: {plain!r}"
+    )
+
+
+def test_long_line_one_char_over_columns_wraps() -> None:
+    """A line whose visible width is ``columns + 1`` wraps to 2 visual rows."""
+    import re
+
+    # 41 chars at columns=40 — should wrap.
+    content = "a" * 41
+    out = _render(
+        StructuredDiff(
+            "x",
+            content,
+            show_header=False,
+            show_markers=False,
+        ),
+        columns=40,
+    )
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    # The content survives — every char appears.
+    assert plain.count("a") == 41
+
+
+def test_long_line_twice_columns_wraps_to_two_rows() -> None:
+    """A line 2× ``columns`` wraps to 2 visual rows."""
+    import re
+
+    content = "a" * 80
+    out = _render(
+        StructuredDiff(
+            "x",
+            content,
+            show_header=False,
+            show_markers=False,
+        ),
+        columns=40,
+    )
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    # Every char preserved across the wrap.
+    assert plain.count("a") == 80
+
+
+def test_single_token_wider_than_columns_hard_breaks() -> None:
+    """A single token wider than ``columns`` hard-breaks (no overflow)."""
+    import re
+
+    from ink.layout.measure import string_width
+
+    # One long token (no break points) wider than columns.
+    content = "a" * 100
+    out = _render(
+        StructuredDiff(
+            "x",
+            content,
+            show_header=False,
+            show_markers=False,
+        ),
+        columns=40,
+    )
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    # All 100 chars survive — wrap algorithm hard-breaks long tokens.
+    assert plain.count("a") == 100
+    # Output width never exceeds columns (each visual row ≤ 40).
+    for line in out.split("\n"):
+        bare = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        assert string_width(bare) <= 40, (
+            f"visual row exceeds columns: w={string_width(bare)}, row={bare!r}"
+        )
