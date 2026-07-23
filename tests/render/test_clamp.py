@@ -33,7 +33,23 @@ from ink.render import pipeline
 
 @pytest.fixture
 def fake_tty_terminal_20x20(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Pin detected terminal size to 20×20 and report stdout as a TTY."""
+    """Pin detected terminal size to 20×20 and report stdout as a TTY.
+
+    Patches ``shutil.get_terminal_size`` so both the mount-time
+    detection (``pipeline._detect_terminal_size``) and the per-paint
+    detection (``Terminal.get_size`` / ``Instance._resolve_columns``)
+    see the same fake size — required because ``use_window_size``
+    re-reads the live signal on every access, and the signal is
+    written from ``_paint_now`` which goes through ``_resolve_columns``.
+    """
+
+    import os as _os
+    import shutil as _shutil
+
+    _fake_size_obj = _os.terminal_size((20, 20))
+
+    def _fake_get_terminal_size(*args, **kwargs):
+        return _fake_size_obj
 
     def _fake_size() -> tuple[int, int]:
         return 20, 20
@@ -41,6 +57,7 @@ def fake_tty_terminal_20x20(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     def _fake_is_tty(_stdout: object) -> bool:
         return True
 
+    monkeypatch.setattr(_shutil, "get_terminal_size", _fake_get_terminal_size)
     monkeypatch.setattr(pipeline, "_detect_terminal_size", _fake_size)
     monkeypatch.setattr(pipeline, "_stdout_is_tty", _fake_is_tty)
     yield
@@ -56,12 +73,21 @@ def fake_non_tty_terminal_20x20(
     on a non-TTY stream because there's no scrollback to corrupt.
     """
 
+    import os as _os
+    import shutil as _shutil
+
+    _fake_size_obj = _os.terminal_size((20, 20))
+
+    def _fake_get_terminal_size(*args, **kwargs):
+        return _fake_size_obj
+
     def _fake_size() -> tuple[int, int]:
         return 20, 20
 
     def _fake_is_tty(_stdout: object) -> bool:
         return False
 
+    monkeypatch.setattr(_shutil, "get_terminal_size", _fake_get_terminal_size)
     monkeypatch.setattr(pipeline, "_detect_terminal_size", _fake_size)
     monkeypatch.setattr(pipeline, "_stdout_is_tty", _fake_is_tty)
     yield

@@ -438,3 +438,102 @@ def test_explicit_box_height_still_pins_exactly() -> None:
         inst.unmount()  # type: ignore[attr-defined]
 
 
+# ---------------------------------------------------------------------------
+# resize -> _force_repaint flag -> full repaint via repaint_frame
+# ---------------------------------------------------------------------------
+
+
+def test_force_repaint_bypasses_equality_early_return() -> None:
+    """``_force_repaint`` makes ``_paint_now`` skip the
+    ``prev_frame == new_frame`` early-return so width-independent
+    widgets still get repainted on resize.
+
+    The flag is captured + cleared at the top of ``_paint_now``; setting
+    it has no observable effect until the next paint runs.
+    """
+    inst, _out = _render_silent(Text("fixed"), columns=20, rows=3)
+    try:
+        assert not inst._force_repaint  # type: ignore[attr-defined]
+        inst._force_repaint = True  # type: ignore[attr-defined]
+        # Paint consumes the flag — a subsequent paint without setting
+        # the flag again must NOT re-emit an identical frame (the
+        # equality early-return takes over again).
+        inst._paint_now()  # type: ignore[attr-defined]
+        assert not inst._force_repaint  # type: ignore[attr-defined]
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_force_repaint_routes_through_repaint_frame() -> None:
+    """``_force_repaint`` makes ``_paint_now`` use ``repaint_frame``
+    (full erase + repaint) instead of incremental ``write_diff`` so the
+    cursor walks back to frame origin — without this the new frame
+    lands below the previous one (the "stacking duplicates" bug).
+
+    Validation: even when the new frame is byte-identical to the
+    previous one, the repaint output contains the frame text AND an
+    erase sequence (``\\x1b[2K`` line-clear), proving both the erase
+    pass and the re-emit ran.
+    """
+    inst, out = _render_silent(Text("fixed"), columns=20, rows=3)
+    try:
+        out.truncate(0)
+        out.seek(0)
+        inst._force_repaint = True  # type: ignore[attr-defined]
+        inst._paint_now()  # type: ignore[attr-defined]
+        repaint = out.getvalue()
+        # The fixed string must reappear even though the frame didn't
+        # change — proves the equality early-return was bypassed.
+        assert "fixed" in repaint
+        # ``repaint_frame`` always line-clears (``\x1b[2K``) before
+        # each row; the incremental ``write_diff`` path emits no such
+        # sequence when frames are identical.
+        assert "\x1b[2K" in repaint
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_force_repaint_uses_clear_to_end_when_old_frame_wider_than_cols() -> None:
+    """When the OLD frame contains a row wider than the NEW viewport,
+    a width-shrinking resize has passively wrapped that row to multiple
+    visual rows in the terminal. Per-row ``\\x1b[2K`` only blanks the
+    visual row the cursor lands on — wrapped tails above survive the
+    erase and show up as "stacked status_bars" residue.
+
+    The wrap-aware erase path detects this case (any logical row wider
+    than ``cols``) and routes through ``\\x1b[0J`` (clear-to-end-of-
+    viewport) after walking the cursor to the visual top of the old
+    frame's footprint. ``\\x1b[0J`` blanks everything from the cursor
+    onwards, wrapped tails included.
+
+    Validation: when the old frame's row exceeds the new cols, the
+    repaint output contains ``\\x1b[0J``. When no row exceeds cols, the
+    repaint output does NOT contain ``\\x1b[0J`` (legacy per-row erase
+    is sufficient and preserves the ``\\x1b[2K`` count contract asserted
+    by other tests).
+    """
+    from ink.render.diff import repaint_frame
+    import io
+
+    # Case 1 — old frame has a wide row (60 chars), cols shrinks to 40.
+    # The wide row would wrap; erase must use ``\x1b[0J``.
+    wide_row = "x" * 60
+    old_frame_wide = f"short\n{wide_row}\nshort"
+    new_frame = "short\nshrunken\nshort"
+    out = io.StringIO()
+    repaint_frame(old_frame_wide, new_frame, out, available_rows=10, cols=40)
+    repaint_bytes = out.getvalue()
+    assert "\x1b[0J" in repaint_bytes, (
+        f"expected \\x1b[0J in wrap case, got: {repaint_bytes!r}"
+    )
+
+    # Case 2 — old frame rows all fit in cols. Legacy per-row erase
+    # applies; ``\x1b[0J`` is NOT emitted.
+    out2 = io.StringIO()
+    repaint_frame(old_frame_wide, new_frame, out2, available_rows=10, cols=80)
+    repaint2 = out2.getvalue()
+    assert "\x1b[0J" not in repaint2, (
+        f"expected NO \\x1b[0J in no-wrap case, got: {repaint2!r}"
+    )
+
+

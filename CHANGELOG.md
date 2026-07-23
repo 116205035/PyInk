@@ -6,6 +6,62 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — terminal resize now redraws the live area
+
+Two independent root causes prevented the live area from visually updating
+after a terminal resize on Windows Terminal (and any platform using the
+polling-thread path):
+
+1. **`use_window_size()` returned a mount-time snapshot.** Components that
+   captured `win = use_window_size()` once at body-run time kept reading
+   the original columns/rows forever, so width-dependent widgets (input
+   divider, spinner row, tool row, etc.) produced byte-identical frames
+   on resize and hit the `prev_frame == new_frame` early-return in
+   `_paint_now`. `WindowSize` is now a property-based class whose
+   `.columns` / `.rows` re-read a live signal on every access; the
+   signal is written at the end of every `_paint_now` pass.
+2. **Width-independent widgets never reset the terminal's passive-wrap
+   state.** Even with a reactive `WindowSize`, a widget whose rendered
+   output doesn't depend on cols (e.g. a status-bar pill row) produced
+   the same frame on resize, hit the same early-return, and left the
+   terminal showing shrunk-wrap / widen-no-rejoin artefacts. The resize
+   callback now sets `Instance._force_repaint = True` before scheduling
+   the next paint; `_paint_now` consumes the flag, skips the equality
+   early-return, and routes through `repaint_frame` so the cursor is
+   walked back to frame origin before the new frame is re-emitted.
+   Going through `write_diff(None, new_frame)` (the first-paint branch)
+   was rejected because it assumes the cursor is already at frame
+   origin — on resize the cursor sits at the bottom of the previous
+   frame, so the first-paint branch stacks each new frame below the
+   previous one (the "duplicated status_bar / divider / input" bug).
+3. **Wrapped row tails survived the force-repaint erase.** A width
+   shrink passively wraps wide rows (right-aligned status_bar,
+   full-width dividers) across multiple visual rows, so the old
+   frame's visual footprint is *taller* than its logical row count.
+   Per-row `\x1b[2K` in the erase pass only blanks the visual row the
+   cursor lands on, leaving wrapped tails above as residue — the
+   "stacking status_bars on every shrink resize" regression after the
+   force-repaint flag landed. `repaint_frame` now detects this case
+   (any old logical row wider than `cols`) and switches to a
+   wrap-aware erase: walk cursor to the visual top of the old
+   footprint, emit `\x1b[0J` (clear-to-end-of-viewport, blanks cells
+   in place without scrolling — safe under PRD Decision 3), then
+   bottom-align the new frame so it parks at the same viewport row as
+   before the resize instead of drifting upward on each shrink.
+
+Side fix: `pipeline.render` used to auto-fill `options.columns` /
+`options.rows` with the detected terminal size even when the caller
+left them unset, which locked `use_window_size` to the mount-time
+detection. The options bag now carries an explicit user pin only —
+`None` when unset — so the hook can read the live signal. The clamped
+values still seed `Instance.columns` / `Instance.rows` for first paint,
+and `_resolve_columns` / `_resolve_rows` fall through to
+`terminal.columns` / `terminal.rows` when options is `None`.
+
+API surface unchanged: `use_window_size()` still returns a `WindowSize`
+with `.columns` / `.rows` int properties; assigning to either still
+raises `AttributeError`.
+
 ### Fixed — `quote_color` theme key now wired up
 
 The `quote_color` theme key (`DEFAULT_MARKDOWN_THEME["quote_color"]`)

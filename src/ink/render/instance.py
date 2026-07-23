@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING, TextIO, cast
 
 from ink.core.element import Element
 from ink.core.reconciler import Reconciler
-from ink.core.signal import effect
+from ink.core.signal import effect, signal
 from ink.hooks._box_metrics_runtime import bump_layout_epoch
 from ink.layout import clear_box_refs, layout, render_layout_to_string
 from ink.render.diff import repaint_frame, write_diff
@@ -88,6 +88,8 @@ class Instance:
         "_resize_dispose",
         "_sigint_dispose",
         "_ctrl_c_dispose",
+        "_size_signal",
+        "_force_repaint",
         "_lock",
     )
 
@@ -153,6 +155,18 @@ class Instance:
         self._resize_dispose: Callable[[], None] | None = None
         self._sigint_dispose: Callable[[], None] | None = None
         self._ctrl_c_dispose: Callable[[], None] | None = None
+        # Latest ``(columns, rows)`` pair, written at the end of every
+        # ``_paint_now`` pass. ``use_window_size()`` returns a proxy that
+        # reads this signal on each ``.columns`` / ``.rows`` access, so
+        # closures captured at mount time stay reactive after a resize.
+        # The signal is written under ``self._lock`` from ``_paint_now``,
+        # which already serializes the layout+write path.
+        self._size_signal = signal((0, 0))
+        # Set by the resize subscription so the next ``_paint_now`` skips
+        # the equality early-return and routes through ``repaint_frame``
+        # to reset the terminal's passive-wrap state. Reading + clearing
+        # happens inside ``_paint_now`` under ``self._lock``.
+        self._force_repaint: bool = False
         self._lock = threading.RLock()
 
     # ------------------------------------------------------------------
@@ -468,6 +482,14 @@ class Instance:
             rows = self._resolve_rows()
             static_dirty = self._static_dirty
             static_chunks = list(self.static_lines) if static_dirty else []
+            # Capture + clear the force-repaint flag at the top so the
+            # early-return decision and the write-path selection below
+            # agree on whether this paint is a force repaint. The resize
+            # subscription sets the flag; any subsequent paint — whether
+            # the resize-scheduled one or an earlier paint from another
+            # source — consumes it.
+            force_repaint = self._force_repaint
+            self._force_repaint = False
             if static_dirty and static_chunks:
                 # Compute the new frame first so we can repaint in one pass.
                 if mounted is None:
@@ -489,6 +511,7 @@ class Instance:
                     self.current_frame = new_frame
                     self.columns = cols
                     self.rows = rows if rows is not None else 0
+                    self._size_signal.value = (cols, rows if rows is not None else 0)
                 return
             if mounted is None:
                 new_frame = ""
@@ -505,7 +528,7 @@ class Instance:
                 # frame doesn't perturb subscribers; the no-op frame still has
                 # measurements from the previous successful layout.
                 bump_layout_epoch()
-            if prev_frame == new_frame and prev_frame:
+            if prev_frame == new_frame and prev_frame and not force_repaint:
                 return
             # Compute the frame's available row budget so ``write_diff``
             # can cap cursor-UP movements. Without this cap, a frame
@@ -554,9 +577,15 @@ class Instance:
                 # frame height by several rows. Incremental diff cannot
                 # reliably erase tail rows beyond ``available_rows`` — use a
                 # full erase + repaint so the input row stays anchored.
-                if height_delta >= 1 and available_rows:
+                # Force-repaint (resize subscription) takes the same path
+                # even when height is unchanged: width-independent widgets
+                # produce byte-identical frames on resize, so the only way
+                # to reset the terminal's passive-wrap state is a full
+                # erase + repaint that walks the cursor back to frame
+                # origin.
+                if force_repaint or (height_delta >= 1 and available_rows):
                     repaint_frame(
-                        prev_frame, new_frame, self.stdout, available_rows,
+                        prev_frame, new_frame, self.stdout, available_rows, cols,
                     )
                 else:
                     write_diff(prev_frame, new_frame, self.stdout, available_rows)
@@ -565,6 +594,7 @@ class Instance:
                 self.current_frame = new_frame
                 self.columns = cols
                 self.rows = rows if rows is not None else 0
+                self._size_signal.value = (cols, rows if rows is not None else 0)
 
     def _flush_static_and_frame(
         self,

@@ -69,8 +69,55 @@ def test_use_window_size_outside_render_falls_back() -> None:
     assert size.rows >= 1
 
 
-def test_window_size_is_frozen_dataclass() -> None:
+def test_window_size_columns_is_readonly() -> None:
+    """Assigning to ``.columns`` / ``.rows`` must raise ``AttributeError``.
+
+    Carries the legacy frozen-dataclass contract forward now that
+    ``WindowSize`` is a property-based class — callers can't mutate the
+    size, only read it.
+    """
     size = use_window_size()
-    # FrozenInstanceError is a subclass of AttributeError.
     with pytest.raises(AttributeError):
         size.columns = 0  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        size.rows = 0  # type: ignore[misc]
+
+
+def test_use_window_size_updates_after_signal_write() -> None:
+    """A captured ``WindowSize`` reflects signal updates without remount.
+
+    Simulates the resize → ``_paint_now`` → signal-write path by
+    writing ``inst._size_signal.value`` directly (what ``_paint_now``
+    does on every paint, including the resize-triggered one). The
+    proxy must read the fresh value on the next ``.columns`` access —
+    not the value that was current when ``use_window_size()`` was
+    called at mount time.
+    """
+    size_box: dict[str, WindowSize] = {}
+
+    def Comp() -> Element:
+        size = use_window_size()
+        size_box["size"] = size
+        return Text("hi")
+
+    # Mount WITHOUT options.columns / options.rows override so the
+    # proxy reads the live signal instead of the options pin.
+    inst = render(
+        create_element(Comp),
+        stdout=_FakeTTY(),
+        stdin=_FakeTTY(),
+        exit_on_ctrl_c=False,
+    )
+    try:
+        captured = size_box["size"]
+        initial_cols = captured.columns
+        initial_rows = captured.rows
+
+        # Simulate the signal write that ``_paint_now`` performs at
+        # the end of a resize-triggered paint.
+        inst._size_signal.value = (initial_cols + 100, initial_rows + 50)
+
+        assert captured.columns == initial_cols + 100
+        assert captured.rows == initial_rows + 50
+    finally:
+        inst.unmount()

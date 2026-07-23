@@ -140,38 +140,100 @@ def repaint_frame(
     new_frame: str,
     stdout: TextIO,
     available_rows: int | None = None,
+    cols: int | None = None,
 ) -> None:
     """Erase ``old_frame`` then paint ``new_frame``.
 
     Used when the live frame height changes enough (e.g. palette open /
     close) that incremental ``write_diff`` would leave unreachable tail
-    rows uncleared or park the cursor at the wrong y.
+    rows uncleared or park the cursor at the wrong y, or when a terminal
+    resize forces a full repaint (``Instance._force_repaint``).
 
-    Shrink is **top-aligned**: the new frame is painted at the same
-    origin as the erased footprint. The erase walks UPWARD from the
-    frame's last row (where the cursor is parked) clearing each
-    reachable row, and ends on the topmost reachable row — row 0 of the
-    footprint when the whole frame is on-screen. ``_paint_initial`` then
-    repaints from there and parks on the new frame's last row.
-    Bottom-aligning the paint (cursor-down by ``old_h - new_h`` before
-    paint) looked better for a single collapse — content sat on the old
-    bottom edge — but left a hollow band *above* the chrome. On repeated
-    palette open/Esc that band grew by the picker height each cycle,
-    because the paint origin drifted down and never reclaimed the gap.
-    Top-align keeps the origin stable so the next grow fills the same
-    footprint instead of stacking gaps.
+    Alignment:
+
+    * **No wrap** (``cols is None`` or every old row fits in ``cols``):
+      top-aligned. The new frame is painted at the same origin as the
+      erased footprint. This matches the height-change behaviour
+      (palette open/close) — keeping the origin stable so the next
+      grow fills the same footprint instead of stacking gaps.
+
+    * **Wrap-aware** (some old row wider than ``cols``): bottom-aligned.
+      A width-shrinking resize passively wraps wide rows (right-aligned
+      status_bar, full-width dividers) so the old frame's visual
+      footprint is *taller* than its logical row count. Painting the
+      new (shorter) frame at the old visual top would shift the frame
+      upward in the viewport; after N shrink resizes the frame would
+      drift up by N * (wrapped_rows). We instead anchor the new frame's
+      bottom at the old frame's bottom (where the cursor was parked)
+      so the live area stays put visually. Wrapped tails above are
+      cleared by ``\\x1b[0J``.
+
+    ``\\x1b[0J`` (clear-to-end-of-viewport) was chosen over
+    ``\\x1b[2J`` because it blanks cells in place without scrolling
+    content into scrollback (PRD Decision 3).
     """
-    if old_frame:
-        old_lines = old_frame.split("\n")
-        budget = (
-            available_rows
-            if (available_rows and available_rows > 0)
-            else len(old_lines)
-        )
+    if not old_frame:
+        if new_frame:
+            _paint_initial(new_frame, stdout)
+        return
+
+    old_lines = old_frame.split("\n")
+    budget = (
+        available_rows
+        if (available_rows and available_rows > 0)
+        else len(old_lines)
+    )
+    may_wrap = (
+        cols is not None
+        and cols > 0
+        and any(len(line) > cols for line in old_lines)
+    )
+    if not may_wrap:
         _erase_reachable_rows(old_lines, stdout, budget)
+        if new_frame:
+            _paint_initial(new_frame, stdout)
+        else:
+            stdout.write("\r")
+        return
+
+    # Wrap-aware path. Compute the visual extent of the reachable old
+    # rows so we know how high to climb to reach the visual top, then
+    # emit ``\r\x1b[0J`` to blank from there to end of viewport. Then
+    # position cursor at the new frame's visual top (bottom-aligned
+    # with the old frame) and paint.
+    cols_int = cols if cols is not None else 0
+    row_floor = max(0, len(old_lines) - budget)
+    old_visual = 0
+    for row_idx in range(row_floor, len(old_lines)):
+        line_len = len(old_lines[row_idx])
+        old_visual += max(1, (line_len + cols_int - 1) // cols_int)
+
+    new_visual = 0
+    if new_frame:
+        new_lines = new_frame.split("\n")
+        for line in new_lines:
+            new_visual += max(1, (len(line) + cols_int - 1) // cols_int)
+
+    out: list[str] = []
+    if old_visual > 1:
+        out.append(f"\x1b[{old_visual - 1}A")
+    out.append("\r")
+    out.append("\x1b[0J")
+    # Bottom-align: walk cursor DOWN by (old_visual - new_visual) so
+    # the new frame's bottom lands on the old frame's bottom. If the
+    # new frame is visually taller than the old (rare — e.g. content
+    # grew AND cols shrunk enough to wrap), cursor-up by the negative
+    # delta; this may push into scrollback, but the alternative
+    # (top-align) drifts upward on every shrink resize.
+    delta = old_visual - new_visual
+    if delta > 0:
+        out.append(f"\x1b[{delta}B")
+    elif delta < 0:
+        out.append(f"\x1b[{-delta}A")
+    stdout.write("".join(out))
     if new_frame:
         _paint_initial(new_frame, stdout)
-    elif old_frame:
+    else:
         stdout.write("\r")
 
 
@@ -333,6 +395,11 @@ def _erase_reachable_rows(
     sits at column 1 of ``row_floor`` — row 0 of the footprint whenever
     the whole frame fits on-screen — which is exactly where
     ``_paint_initial`` expects to start repainting.
+
+    Used for the no-wrap height-change case (palette open/close). The
+    wrap-aware resize case is handled inline in :func:`repaint_frame`
+    via a ``\\x1b[0J`` clear-to-end-of-viewport sequence that also
+    blanks passively-wrapped row tails.
     """
     row_floor = max(0, len(old_lines) - available_rows)
     out: list[str] = []

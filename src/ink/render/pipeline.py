@@ -176,7 +176,20 @@ def render(
     is_tty = _stdout_is_tty(out)
     resolved_columns = _clamp_dimension(columns, actual_cols, is_tty=is_tty)
     resolved_rows = _clamp_dimension(rows, actual_rows, is_tty=is_tty)
-    options = RenderOptions(columns=resolved_columns, rows=resolved_rows)
+    # ``RenderOptions`` carries an explicit user pin only — ``None`` when
+    # the caller left the viewport unset (``columns`` / ``rows`` passed
+    # through unchanged when they're ``None``). This lets
+    # ``use_window_size`` read the live signal (driven by ``_paint_now``)
+    # instead of being locked to the mount-time detection. The clamped
+    # values still seed ``inst.columns`` / ``inst.rows`` so first paint
+    # has a sensible value; subsequent paints re-resolve via
+    # ``_resolve_columns`` (which falls through to ``terminal.columns``
+    # when options is None).
+    pinned_columns = (
+        resolved_columns if columns is not None else None
+    )
+    pinned_rows = resolved_rows if rows is not None else None
+    options = RenderOptions(columns=pinned_columns, rows=pinned_rows)
     reconciler = Reconciler()
     throttle = _FpsThrottle(max_fps=max_fps)
     inst = Instance(
@@ -225,9 +238,18 @@ def render(
     # Build + start the render loop (initial paint runs synchronously).
     inst._start_render_loop()
 
-    # Resize -> force-flush a paint (bypasses the FPS throttle so a
-    # window resize is reflected immediately).
-    inst._resize_dispose = terminal.on_resize(lambda _c, _r: throttle.schedule(inst._paint_now))
+    # Resize -> force a full repaint (bypasses the FPS throttle so a
+    # window resize is reflected immediately). Setting
+    # ``_force_repaint`` makes ``_paint_now`` skip the equality
+    # early-return and route through ``repaint_frame`` so the old frame
+    # is erased before the new one is painted — this is what resets the
+    # terminal's passive-wrap state for width-independent widgets
+    # (status bar etc.) that produce byte-identical frames on resize.
+    def _on_resize(_c: int, _r: int) -> None:
+        inst._force_repaint = True
+        throttle.schedule(inst._paint_now)
+
+    inst._resize_dispose = terminal.on_resize(_on_resize)
 
     # atexit + SIGINT handlers.
     inst._atexit_registered = True
