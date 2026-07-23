@@ -424,13 +424,15 @@ def _build_line_rows(
     # is ``start_line + total - 1`` (last row of the snippet), so the
     # gutter is padded to that width to keep columns aligned across
     # snippets that begin mid-file. Plus a trailing space for visual
-    # separation from the code. Right-aligned via Python format spec.
+    # separation from the code. Zero-padded so digits stay column-aligned
+    # across the 9→10 / 99→100 boundaries (``094``, ``095``, …, ``100``)
+    # instead of right-aligning with spaces.
     last_line = max(1, int(start_line)) + total - 1 if total else max(1, int(start_line))
     gutter_width = max(1, len(str(last_line)))
     start = max(1, int(start_line))
     out: list[Element] = []
     for i, ansi_str in enumerate(rows, start=start):
-        gutter = Text(f"{i:>{gutter_width}} ", dimColor=True)
+        gutter = Text(f"{i:0{gutter_width}} ", dimColor=True)
         row_children: list[Element] = []
         # First row consumes the parent gutter prefix; subsequent rows
         # fall back to the continuation ``indent``.

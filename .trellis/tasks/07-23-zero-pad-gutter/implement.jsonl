@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/frontend/rendering-contracts.md", "reason": "Section 3 documents the single-Text-per-source-line contract that the gutter row builds on; gutter format change must not break it"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "General component patterns for factory externals (HighlightedCode, StructuredDiff)"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Testing expectations for frontend/externals changes"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Gotchas on shared helpers between highlighted_code.py and diff.py — relevant if gutter formatting gets extracted"}
+{"file": ".trellis/tasks/07-23-long-code-line-wrap/prd.md", "reason": "Previous task context — refactor that introduced the current single-Text+inline-ANSI row shape. Gutter sits in the same row."}

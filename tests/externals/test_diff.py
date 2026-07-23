@@ -987,6 +987,86 @@ def test_line_numbers_off_by_default() -> None:
     assert re.search(r"\d\+beta", plain) is None
 
 
+def test_line_numbers_zero_pads_to_gutter_width() -> None:
+    """Single-digit max → width 2 (CC's ``len(str(max))+1``) → ``01+`` / ``01-``.
+
+    Zero-padding keeps the digit column aligned to the sigil column
+    across rows. For a 2-row diff (max line = 1 → width 2) the gutter
+    reads ``"01+"`` / ``"01-"`` instead of ``" 1+"`` / ``" 1-"``.
+    """
+    out = _render(
+        StructuredDiff(
+            "x = 1",
+            "x = 2",
+            show_header=False,
+            line_numbers=True,
+        )
+    )
+    assert "01-" in out
+    assert "01+" in out
+    # A space-padded ``" 1-"`` must NOT appear — regression guard.
+    assert " 1-" not in out
+    assert " 1+" not in out
+
+
+def test_line_numbers_zero_pads_across_99_100_boundary() -> None:
+    """Diff whose max line crosses 99→100 zero-pads sub-100 rows to width 4.
+
+    StructuredDiff uses CC's ``len(str(max))+1`` width rule, so a diff
+    whose max gutter number is 100 → width 4. Lines below 100 get
+    zero-filled to 4 digits (``0096``, …, ``0100``) keeping the digit
+    column vertical across the 2→3 digit boundary.
+    """
+    # Source lines whose content matches their real file line. The diff
+    # context window clips which rows appear, so we use start_line that
+    # matches the first visible row to keep gutter numbers semantically
+    # accurate.
+    before = "\n".join(f"line{i}" for i in range(1, 201))
+    after = before.replace("line99", "LINE99")
+    out = _render(
+        StructuredDiff(
+            before,
+            after,
+            show_header=False,
+            line_numbers=True,
+            start_line=96,  # first visible context row (change at 99)
+        )
+    )
+    # Width = len("102") + 1 = 4. Line 96 renders as ``"0096 "``.
+    assert "0096 line96" in out
+    # Line 100 (context after change) renders as ``"0100 "``.
+    assert "0100 line100" in out
+    # Paired del/add at line 99 share gutter ``"0099"``.
+    assert "0099-" in out
+    assert "0099+" in out
+    # A space-padded gutter must NOT appear.
+    assert " 96 line96" not in out
+    assert " 100 line100" not in out
+
+
+def test_line_numbers_continuation_row_gutter_stays_spaces() -> None:
+    """Soft-wrapped continuation rows must NOT receive zero-padding.
+
+    When ``line_num=None`` (continuation row of a soft-wrapped pair)
+    the gutter column is rendered as all-spaces — never zero-filled.
+    Guards against an over-eager zero-fill leaking into the wrap path.
+    """
+    from ink.externals.diff import _line_number_gutter
+
+    # Width 3 continuation gutter → 3 spaces + sigil, no "0".
+    leaf = _line_number_gutter(
+        line_num=None,
+        width=3,
+        sigil=" ",
+        color="red",
+    )
+    # Text leaf stores children as a tuple; the literal string is the
+    # first element: 3 spaces + sigil " " = 4 spaces total.
+    assert leaf.children[0] == "    "
+    # No leading zero anywhere in the num column.
+    assert "0" not in leaf.children[0][:3]
+
+
 def test_inline_highlight_paints_changed_token_brighter() -> None:
     """``inline_highlight=True`` colours only the changed token brighter.
 
@@ -2385,12 +2465,12 @@ def test_short_diff_renders_byte_identical_after_refactor() -> None:
             + " " * 74
             + "\x1b[0m",
         ),
-        # line_numbers — CC mode gutter.
+        # line_numbers — CC mode gutter (zero-padded to gutter_width=2).
         (
             "x = 1",
             "x = 2",
             {"line_numbers": True},
-            "\x1b[31m 1-\x1b[0m\x1b[31mx = 1\x1b[0m\n\x1b[32m 1+\x1b[0m\x1b[32mx = 2\x1b[0m",
+            "\x1b[31m01-\x1b[0m\x1b[31mx = 1\x1b[0m\n\x1b[32m01+\x1b[0m\x1b[32mx = 2\x1b[0m",
         ),
     ]
     for before, after, kwargs, expected in cases:

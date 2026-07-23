@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Verify test coverage standards are met for the gutter format change"}
+{"file": ".trellis/spec/frontend/rendering-contracts.md", "reason": "Verify single-Text-per-row contract still holds; gutter change is purely formatting inside the existing Text leaf"}

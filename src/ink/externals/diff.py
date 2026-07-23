@@ -312,16 +312,17 @@ def _line_number_gutter(
 ) -> Text:
     """Build a CC-style line-number gutter ``Text`` leaf.
 
-    Format: ``<padded_num><sigil>`` where the padded number uses
-    ``width`` characters (right-aligned). When ``line_num`` is ``None``
-    (the continuation row of a soft-wrapped pair) the entire number
-    column is rendered as spaces. CC's ``Fallback.tsx:331`` produces the
-    same shape via ``padStart(maxWidth)``.
+    Format: ``<padded_num><sigil>`` where the padded number is zero-filled
+    to ``width`` characters. When ``line_num`` is ``None`` (the
+    continuation row of a soft-wrapped pair) the entire number column is
+    rendered as spaces — never zero-filled. CC's ``Fallback.tsx:331``
+    uses ``padStart(maxWidth)`` (space-padded); we diverge to keep
+    digits column-aligned across the 9→10 / 99→100 boundaries.
     """
     if line_num is None:
         num_str = " " * width
     else:
-        num_str = str(line_num).rjust(width)
+        num_str = str(line_num).rjust(width, "0")
     body = f"{num_str}{sigil}"
     props: dict[str, Any] = {"color": color}
     if bg_color is not None:
@@ -962,7 +963,7 @@ def _build_full_width_bg_row(
         num_str = (
             " " * gutter_width
             if line_num is None
-            else str(line_num).rjust(gutter_width)
+            else str(line_num).rjust(gutter_width, "0")
         )
         gutter_str = f"{num_str}{sigil}"
     else:

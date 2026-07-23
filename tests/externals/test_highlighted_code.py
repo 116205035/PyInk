@@ -416,13 +416,13 @@ def test_line_numbers_emits_dim_gutter() -> None:
 
 
 def test_line_numbers_gutter_width_grows_with_count() -> None:
-    """Gutter is padded to the width of the largest line number."""
+    """Gutter is zero-padded to the width of the largest line number."""
     code = "\n".join(str(i) for i in range(1, 11))  # 10 lines
     out = _render(HighlightedCode(code, language="text", line_numbers=True))
     lines = out.split("\n")
-    # Line 1 should be padded to width 2 → " 1 ".
-    assert lines[0].startswith(f"{ESC}[2m 1 {ESC}[0m")
-    # Line 10 should be "10 ".
+    # Line 1 should be zero-padded to width 2 → "01 ".
+    assert lines[0].startswith(f"{ESC}[2m01 {ESC}[0m")
+    # Line 10 should be "10 " (already 2 digits, no leading zero added).
     assert lines[-1].startswith(f"{ESC}[2m10 {ESC}[0m")
 
 
@@ -762,6 +762,49 @@ def test_start_line_python_path_still_threaded() -> None:
     lines = out.split("\n")
     assert lines[0].startswith(f"{ESC}[2m7 {ESC}[0m"), out
     assert lines[1].startswith(f"{ESC}[2m8 {ESC}[0m"), out
+
+
+# ---------------------------------------------------------------------------
+# Zero-padded gutter (cross-digit-boundary alignment)
+# ---------------------------------------------------------------------------
+
+
+def test_gutter_zero_pads_across_99_100_boundary() -> None:
+    """Lines 94–103 → width 3, so 94 renders as ``094`` and 100 as ``100``.
+
+    Visual alignment of the digit column across the 2→3 digit boundary
+    is the whole point of zero-padding.
+    """
+    code = "\n".join(["x"] * 10)
+    out = _render(
+        HighlightedCode(
+            code, language="text", line_numbers=True, start_line=94
+        )
+    )
+    lines = out.split("\n")
+    # First row 94 zero-padded to width 3.
+    assert lines[0].startswith(f"{ESC}[2m094 {ESC}[0m"), out
+    # Row crossing the boundary (7th row = line 100) — no leading zero
+    # needed because the number is already 3 digits wide.
+    assert lines[6].startswith(f"{ESC}[2m100 {ESC}[0m"), out
+    # Last row 103.
+    assert lines[-1].startswith(f"{ESC}[2m103 {ESC}[0m"), out
+
+
+def test_gutter_single_digit_width_emits_no_leading_zero() -> None:
+    """When ``gutter_width == 1`` zero-padding is a no-op (``f"{5:01}" == "5"``).
+
+    Guards against regression where 1–9 line snippets would suddenly
+    render ``01``/``02``/… which is both visually wasteful and not what
+    the user asked for.
+    """
+    code = "\n".join(["x"] * 5)  # 5 lines, last = 5, gutter_width = 1
+    out = _render(HighlightedCode(code, language="text", line_numbers=True))
+    lines = out.split("\n")
+    assert lines[0].startswith(f"{ESC}[2m1 {ESC}[0m"), out
+    assert lines[-1].startswith(f"{ESC}[2m5 {ESC}[0m"), out
+    # No row should contain a leading zero in the gutter.
+    assert f"{ESC}[2m0" not in out
 
 
 def test_single_newline_renders_nothing() -> None:
