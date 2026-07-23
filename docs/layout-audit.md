@@ -61,3 +61,38 @@ shrink 只做一趟，没有"min-content 违例 → 重新分配"的迭代。嵌
 核心布局对"内容能放下"的常规场景考虑是周全的，本次两个修复（`Submitted:` 溢出、多行光标视口）都打在了真正的根因上，并补了回归测试。
 
 **最值得后续投入的是第 1 点**——"超预算时干净裁剪而非重叠"，它是一类问题（任何界面在小终端下都可能撞上）；目前的多行 `rows` 上限只是把触发概率降低了，没有从布局层根治。
+
+## 四、gap 与 collapsed children（已对齐 CSS flexbox）
+
+### 背景
+
+PyInk 的 `gap` flexbox prop 早期按 `len(children)` 计数 gap slot——N 个 child 固定 N-1 个 gap，不区分 collapsed（main-axis 测量为 0）的 child。CSS flexbox 标准要求 gap 只在 *visible items* 之间生效（[css-flexbox-1 §8.4](https://www.w3.org/TR/css-flexbox-1/#gutters)、css-align 的 gap 定义）。React Ink (TS) 走 yoga/浏览器引擎天然遵守。
+
+Jarvis 侧的痛点：`Box(*dynamic_widgets, gap=1)` 在空闲状态下 4 个 `Text(..., collapseIfEmpty=True)` 子节点都返回 `""`，按 CSS 应该全部收光不占行；但旧实现会显示 N-1 行空白（`Worked for 3m 31s` 与底部 status bar 之间多出数行空白就是这个 bug）。
+
+### 当前行为（已修复）
+
+`gap` 只在相邻 visible children（main-axis 测量 > 0）之间生效：
+
+- 连续 collapsed children 之间、collapsed 和 visible 之间不加 gap
+- 全部 collapsed → `total_gap = 0`，父盒高度收光
+- 全部 visible → 行为等价于"按 `len(children)` 计 gap"的旧实现
+
+覆盖范围：`_layout_row` / `_layout_column` 的 `total_gap` 计算、`_compute_min_content_main` 的 gap 项、`_position_main` 的 6 个 justify 分支（`flex-start` / `flex-end` / `center` / `space-between` / `space-around` / `space-evenly`）。
+
+### 触发 collapsed 的唯一机制
+
+PyInk 当前没有 `display: none` 或 `visibility: hidden` prop。`collapseIfEmpty=True` 是把空文本叶子的 main-axis 测量压到 0 的唯一手段（见 `_layout_node` 文本分支 + `_compute_min_content_main` 的 text 分支）。任何 main-axis 测量为 0 的 child 都会被 gap 跳过——例如未来引入新的 collapse 机制时无需再改 gap 逻辑。
+
+### 实现要点
+
+- **`_visible_children_mask(main_sizes)`**：`[s > 0 for s in main_sizes]`——margin 仍算 visible（margin 让 child 即使内容为 0 也保留 gap slot，符合 CSS 语义）。
+- **`_gap_after_index(visible_mask, i, gap)`**：判断 "child i 之后是否有 visible child"，用于决定 cursor 推进时是否加 main_gap。
+- **`_has_next_visible(visible_mask, i)`**：用于 `space-between` 的 `between` 分布——分布空间独立于 `main_gap` 是否设置（即 `gap=0` 时 `space-between` 仍分布）。
+- **`space-around` / `space-evenly` 的 `between` 计算**：用 `visible_n` 替代 `len(children)`，确保 collapsed 不消耗分布 slot。
+
+### 已知遗留
+
+- `flexWrap + gap`（`test_gap_wrap` 仍 xfail）——多行 wrap 路径不在 MVP 范围，gap 的 collapsed 处理与单行 nowrap 一致。
+- `_position_main` 的 6 个 justify 分支用了同样的 visible-mask 推进模式，但实现是顺序写的（每个分支自己 walk cursor）；未来若新增 justify 模式，需要照同样的 collapsed 处理模板写一遍。
+

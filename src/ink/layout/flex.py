@@ -1170,7 +1170,15 @@ def _layout_row(
         cross_sizes.append(child.layout_height + m.vertical)
 
     n = len(children)
-    total_gap = gap * (n - 1) if n > 1 else 0
+    # CSS flexbox gap: gaps only apply between *visible* children (those
+    # with non-zero main-axis size). A collapsed child (e.g. a
+    # ``Text(collapseIfEmpty=True)`` whose content resolved to empty
+    # strings to 0 main size) therefore contributes no gap slot on
+    # either side. See :func:`_visible_children_mask` /
+    # :func:`_gap_after_index`.
+    visible_mask = _visible_children_mask(main_sizes)
+    visible_n = sum(1 for v in visible_mask if v)
+    total_gap = gap * (visible_n - 1) if visible_n > 1 else 0
     natural_main = sum(main_sizes) + total_gap
 
     if own_w >= 0:
@@ -1297,7 +1305,10 @@ def _layout_column(
         cross_sizes.append(child.layout_width + m.horizontal)
 
     n = len(children)
-    total_gap = gap * (n - 1) if n > 1 else 0
+    # CSS flexbox gap: only between visible children (see _layout_row).
+    visible_mask = _visible_children_mask(main_sizes)
+    visible_n = sum(1 for v in visible_mask if v)
+    total_gap = gap * (visible_n - 1) if visible_n > 1 else 0
     natural_main = sum(main_sizes) + total_gap
 
     if own_h >= 0:
@@ -1428,14 +1439,22 @@ def _compute_min_content_main(node: FlexNode) -> int:
         return 0
     if style.is_column():
         # Column main axis = vertical → sum child min-heights + gaps.
+        # CSS flexbox gap only applies between visible children (those
+        # with non-zero min-content main-axis size). A child whose
+        # min-content has collapsed to 0 (e.g. an empty
+        # ``Text(collapseIfEmpty=True)`` leaf) therefore consumes no
+        # gap slot — keeping the parent's min-content aligned with the
+        # post-layout natural_main computation.
         gap = style.row_gap or style.gap
-        inner = sum(c.min_content_main for c in children) + gap * (len(children) - 1)
+        visible_n = sum(1 for c in children if c.min_content_main > 0)
+        inner = sum(c.min_content_main for c in children) + gap * (visible_n - 1 if visible_n > 1 else 0)
     else:
         # Row main axis = horizontal → max child min-width + gaps.
         gap = style.column_gap or style.gap
+        visible_n = sum(1 for c in children if c.min_content_main > 0)
         inner = (
             max((c.min_content_main for c in children), default=0)
-            + gap * (len(children) - 1)
+            + gap * (visible_n - 1 if visible_n > 1 else 0)
         )
     # ``style.padding`` already includes the border thickness (PR4 folded
     # border into padding so layout reserves the cells the renderer fills).
@@ -1534,16 +1553,71 @@ def _distribute_main(
     return out
 
 
+def _visible_children_mask(main_sizes: list[int]) -> list[bool]:
+    """Mask of children with non-zero main-axis size (visible for gap).
+
+    CSS flexbox ``gap`` only applies between *visible* items. A child
+    whose main-axis size resolved to 0 (e.g. a ``Text(collapseIfEmpty=True)``
+    leaf with empty content, or any element whose measurement collapsed)
+    participates in neither the gap count nor the inter-child gap slot.
+    The mask is derived from the post-measurement ``main_sizes`` list —
+    same source used for ``natural_main`` — so a child with margin but
+    zero content size still counts as visible (its margin band reserves
+    a gap slot, matching CSS semantics).
+    """
+    return [s > 0 for s in main_sizes]
+
+
+def _gap_after_index(
+    visible_mask: list[bool], i: int, gap: int
+) -> int:
+    """Return the main-axis gap to insert after child ``i``.
+
+    Returns ``gap`` iff child ``i`` is visible AND there is a following
+    visible child somewhere after it in source order. Otherwise 0.
+    Walks forward to handle interleaved collapsed children correctly:
+    a collapsed child between two visible ones contributes no gap slot
+    of its own, so the gap "belongs" to the previous visible child's
+    trailing slot. This mirrors :func:`_position_main`'s pre-collapse
+    pattern of "advance cursor by ``s + gap`` after placing child i".
+    """
+    n = len(visible_mask)
+    if gap <= 0 or i < 0 or i >= n or not visible_mask[i]:
+        return 0
+    for j in range(i + 1, n):
+        if visible_mask[j]:
+            return gap
+    return 0
+
+
+def _has_next_visible(visible_mask: list[bool], i: int) -> bool:
+    """Return True iff some child after index ``i`` is visible."""
+    for j in range(i + 1, len(visible_mask)):
+        if visible_mask[j]:
+            return True
+    return False
+
+
 def _position_main(
     style: FlexStyle,
     sizes: list[int],
     total_gap: int,
     container_main: int,
 ) -> list[int]:
-    """Return absolute main-axis offsets for each child."""
+    """Return absolute main-axis offsets for each child.
+
+    CSS flexbox gap is only inserted between visible children (those
+    with non-zero main-axis size). Collapsed children therefore neither
+    consume a gap slot on either side nor shift the surrounding visible
+    siblings' gap placement. The ``space-*`` justify variants likewise
+    distribute free space across visible children only.
+    """
     n = len(sizes)
     if n == 0:
         return []
+    visible_mask = _visible_children_mask(sizes)
+    visible_n = sum(1 for v in visible_mask if v)
+    gap = style.main_gap()
     content = sum(sizes) + total_gap
     free = container_main - content
     positions: list[int] = []
@@ -1551,40 +1625,62 @@ def _position_main(
     if style.justify == "flex-start" or free < 0:
         for i, s in enumerate(sizes):
             positions.append(cursor)
-            cursor += s + (style.main_gap() if i < n - 1 else 0)
+            cursor += s + _gap_after_index(visible_mask, i, gap)
     elif style.justify == "flex-end":
         cursor = container_main - content
         for i, s in enumerate(sizes):
             positions.append(cursor)
-            cursor += s + (style.main_gap() if i < n - 1 else 0)
+            cursor += s + _gap_after_index(visible_mask, i, gap)
     elif style.justify == "center":
         cursor = (container_main - content) // 2
         for i, s in enumerate(sizes):
             positions.append(cursor)
-            cursor += s + (style.main_gap() if i < n - 1 else 0)
+            cursor += s + _gap_after_index(visible_mask, i, gap)
     elif style.justify == "space-between":
-        gaps = n - 1
+        # Distribute free space between adjacent *visible* children.
+        gaps = visible_n - 1
         between = free // gaps if gaps > 0 else 0
         for i, s in enumerate(sizes):
             positions.append(cursor)
-            cursor += s + (style.main_gap() + between if i < n - 1 else 0)
+            # Only emit a gap (main_gap + distributed between) when
+            # this child has a following visible sibling. Collapsed
+            # trailing children get neither. Note: the distributed
+            # ``between`` is independent of whether ``main_gap`` is
+            # set — ``space-between`` distributes free space even
+            # when ``gap=0``.
+            has_next = _has_next_visible(visible_mask, i)
+            added_gap = _gap_after_index(visible_mask, i, gap)
+            added_between = between if has_next and visible_mask[i] else 0
+            cursor += s + added_gap + added_between
     elif style.justify == "space-around":
-        # n children → 2n half-gaps. Distribute remainder to the trailing
-        # half-gaps (matches ink's "extra space at end" rounding quirk;
-        # the known yoga bug for the first child means this can deviate
-        # by one cell — see test_flex_justify_space_around_xfail).
-        gaps = 2 * n
+        # visible_n children → 2*visible_n half-gaps. Distribute
+        # remainder to the trailing half-gaps (matches ink's "extra
+        # space at end" rounding quirk; the known yoga bug for the
+        # first child means this can deviate by one cell — see
+        # test_flex_justify_space_around_xfail).
+        gaps = 2 * visible_n
         unit = free / gaps if gaps > 0 else 0.0
         leading = int(unit / 2) if unit >= 1 else 0
         cursor = leading
         between = int(unit)
-        for _i, s in enumerate(sizes):
+        for i, s in enumerate(sizes):
             positions.append(cursor)
-            cursor += s + style.main_gap() + between
+            # Each visible child contributes its trailing half-gap
+            # (``between``) plus a main_gap slot if a visible sibling
+            # follows. The leading half-gap was folded into the
+            # initial cursor; subsequent visible children pick up
+            # their leading half-gap from the previous child's
+            # trailing advance.
+            if visible_mask[i]:
+                added_gap = _gap_after_index(visible_mask, i, gap)
+                cursor += s + added_gap + between
+            else:
+                cursor += s
     elif style.justify == "space-evenly":
-        # n+1 gaps. Each gap = free / (n+1), with the **remainder**
-        # distributed to the trailing gaps (matches ink test fixtures).
-        gaps = n + 1
+        # visible_n+1 gaps. Each gap = free / (visible_n+1), with the
+        # **remainder** distributed to the trailing gaps (matches ink
+        # test fixtures).
+        gaps = visible_n + 1
         if gaps > 0:
             base_unit = free // gaps
             extra = free - base_unit * gaps
@@ -1593,14 +1689,23 @@ def _position_main(
             extra = 0
         gap_sizes = [base_unit + (1 if i >= gaps - extra else 0) for i in range(gaps)]
         cursor = gap_sizes[0] if gap_sizes else 0
+        # Track which "evenly gap slot" we are consuming next. A
+        # collapsed child does not consume an evenly gap slot, so the
+        # visible children still walk through them in order.
+        next_gap_idx = 1
         for i, s in enumerate(sizes):
             positions.append(cursor)
-            mid = gap_sizes[i + 1] if i + 1 < len(gap_sizes) else 0
-            cursor += s + style.main_gap() + mid
+            if visible_mask[i]:
+                added_main_gap = _gap_after_index(visible_mask, i, gap)
+                mid = gap_sizes[next_gap_idx] if next_gap_idx < len(gap_sizes) else 0
+                next_gap_idx += 1
+                cursor += s + added_main_gap + mid
+            else:
+                cursor += s
     else:  # pragma: no cover - exhaustive
         for i, s in enumerate(sizes):
             positions.append(cursor)
-            cursor += s + (style.main_gap() if i < n - 1 else 0)
+            cursor += s + _gap_after_index(visible_mask, i, gap)
     return positions
 
 

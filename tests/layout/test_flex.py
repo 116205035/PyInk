@@ -568,6 +568,83 @@ def test_row_gap_column_layout() -> None:
 
 
 # ---------------------------------------------------------------------------
+# gap + collapseIfEmpty (CSS flexbox: gap only between visible items)
+# ---------------------------------------------------------------------------
+
+
+def test_gap_column_skips_leading_collapsed_child() -> None:
+    """Collapsed child at position 0 contributes no gap slot; the
+    visible sibling renders at the top with no leading blank row."""
+    tree = box(
+        text("", collapseIfEmpty=True),
+        text("B"),
+        gap=1, flexDirection="column",
+    )
+    assert render_to_string(tree) == "B"
+
+
+def test_gap_column_skips_trailing_collapsed_child() -> None:
+    """Collapsed child at the tail contributes no gap slot either."""
+    tree = box(
+        text("A"),
+        text("", collapseIfEmpty=True),
+        gap=1, flexDirection="column",
+    )
+    assert render_to_string(tree) == "A"
+
+
+def test_gap_column_skips_interleaved_collapsed_child() -> None:
+    """A visible, B collapsed, C visible → 'A\\n\\nC'.
+
+    One gap between A and C; the collapsed B contributes neither a row
+    of its own nor a gap slot on either side."""
+    tree = box(
+        text("A"),
+        text("", collapseIfEmpty=True),
+        text("C"),
+        gap=1, flexDirection="column",
+    )
+    assert render_to_string(tree) == "A\n\nC"
+
+
+def test_gap_column_zero_when_all_collapsed() -> None:
+    """All children collapsed → no gap slots, frame is empty."""
+    tree = box(
+        text("", collapseIfEmpty=True),
+        text("", collapseIfEmpty=True),
+        gap=1, flexDirection="column",
+    )
+    assert render_to_string(tree) == ""
+
+
+def test_gap_row_skips_interleaved_collapsed_child() -> None:
+    """Row variant: collapsed child contributes no horizontal gap."""
+    tree = box(
+        text("A"),
+        text("", collapseIfEmpty=True),
+        text("C"),
+        gap=1,
+    )
+    assert render_to_string(tree) == "A C"
+
+
+def test_gap_column_space_between_skips_collapsed() -> None:
+    """space-between distributes free space across visible children only.
+
+    Collapsed B between A and C is invisible to the distribute count,
+    so the 2-row free space goes entirely between A and C."""
+    tree = box(
+        text("A"),
+        text("", collapseIfEmpty=True),
+        text("C"),
+        flexDirection="column",
+        justifyContent="space-between",
+        height=4,
+    )
+    assert render_to_string(tree) == "A\n\n\nC"
+
+
+# ---------------------------------------------------------------------------
 # padding.tsx (subset — no border / multiline-wrap edge cases)
 # ---------------------------------------------------------------------------
 
