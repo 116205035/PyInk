@@ -538,25 +538,28 @@ def test_force_repaint_uses_clear_to_end_when_old_frame_wider_than_cols() -> Non
 
 
 def test_force_repaint_clears_viewport_and_positions_cursor_at_frame_top() -> None:
-    """``_force_repaint`` makes ``_paint_now`` emit ``\\x1b[2J\\x1b[H`` to
-    clear the viewport (CC-style), then absolute-position the cursor at
-    the new frame's visual top, then paint via ``_paint_initial``.
+    """``_force_repaint`` makes ``_paint_now`` emit ``\\x1b[1;1H\\x1b[0J``
+    (cursor home + clear-to-end-of-viewport) then absolute-position the
+    cursor at the new frame's visual top, then paint via
+    ``_paint_initial``.
 
-    Root H (replacing Root D + Root G): the previous approach used
-    relative cursor math (``\\x1b[999B`` anchor + walk-up + ``\\x1b[0J``).
-    Windows Terminal's re-wrap behaviour on alternating resize violated
-    one or both assumptions (cursor wasn't where PyInk thought, or
-    old_visual didn't match the terminal's actual post-re-wrap visual
-    height), leaving status_bar + divider residuals stacked above the
-    live frame.
+    Root I (replacing Root H): Root H used ``\\x1b[2J\\x1b[H`` (CC-style).
+    Windows Terminal pushes viewport content into scrollback on
+    ``\\x1b[2J`` — alternating resize (shrink then grow) duplicated the
+    live frame into scrollback and shoved pre-existing scrollback
+    further up out of view. CC avoids this by pairing ``\\x1b[2J`` with
+    ``\\x1b[3J`` (clear scrollback), but Jarvis requires native
+    scrollback preservation so that path is closed.
 
-    Absolute positioning (``\\x1b[<N>B`` from cursor home) bypasses
-    both assumptions — we move the cursor to the exact row we want
-    regardless of where it ended up after re-wrap.
+    ``\\x1b[1;1H`` + ``\\x1b[0J`` blanks every visible cell WITHOUT
+    scrolling. Scrollback is untouched. Tradeoff: viewport-visible
+    static content is wiped on resize (same as CC minus the scrollback
+    wipe).
 
-    Validation: ``force_repaint`` output contains ``\\x1b[2J`` and
-    ``\\x1b[H`` (CC-style clear). The ``\\x1b[999B`` anchor (Root D)
-    is GONE.
+    Validation: ``force_repaint`` output contains ``\\x1b[1;1H`` and
+    ``\\x1b[0J`` (in-place clear). Neither ``\\x1b[2J`` (would push to
+    scrollback) nor ``\\x1b[999B`` (Root D relative anchor) should
+    appear.
     """
     inst, out = _render_silent(Text("fixed"), columns=20, rows=3)
     try:
@@ -565,11 +568,16 @@ def test_force_repaint_clears_viewport_and_positions_cursor_at_frame_top() -> No
         inst._force_repaint = True  # type: ignore[attr-defined]
         inst._paint_now()  # type: ignore[attr-defined]
         repaint = out.getvalue()
-        assert "\x1b[2J" in repaint, (
-            f"expected \\x1b[2J (CC-style clear), got: {repaint!r}"
+        assert "\x1b[1;1H" in repaint, (
+            f"expected \\x1b[1;1H (cursor home, in-place), got: {repaint!r}"
         )
-        assert "\x1b[H" in repaint, (
-            f"expected \\x1b[H (cursor home), got: {repaint!r}"
+        assert "\x1b[0J" in repaint, (
+            f"expected \\x1b[0J (clear-to-end-of-viewport, no scrollback push), got: {repaint!r}"
+        )
+        # ``\\x1b[2J`` is FORBIDDEN in this path — it pushes viewport
+        # content into scrollback on Windows Terminal.
+        assert "\x1b[2J" not in repaint, (
+            f"\\x1b[2J must not appear in force_repaint (scrollback push), got: {repaint!r}"
         )
         # Root D's anchor sequence is GONE — we don't rely on relative
         # cursor positioning anymore.

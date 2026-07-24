@@ -6,6 +6,45 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — resize clears viewport in place, preserves scrollback (Root I)
+
+Symptom: after Root H, alternating resize on Windows Terminal pushed
+a duplicate of the live area into scrollback. Pre-existing scrollback
+(content the user had scrolled to before the resize) was shoved
+further up out of view. Net effect: scrollback grew by one live-frame
+per resize cycle, with the user's real history pushed past the top.
+
+Root cause: Root H used ``\x1b[2J`` (CC-style clear). On Windows
+Terminal ``\x1b[2J`` doesn't blank cells in place — it pushes the
+visible viewport content into scrollback. PRD Decision 3's original
+concern (``\x1b[2J`` destroys scrollback) was right after all. CC
+avoids the duplication by pairing ``\x1b[2J`` with ``\x1b[3J`` (clear
+scrollback), which is why CC's own renderer doesn't show the same
+duplication — but that path wipes the user's pre-existing scrollback,
+which Jarvis can't tolerate.
+
+Fix: replace Root H's ``\x1b[2J\x1b[H`` with
+``\x1b[1;1H\x1b[0J`` — cursor to (0,0) + clear-to-end-of-viewport.
+``\x1b[0J`` blanks visible cells WITHOUT scrolling content into
+scrollback. Scrollback is fully preserved; only the in-viewport
+content gets wiped on resize (same tradeoff as Root H, minus the
+scrollback push).
+
+  ``\x1b[1;1H\x1b[0J\x1b[<frame_top>B`` + ``_paint_initial(new_frame)``
+
+* ``\x1b[1;1H`` homes cursor to (0, 0). Functionally identical to
+  ``\x1b[H``; the explicit form documents the (row, col) ordering
+  for readers.
+* ``\x1b[0J`` clears from cursor to end-of-viewport. No
+  scrollback push.
+* ``\x1b[<frame_top>B`` moves to the new frame's visual top
+  (``rows - _visual_height(new_frame, cols)``).
+* ``_paint_initial`` paints the frame; cursor parks at the frame's
+  last visual row (bottom-parked contract).
+
+The ``\x1b[2J`` ban from PRD Decision 3 is restored — the diff
+module continues to forbid it across all paths (test_no_2j_across_all_cases).
+
 ### Fixed — resize uses CC-style clear + absolute cursor (Root H)
 
 Symptom: after Root D (cursor anchor) and Root G (force_wrap_aware),

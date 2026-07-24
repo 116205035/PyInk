@@ -584,39 +584,31 @@ class Instance:
                 # erase + repaint that walks the cursor back to frame
                 # origin.
                 if force_repaint:
-                    # CC-style resize repaint (Root H): clear viewport,
-                    # absolute-position cursor at frame top, paint frame.
+                    # Root I: absolute cursor home + ``\x1b[0J`` (clear
+                    # viewport in place, NO scrollback push).
                     #
-                    # The previous approach (Root D's ``\x1b[999B`` anchor
-                    # + Root G's wrap-aware ``repaint_frame``) relied on
-                    # RELATIVE cursor math — the cursor had to be at
-                    # viewport bottom after the anchor, and ``old_visual``
-                    # had to match the terminal's actual post-re-wrap
-                    # visual height. Windows Terminal's re-wrap behaviour
-                    # violated one or both assumptions in alternating
-                    # resize sequences, leaving status_bar + divider
-                    # residuals stacked above the live frame.
+                    # Root H tried ``\x1b[2J`` (CC-style) but Windows
+                    # Terminal pushes viewport content into scrollback
+                    # on ``\x1b[2J`` — duplicated the live frame into
+                    # scrollback and shoved pre-existing scrollback
+                    # further up out of view. CC avoids this by pairing
+                    # ``\x1b[2J`` with ``\x1b[3J`` (clear scrollback),
+                    # but we can't wipe scrollback — user wants native
+                    # scrollback preserved.
                     #
-                    # Absolute cursor positioning (``\x1b[<row>;<col>H``)
-                    # bypasses both assumptions: regardless of where the
-                    # cursor ended up after re-wrap, we move it to the
-                    # exact row we want and clear from there.
+                    # ``\x1b[1;1H`` (cursor to (0,0)) + ``\x1b[0J``
+                    # (clear cursor-to-end-of-viewport) blanks every
+                    # visible cell without scrolling. Scrollback is
+                    # untouched. Then absolute cursor-down to frame's
+                    # visual top, paint. Cursor parks at viewport bottom
+                    # (bottom-parked contract).
                     #
-                    # ``\x1b[2J`` clears the visible viewport in place on
-                    # modern terminals (Windows Terminal, xterm, mintty).
-                    # It does NOT push content into scrollback (the old
-                    # PRD Decision 3 concern, which was based on
-                    # conservative assumptions — Claude Code uses this
-                    # same sequence for resize repaint, see
-                    # ``clearTerminal.ts``). Scrollback above the viewport
-                    # is preserved, so user's conversation history
-                    # remains accessible via scroll-up.
-                    #
-                    # ``\x1b[H`` homes cursor to (0, 0). Then we
-                    # cursor-down by ``frame_top`` rows to reach the
-                    # frame's visual top, paint, and the cursor parks at
-                    # the frame's last visual row = viewport bottom.
-                    self.stdout.write("\x1b[2J\x1b[H")
+                    # Tradeoff: viewport-visible static content (last
+                    # few rows of conversation history that hadn't yet
+                    # scrolled into scrollback) is wiped on resize.
+                    # Scrollback itself preserved. Same tradeoff as CC
+                    # minus the scrollback wipe.
+                    self.stdout.write("\x1b[1;1H\x1b[0J")
                     visual_h = _visual_height(new_frame, cols or 80)
                     frame_top = max(0, (rows or 1) - visual_h)
                     if frame_top > 0:
