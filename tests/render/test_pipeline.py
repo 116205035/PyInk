@@ -537,42 +537,47 @@ def test_force_repaint_uses_clear_to_end_when_old_frame_wider_than_cols() -> Non
     )
 
 
-def test_force_repaint_routes_through_wrap_aware_path_on_grow() -> None:
-    """``force_wrap_aware=True`` forces the wrap-aware (bottom-aligned)
-    erase path even when the old frame's rows all fit in ``cols``.
+def test_force_repaint_clears_viewport_and_positions_cursor_at_frame_top() -> None:
+    """``_force_repaint`` makes ``_paint_now`` emit ``\\x1b[2J\\x1b[H`` to
+    clear the viewport (CC-style), then absolute-position the cursor at
+    the new frame's visual top, then paint via ``_paint_initial``.
 
-    Root G (alternating resize leaves duplicates): on GROW-after-SHRINK,
-    the old frame is the (narrower) shrunk frame, so all its rows fit
-    in the new wider cols and the default ``may_wrap`` check returns
-    False. The no-wrap (top-aligned) path then paints the new
-    (taller) frame at the old frame's origin — the tail rows extend
-    past viewport bottom and scroll into scrollback, stacking
-    status_bar + divider pairs on each alternating resize.
+    Root H (replacing Root D + Root G): the previous approach used
+    relative cursor math (``\\x1b[999B`` anchor + walk-up + ``\\x1b[0J``).
+    Windows Terminal's re-wrap behaviour on alternating resize violated
+    one or both assumptions (cursor wasn't where PyInk thought, or
+    old_visual didn't match the terminal's actual post-re-wrap visual
+    height), leaving status_bar + divider residuals stacked above the
+    live frame.
 
-    Forcing the wrap-aware path makes GROW also clear-to-end-of-
-    viewport and bottom-align, so the new frame grows upward into
-    the blank area instead of scrolling past the bottom.
+    Absolute positioning (``\\x1b[<N>B`` from cursor home) bypasses
+    both assumptions — we move the cursor to the exact row we want
+    regardless of where it ended up after re-wrap.
 
-    Validation: with ``force_wrap_aware=True`` and an old frame whose
-    rows all fit in cols, the repaint output must still contain
-    ``\\x1b[0J``.
+    Validation: ``force_repaint`` output contains ``\\x1b[2J`` and
+    ``\\x1b[H`` (CC-style clear). The ``\\x1b[999B`` anchor (Root D)
+    is GONE.
     """
-    from ink.render.diff import repaint_frame
-    import io
-
-    # Old frame rows all fit in cols=80 (rows are 30 / 30 / 30 chars).
-    # Default may_wrap would be False; force_wrap_aware must override.
-    old_frame = "x" * 30 + "\n" + "y" * 30 + "\n" + "z" * 30
-    new_frame = "x" * 30 + "\n" + "y" * 30 + "\n" + "z" * 30
-    out = io.StringIO()
-    repaint_frame(
-        old_frame, new_frame, out,
-        available_rows=10, cols=80, force_wrap_aware=True,
-    )
-    repaint_bytes = out.getvalue()
-    assert "\x1b[0J" in repaint_bytes, (
-        f"expected \\x1b[0J when force_wrap_aware=True, got: {repaint_bytes!r}"
-    )
+    inst, out = _render_silent(Text("fixed"), columns=20, rows=3)
+    try:
+        out.truncate(0)
+        out.seek(0)
+        inst._force_repaint = True  # type: ignore[attr-defined]
+        inst._paint_now()  # type: ignore[attr-defined]
+        repaint = out.getvalue()
+        assert "\x1b[2J" in repaint, (
+            f"expected \\x1b[2J (CC-style clear), got: {repaint!r}"
+        )
+        assert "\x1b[H" in repaint, (
+            f"expected \\x1b[H (cursor home), got: {repaint!r}"
+        )
+        # Root D's anchor sequence is GONE — we don't rely on relative
+        # cursor positioning anymore.
+        assert "\x1b[999B" not in repaint, (
+            f"Root D anchor \\x1b[999B should be gone, got: {repaint!r}"
+        )
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
 
 
 def test_force_repaint_uses_display_width_for_wrap_detection() -> None:
@@ -607,19 +612,9 @@ def test_force_repaint_uses_display_width_for_wrap_detection() -> None:
 
 
 def test_force_repaint_anchors_cursor_at_viewport_bottom() -> None:
-    """``_force_repaint`` makes ``_paint_now`` emit a large cursor-down +
-    CR *before* the erase + paint walk, anchoring the cursor to the
-    viewport bottom.
-
-    Root D (resize hides scrollback content): Windows Terminal re-wraps
-    scrollback on resize, which shifts the cursor's visual position away
-    from the old frame's bottom. Without re-anchoring, the erase +
-    paint walk lands on scrollback rows and the new frame visually
-    covers the re-wrapped content above.
-
-    ``\\x1b[<N>B`` is clamped by the terminal to the viewport's last
-    row; the literal 999 is large enough to cover any realistic
-    viewport height while staying within VT-100 parameter range.
+    """OBSOLETE — Root D's ``\\x1b[999B`` anchor was removed in Root H.
+    Kept as a stub so imports don't break; the contract is now in
+    ``test_force_repaint_clears_viewport_and_positions_cursor_at_frame_top``.
     """
     inst, out = _render_silent(Text("fixed"), columns=20, rows=3)
     try:
@@ -628,10 +623,9 @@ def test_force_repaint_anchors_cursor_at_viewport_bottom() -> None:
         inst._force_repaint = True  # type: ignore[attr-defined]
         inst._paint_now()  # type: ignore[attr-defined]
         repaint = out.getvalue()
-        # Cursor-down 999 + CR must be present when force_repaint fires.
-        assert "\x1b[999B\r" in repaint, (
-            f"expected cursor-anchor sequence, got: {repaint!r}"
-        )
+        # Root D's anchor sequence is GONE — replaced by absolute
+        # cursor positioning (Root H).
+        assert "\x1b[999B" not in repaint
     finally:
         inst.unmount()  # type: ignore[attr-defined]
 

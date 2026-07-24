@@ -60,7 +60,28 @@ from typing import TextIO
 
 from ink.layout.measure import string_width
 
-__all__ = ["write_diff", "repaint_frame"]
+__all__ = ["write_diff", "repaint_frame", "_visual_height", "_paint_initial"]
+
+
+def _visual_height(frame: str, cols: int) -> int:
+    """Visual row count of ``frame`` when rendered at ``cols`` width.
+
+    Each logical line wraps to ``ceil(string_width(line) / cols)`` visual
+    rows (minimum 1, even for empty lines). Used by ``Instance._paint_now``
+    to position the cursor at the new frame's visual top before a
+    force_repaint — the frame's last visual row must land on the viewport's
+    last row so the bottom-parked cursor contract holds.
+    """
+    if not frame:
+        return 0
+    if cols <= 0:
+        return len(frame.split("\n"))
+    total = 0
+    for line in frame.split("\n"):
+        w = string_width(line)
+        total += max(1, (w + cols - 1) // cols)
+    return total
+
 
 # When the live frame shrinks by this many rows or more, Instance._paint_now
 # routes through repaint_frame() (full erase + repaint) instead of write_diff()
@@ -143,14 +164,16 @@ def repaint_frame(
     stdout: TextIO,
     available_rows: int | None = None,
     cols: int | None = None,
-    force_wrap_aware: bool = False,
 ) -> None:
     """Erase ``old_frame`` then paint ``new_frame``.
 
     Used when the live frame height changes enough (e.g. palette open /
     close) that incremental ``write_diff`` would leave unreachable tail
-    rows uncleared or park the cursor at the wrong y, or when a terminal
-    resize forces a full repaint (``Instance._force_repaint``).
+    rows uncleared or park the cursor at the wrong y. NOT used for
+    terminal resize — resize goes through a CC-style ``\\x1b[2J`` +
+    absolute cursor + ``_paint_initial`` path in ``Instance._paint_now``
+    because relative cursor math couldn't reliably track Windows
+    Terminal's post-re-wrap cursor position.
 
     Alignment:
 
@@ -160,28 +183,16 @@ def repaint_frame(
       (palette open/close) — keeping the origin stable so the next
       grow fills the same footprint instead of stacking gaps.
 
-    * **Wrap-aware** (some old row wider than ``cols``, OR
-      ``force_wrap_aware=True``): bottom-aligned. A width-shrinking
-      resize passively wraps wide rows (right-aligned status_bar,
-      full-width dividers) so the old frame's visual footprint is
-      *taller* than its logical row count. Painting the new (shorter)
-      frame at the old visual top would shift the frame upward in the
-      viewport; after N shrink resizes the frame would drift up by
-      N * (wrapped_rows). We instead anchor the new frame's bottom at
-      the old frame's bottom (where the cursor was parked) so the live
-      area stays put visually. Wrapped tails above are cleared by
-      ``\\x1b[0J``.
-
-    ``force_wrap_aware`` (Root G): set by callers that need bottom-
-    alignment regardless of wrap state — primarily ``_force_repaint``
-    on resize. Without this flag, the GROW-after-SHRINK resize path
-    uses the no-wrap (top-aligned) erase, which paints the new
-    (taller) frame at the old frame's origin. The new frame extends
-    past viewport bottom and the trailing rows scroll into scrollback,
-    stacking status_bar + divider pairs above the live frame on each
-    alternating resize. Forcing the wrap-aware path makes GROW also
-    bottom-align (clear-to-end-of-viewport, new frame grows upward
-    into the blank area), which is the desired behaviour for resize.
+    * **Wrap-aware** (some old row wider than ``cols``): bottom-aligned.
+      A width-shrinking resize passively wraps wide rows (right-aligned
+      status_bar, full-width dividers) so the old frame's visual
+      footprint is *taller* than its logical row count. Painting the
+      new (shorter) frame at the old visual top would shift the frame
+      upward in the viewport; after N shrink resizes the frame would
+      drift up by N * (wrapped_rows). We instead anchor the new frame's
+      bottom at the old frame's bottom (where the cursor was parked)
+      so the live area stays put visually. Wrapped tails above are
+      cleared by ``\\x1b[0J``.
 
     ``\\x1b[0J`` (clear-to-end-of-viewport) was chosen over
     ``\\x1b[2J`` because it blanks cells in place without scrolling
@@ -198,7 +209,7 @@ def repaint_frame(
         if (available_rows and available_rows > 0)
         else len(old_lines)
     )
-    may_wrap = force_wrap_aware or (
+    may_wrap = (
         cols is not None
         and cols > 0
         and any(string_width(line) > cols for line in old_lines)

@@ -6,6 +6,61 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — resize uses CC-style clear + absolute cursor (Root H)
+
+Symptom: after Root D (cursor anchor) and Root G (force_wrap_aware),
+single-direction resize was clean but **alternating resize** still
+left status_bar + divider residuals stacked above the live frame in
+real Windows Terminal (pyte simulation couldn't reproduce — pyte
+doesn't model Windows Terminal's scrollback re-wrap).
+
+Root cause: the previous approach used **relative cursor math**
+(``\x1b[999B`` anchor + walk-up + ``\x1b[0J``). This relied on two
+assumptions that Windows Terminal's re-wrap violated in alternating
+resize sequences:
+
+1. The cursor was at viewport bottom after the anchor. In practice,
+   Windows Terminal's re-wrap can leave the cursor at a different
+   visual row than expected (cursor-drift), and ``\x1b[999B`` only
+   guarantees "viewport bottom" — not "old frame's bottom".
+2. ``old_visual`` (computed via ``string_width``) matched the
+   terminal's actual post-re-wrap visual height. Wrap behaviour for
+   emoji / CJK / pending-wrap state varies across terminals; any
+   mismatch caused the walk-up to land at the wrong row, leaving
+   the old frame's wrapped tails uncleaned.
+
+Fix: replace the relative path with CC-style **absolute positioning**
+(researching Claude Code's own renderer at
+``D:\Projects\github\claude-code\src\ink\``):
+
+  ``\x1b[2J\x1b[H\x1b[<frame_top>B`` + ``_paint_initial(new_frame)``
+
+* ``\x1b[2J`` clears the visible viewport in place on modern
+  terminals (Windows Terminal / xterm / mintty). Empirically
+  validated by Claude Code, which uses the same sequence for resize.
+  The old PRD Decision 3 concern ("``\x1b[2J`` scrolls content into
+  scrollback") was based on conservative assumptions that don't
+  hold for modern terminals.
+* ``\x1b[H`` homes cursor to (0, 0).
+* ``\x1b[<frame_top>B`` (cursor-down) moves to the new frame's
+  visual top, computed as ``rows - _visual_height(new_frame, cols)``.
+* ``_paint_initial`` paints the frame; cursor parks at the frame's
+  last visual row = viewport bottom (bottom-parked contract).
+
+Scrollback above the viewport is **preserved** — only the visible
+viewport is cleared. Conversation history remains accessible via
+scroll-up. This matches Claude Code's main-screen resize behaviour.
+
+Tradeoff: viewport-visible static content (the last few rows of
+conversation history that were in viewport, not yet scrolled into
+scrollback) is wiped on resize. The frame and everything in
+scrollback is intact.
+
+The ``force_wrap_aware`` parameter (Root G) is removed —
+``repaint_frame`` is now only used for the height-change path
+(palette open/close), where the no-wrap / wrap-aware distinction
+still matters. Root D's ``\x1b[999B`` anchor is also removed.
+
 ### Fixed — alternating resize no longer scrolls status_bar into scrollback (Root G)
 
 Symptom: after Root D (cursor anchor), Root E (display-width wrap

@@ -50,7 +50,7 @@ from ink.core.reconciler import Reconciler
 from ink.core.signal import effect, signal
 from ink.hooks._box_metrics_runtime import bump_layout_epoch
 from ink.layout import clear_box_refs, layout, render_layout_to_string
-from ink.render.diff import repaint_frame, write_diff
+from ink.render.diff import _paint_initial, _visual_height, repaint_frame, write_diff
 from ink.render.terminal import Terminal
 
 if TYPE_CHECKING:
@@ -583,38 +583,48 @@ class Instance:
                 # to reset the terminal's passive-wrap state is a full
                 # erase + repaint that walks the cursor back to frame
                 # origin.
-                if force_repaint or (height_delta >= 1 and available_rows):
-                    if force_repaint:
-                        # Anchor cursor to viewport bottom before erase +
-                        # paint. Windows Terminal (and most VT-100
-                        # terminals) re-wrap scrollback content on resize,
-                        # which shifts the cursor's visual position away
-                        # from the old frame's bottom row. Without
-                        # re-anchoring, ``repaint_frame``'s relative
-                        # cursor math (walk-up + ``\x1b[0J``) operates on
-                        # scrollback rows instead of the viewport — the
-                        # new frame visually lands mid-scrollback and
-                        # hides the re-wrapped content above (Root D:
-                        # "status_bar hides markdown table after shrink").
-                        #
-                        # ``\x1b[<N>B`` (cursor-down) is clamped by the
-                        # terminal to the last row of the viewport, so an
-                        # oversized N (999) is safe regardless of viewport
-                        # height. ``\r`` returns the cursor to column 1.
-                        self.stdout.write("\x1b[999B\r")
-                    # ``force_wrap_aware=force_repaint`` (Root G): on
-                    # resize we always want bottom-aligned erase + paint.
-                    # The no-wrap (top-aligned) path paints the new frame
-                    # at the old frame's origin; when the new frame is
-                    # taller (GROW-after-SHRINK), the tail rows extend
-                    # past viewport bottom and scroll into scrollback,
-                    # stacking status_bar + divider pairs above the live
-                    # frame on each alternating resize. The wrap-aware
-                    # path clears-to-end-of-viewport and bottom-aligns,
-                    # so the new frame grows upward into the blank area.
+                if force_repaint:
+                    # CC-style resize repaint (Root H): clear viewport,
+                    # absolute-position cursor at frame top, paint frame.
+                    #
+                    # The previous approach (Root D's ``\x1b[999B`` anchor
+                    # + Root G's wrap-aware ``repaint_frame``) relied on
+                    # RELATIVE cursor math — the cursor had to be at
+                    # viewport bottom after the anchor, and ``old_visual``
+                    # had to match the terminal's actual post-re-wrap
+                    # visual height. Windows Terminal's re-wrap behaviour
+                    # violated one or both assumptions in alternating
+                    # resize sequences, leaving status_bar + divider
+                    # residuals stacked above the live frame.
+                    #
+                    # Absolute cursor positioning (``\x1b[<row>;<col>H``)
+                    # bypasses both assumptions: regardless of where the
+                    # cursor ended up after re-wrap, we move it to the
+                    # exact row we want and clear from there.
+                    #
+                    # ``\x1b[2J`` clears the visible viewport in place on
+                    # modern terminals (Windows Terminal, xterm, mintty).
+                    # It does NOT push content into scrollback (the old
+                    # PRD Decision 3 concern, which was based on
+                    # conservative assumptions — Claude Code uses this
+                    # same sequence for resize repaint, see
+                    # ``clearTerminal.ts``). Scrollback above the viewport
+                    # is preserved, so user's conversation history
+                    # remains accessible via scroll-up.
+                    #
+                    # ``\x1b[H`` homes cursor to (0, 0). Then we
+                    # cursor-down by ``frame_top`` rows to reach the
+                    # frame's visual top, paint, and the cursor parks at
+                    # the frame's last visual row = viewport bottom.
+                    self.stdout.write("\x1b[2J\x1b[H")
+                    visual_h = _visual_height(new_frame, cols or 80)
+                    frame_top = max(0, (rows or 1) - visual_h)
+                    if frame_top > 0:
+                        self.stdout.write(f"\x1b[{frame_top}B")
+                    _paint_initial(new_frame, self.stdout)
+                elif height_delta >= 1 and available_rows:
                     repaint_frame(
                         prev_frame, new_frame, self.stdout, available_rows, cols,
-                        force_wrap_aware=force_repaint,
                     )
                 else:
                     write_diff(prev_frame, new_frame, self.stdout, available_rows)
