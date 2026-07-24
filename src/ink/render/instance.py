@@ -602,8 +602,19 @@ class Instance:
                         # oversized N (999) is safe regardless of viewport
                         # height. ``\r`` returns the cursor to column 1.
                         self.stdout.write("\x1b[999B\r")
+                    # ``force_wrap_aware=force_repaint`` (Root G): on
+                    # resize we always want bottom-aligned erase + paint.
+                    # The no-wrap (top-aligned) path paints the new frame
+                    # at the old frame's origin; when the new frame is
+                    # taller (GROW-after-SHRINK), the tail rows extend
+                    # past viewport bottom and scroll into scrollback,
+                    # stacking status_bar + divider pairs above the live
+                    # frame on each alternating resize. The wrap-aware
+                    # path clears-to-end-of-viewport and bottom-aligns,
+                    # so the new frame grows upward into the blank area.
                     repaint_frame(
                         prev_frame, new_frame, self.stdout, available_rows, cols,
+                        force_wrap_aware=force_repaint,
                     )
                 else:
                     write_diff(prev_frame, new_frame, self.stdout, available_rows)

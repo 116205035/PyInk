@@ -537,6 +537,75 @@ def test_force_repaint_uses_clear_to_end_when_old_frame_wider_than_cols() -> Non
     )
 
 
+def test_force_repaint_routes_through_wrap_aware_path_on_grow() -> None:
+    """``force_wrap_aware=True`` forces the wrap-aware (bottom-aligned)
+    erase path even when the old frame's rows all fit in ``cols``.
+
+    Root G (alternating resize leaves duplicates): on GROW-after-SHRINK,
+    the old frame is the (narrower) shrunk frame, so all its rows fit
+    in the new wider cols and the default ``may_wrap`` check returns
+    False. The no-wrap (top-aligned) path then paints the new
+    (taller) frame at the old frame's origin — the tail rows extend
+    past viewport bottom and scroll into scrollback, stacking
+    status_bar + divider pairs on each alternating resize.
+
+    Forcing the wrap-aware path makes GROW also clear-to-end-of-
+    viewport and bottom-align, so the new frame grows upward into
+    the blank area instead of scrolling past the bottom.
+
+    Validation: with ``force_wrap_aware=True`` and an old frame whose
+    rows all fit in cols, the repaint output must still contain
+    ``\\x1b[0J``.
+    """
+    from ink.render.diff import repaint_frame
+    import io
+
+    # Old frame rows all fit in cols=80 (rows are 30 / 30 / 30 chars).
+    # Default may_wrap would be False; force_wrap_aware must override.
+    old_frame = "x" * 30 + "\n" + "y" * 30 + "\n" + "z" * 30
+    new_frame = "x" * 30 + "\n" + "y" * 30 + "\n" + "z" * 30
+    out = io.StringIO()
+    repaint_frame(
+        old_frame, new_frame, out,
+        available_rows=10, cols=80, force_wrap_aware=True,
+    )
+    repaint_bytes = out.getvalue()
+    assert "\x1b[0J" in repaint_bytes, (
+        f"expected \\x1b[0J when force_wrap_aware=True, got: {repaint_bytes!r}"
+    )
+
+
+def test_force_repaint_uses_display_width_for_wrap_detection() -> None:
+    """``repaint_frame`` must decide wrap-aware erase based on **display
+    width**, not Python character count. Lines containing wide chars
+    (CJK / emoji) have ``display_width > len(line)``; using ``len`` misses
+    the wrap window ``len(line) <= cols < display_width(line)`` where
+    the terminal actually wraps but PyInk thinks it doesn't.
+
+    Symptom (Root E): Jarvis's ``📁 Jarvis 🧠 deepseek 🤖 brain 🔌 2``
+    status_bar at 31 chars / 35 display cols. With right-aligned indent
+    the rendered line is ~81 chars / ~85 display cols. At cols=82 the
+    terminal wraps to 2 visual rows but ``len``-based detection takes
+    the no-wrap path, emits per-row ``\\x1b[2K`` only, and leaves the
+    wrapped top row uncleared — stacking duplicates across resizes.
+
+    Validation: at the mismatch window (cols=82, display=85), the
+    repaint output must contain ``\\x1b[0J`` (wrap-aware erase).
+    """
+    from ink.render.diff import repaint_frame
+    import io
+
+    emoji_line = "📁 Jarvis  🧠 deepseek  🤖 brain  🔌 2"
+    old_frame = " " * 50 + emoji_line  # 81 chars, 85 display cols
+    new_frame = " " * 20 + emoji_line
+    out = io.StringIO()
+    repaint_frame(old_frame, new_frame, out, available_rows=10, cols=82)
+    repaint_bytes = out.getvalue()
+    assert "\x1b[0J" in repaint_bytes, (
+        f"expected \\x1b[0J at char/display mismatch window, got: {repaint_bytes!r}"
+    )
+
+
 def test_force_repaint_anchors_cursor_at_viewport_bottom() -> None:
     """``_force_repaint`` makes ``_paint_now`` emit a large cursor-down +
     CR *before* the erase + paint walk, anchoring the cursor to the

@@ -58,6 +58,8 @@ from __future__ import annotations
 
 from typing import TextIO
 
+from ink.layout.measure import string_width
+
 __all__ = ["write_diff", "repaint_frame"]
 
 # When the live frame shrinks by this many rows or more, Instance._paint_now
@@ -141,6 +143,7 @@ def repaint_frame(
     stdout: TextIO,
     available_rows: int | None = None,
     cols: int | None = None,
+    force_wrap_aware: bool = False,
 ) -> None:
     """Erase ``old_frame`` then paint ``new_frame``.
 
@@ -157,16 +160,28 @@ def repaint_frame(
       (palette open/close) — keeping the origin stable so the next
       grow fills the same footprint instead of stacking gaps.
 
-    * **Wrap-aware** (some old row wider than ``cols``): bottom-aligned.
-      A width-shrinking resize passively wraps wide rows (right-aligned
-      status_bar, full-width dividers) so the old frame's visual
-      footprint is *taller* than its logical row count. Painting the
-      new (shorter) frame at the old visual top would shift the frame
-      upward in the viewport; after N shrink resizes the frame would
-      drift up by N * (wrapped_rows). We instead anchor the new frame's
-      bottom at the old frame's bottom (where the cursor was parked)
-      so the live area stays put visually. Wrapped tails above are
-      cleared by ``\\x1b[0J``.
+    * **Wrap-aware** (some old row wider than ``cols``, OR
+      ``force_wrap_aware=True``): bottom-aligned. A width-shrinking
+      resize passively wraps wide rows (right-aligned status_bar,
+      full-width dividers) so the old frame's visual footprint is
+      *taller* than its logical row count. Painting the new (shorter)
+      frame at the old visual top would shift the frame upward in the
+      viewport; after N shrink resizes the frame would drift up by
+      N * (wrapped_rows). We instead anchor the new frame's bottom at
+      the old frame's bottom (where the cursor was parked) so the live
+      area stays put visually. Wrapped tails above are cleared by
+      ``\\x1b[0J``.
+
+    ``force_wrap_aware`` (Root G): set by callers that need bottom-
+    alignment regardless of wrap state — primarily ``_force_repaint``
+    on resize. Without this flag, the GROW-after-SHRINK resize path
+    uses the no-wrap (top-aligned) erase, which paints the new
+    (taller) frame at the old frame's origin. The new frame extends
+    past viewport bottom and the trailing rows scroll into scrollback,
+    stacking status_bar + divider pairs above the live frame on each
+    alternating resize. Forcing the wrap-aware path makes GROW also
+    bottom-align (clear-to-end-of-viewport, new frame grows upward
+    into the blank area), which is the desired behaviour for resize.
 
     ``\\x1b[0J`` (clear-to-end-of-viewport) was chosen over
     ``\\x1b[2J`` because it blanks cells in place without scrolling
@@ -183,10 +198,10 @@ def repaint_frame(
         if (available_rows and available_rows > 0)
         else len(old_lines)
     )
-    may_wrap = (
+    may_wrap = force_wrap_aware or (
         cols is not None
         and cols > 0
-        and any(len(line) > cols for line in old_lines)
+        and any(string_width(line) > cols for line in old_lines)
     )
     if not may_wrap:
         _erase_reachable_rows(old_lines, stdout, budget)
@@ -205,14 +220,14 @@ def repaint_frame(
     row_floor = max(0, len(old_lines) - budget)
     old_visual = 0
     for row_idx in range(row_floor, len(old_lines)):
-        line_len = len(old_lines[row_idx])
+        line_len = string_width(old_lines[row_idx])
         old_visual += max(1, (line_len + cols_int - 1) // cols_int)
 
     new_visual = 0
     if new_frame:
         new_lines = new_frame.split("\n")
         for line in new_lines:
-            new_visual += max(1, (len(line) + cols_int - 1) // cols_int)
+            new_visual += max(1, (string_width(line) + cols_int - 1) // cols_int)
 
     out: list[str] = []
     if old_visual > 1:
@@ -282,9 +297,17 @@ def _paint_initial(new_frame: str, stdout: TextIO) -> None:
             # writing it.
             parts.append("\r\x1b[2K")
         else:
-            # Move down one row (column stays at 1) and clear it before
-            # the new content lands — prevents stale-tail bleed-through.
-            parts.append("\n\x1b[2K")
+            # Move down one row AND reset to column 1 before clearing.
+            # The explicit ``\r`` matters when the previous row triggered
+            # the terminal's "pending wrap" state (last char written to
+            # the rightmost column): in that state a bare ``\n`` keeps
+            # the cursor's column at the wrap-pending position instead
+            # of column 1, so the subsequent ``\x1b[2K`` clears from the
+            # wrong column and the new line lands offset. Emitting
+            # ``\r\n`` forces column-1 alignment regardless of pending
+            # wrap state — defensive against terminal quirks observed in
+            # alternating shrink/grow resize sequences on Windows Terminal.
+            parts.append("\r\n\x1b[2K")
         parts.append(line)
     # Park at column 1 of the LAST row of the painted region. Subsequent
     # diffs measure cursor offsets upward from this stable origin.

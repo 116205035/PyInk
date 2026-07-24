@@ -30,12 +30,15 @@ def _capture(old: str | None, new: str) -> str:
 def test_initial_paint_writes_frame_then_parks_cursor() -> None:
     out = _capture(None, "hello\nworld")
     # Each row is pre-cleared with ``\r\x1b[2K`` (first row) /
-    # ``\n\x1b[2K`` (subsequent rows) so shorter new rows don't leave
-    # stale tails from a previous frame (Jarvis TUI regression fix).
+    # ``\r\n\x1b[2K`` (subsequent rows). The explicit ``\r`` before
+    # ``\n`` is defensive: when the previous row's last char landed on
+    # the rightmost column the terminal enters "pending wrap" state
+    # where a bare ``\n`` doesn't reset column to 1. Forcing ``\r\n``
+    # guarantees column-1 alignment regardless of pending wrap state.
     # Bottom-parked convention (07-19): after the last row the cursor
     # stays on that row — a single ``\r`` parks it at column 1. No
     # cursor-up retreat back to row 0.
-    assert out == "\r\x1b[2Khello\n\x1b[2Kworld\r"
+    assert out == "\r\x1b[2Khello\r\n\x1b[2Kworld\r"
     assert _CLEAR_SCREEN not in out
 
 
@@ -65,7 +68,7 @@ def test_initial_paint_single_row_no_cursor_up() -> None:
 def test_initial_paint_clears_every_row() -> None:
     """Multi-row frame: each row gets its own ``\\x1b[2K``."""
     out = _capture(None, "r0\nr1\nr2")
-    # First row gets ``\r\x1b[2K``, subsequent rows get ``\n\x1b[2K``.
+    # First row gets ``\r\x1b[2K``, subsequent rows get ``\r\n\x1b[2K``.
     # Total clears == number of rows.
     assert out.count("\x1b[2K") == 3
     assert _CLEAR_SCREEN not in out
@@ -99,8 +102,8 @@ def test_initial_paint_content_preserved_between_clears() -> None:
     assert "gamma" in out
     # And they must follow their respective ``\x1b[2K`` clears.
     assert "\r\x1b[2Kalpha" in out
-    assert "\n\x1b[2Kbeta" in out
-    assert "\n\x1b[2Kgamma" in out
+    assert "\r\n\x1b[2Kbeta" in out
+    assert "\r\n\x1b[2Kgamma" in out
     assert _CLEAR_SCREEN not in out
 
 

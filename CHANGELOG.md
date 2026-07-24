@@ -6,6 +6,122 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — alternating resize no longer scrolls status_bar into scrollback (Root G)
+
+Symptom: after Root D (cursor anchor), Root E (display-width wrap
+detection), and Root F (defensive `\r\n` in `_paint_initial`),
+single-direction resize was clean but **alternating resize**
+(shrink-then-grow OR grow-then-shrink) still left 1-2 residual
+`status_bar + divider` pairs floating above the live frame.
+
+Root cause: `repaint_frame` has two erase paths — a no-wrap (top-
+aligned) path used when no old row is wider than `cols`, and a
+wrap-aware (bottom-aligned) path used when at least one old row
+would passively wrap. After a SHRINK, the new (shrunk) frame is
+narrower, so all its rows fit in the subsequent GROW's wider cols
+— `may_wrap` returns False and the no-wrap path is selected.
+
+The no-wrap path erases only the old frame's footprint, then
+`_paint_initial` writes the new frame at the SAME (top-aligned)
+origin. When the new frame is taller than the old (GROW case), the
+tail rows extend past viewport bottom and the terminal scrolls
+them into scrollback. Each alternating resize scrolls one more
+status_bar + divider pair into scrollback, where they remain
+visible above the live frame.
+
+Fix: add `force_wrap_aware: bool = False` parameter to
+`repaint_frame`. When True, the wrap-aware path is selected
+regardless of `may_wrap` detection. `_paint_now` passes
+`force_wrap_aware=force_repaint`, so resize always uses
+clear-to-end-of-viewport + bottom-align:
+
+* `\x1b[0J` blanks from the old frame's visual top to viewport
+  bottom — a superset of the old footprint, so any "drifted"
+  content above is also cleared.
+* Bottom-align positions the cursor at the new frame's visual
+  top, computed as `old_visual_top - (new_visual - old_visual)`
+  when the new frame is taller. The new frame grows upward into
+  the blank area instead of past viewport bottom.
+
+Side effect: the first force_repaint on a frame whose width barely
+changed (no wrap, height unchanged) now emits `\x1b[0J` instead of
+per-row `\x1b[2K`. Bytes-wasteful for trivial resizes but
+semantically equivalent (the cleared region is the same).
+
+The non-force_repaint path (palette open/close — height-change
+without resize) still uses the no-wrap top-aligned path, preserving
+the "origin stable so the next grow fills the same footprint"
+behaviour.
+
+### Fixed — alternating resize no longer leaves residual status_bar copies (Root F)
+
+Symptom: after Root D (cursor anchor) and Root E (string_width wrap
+detection), single-direction resize (shrink-only OR grow-only) was
+visually clean, but **alternating resize** (shrink-then-grow OR
+grow-then-shrink) still left 1-2 residual `status_bar + divider`
+pairs floating above the live frame.
+
+Root cause: in `_paint_initial`, subsequent rows were emitted as
+`\n\x1b[2K<line>`. The bare `\n` relies on the terminal to reset the
+cursor's column to 1 — true when the previous row's last write landed
+BEFORE the rightmost column. But when the previous row's last char
+landed ON the rightmost column (e.g. Jarvis's `_input_divider`, which
+is `DIVIDER_HORIZ * cols` — exactly cols chars wide), the terminal
+enters "pending wrap" state: the cursor is logically parked at
+column `cols+1` (the wrap-pending position), and a bare `\n` keeps
+the column at that pending position instead of resetting to 1.
+
+Result: on the next row, `\x1b[2K` clears from column `cols+1` of
+the new row (no-op visible because that column is past the right
+edge), and `<line>` is written starting at column `cols+1`, which
+the terminal renders as a wrap of the new row to a fresh visual
+row below — offset by one row from the intended position. After N
+alternating resizes, N residual copies stack up.
+
+Fix: emit `\r\n\x1b[2K<line>` instead. The explicit `\r` forces
+column 1 regardless of pending wrap state. The byte difference is
+one extra `\r` per subsequent row (negligible), and existing tests
+that asserted on the old `\n\x1b[2K` byte sequence are updated to
+the new `\r\n\x1b[2K` form.
+
+ASCII behaviour is unchanged — the `\r` is a no-op when the cursor
+is already at column 1 (the common case). On terminals that don't
+enter pending wrap (most non-Windows terminals treat LF as CR+LF
+at the rightmost edge more gracefully), the `\r` is similarly a
+no-op. The fix is purely defensive against Windows Terminal's
+strict VT-100 pending-wrap semantics.
+
+### Fixed — resize no longer stacks duplicate status_bars (Root E)
+
+`repaint_frame` was using Python's `len(line)` (character count) to
+detect wrap and compute visual height. For lines containing wide
+characters (CJK / emoji), display width exceeds character count —
+Jarvis's `📁 Jarvis 🧠 deepseek 🤖 brain 🔌 2` status_bar is 31 chars
+but 35 display cols. With right-aligned indent the rendered line lands
+at ~81 chars / ~85 display cols.
+
+At any cols in the window `len(line) <= cols < display_width(line)`
+the terminal actually wraps the line to two visual rows, but PyInk's
+`len`-based `may_wrap` check returns `False`. The no-wrap erase path
+emits one `\x1b[2K` per logical row, which only clears the cursor's
+*current* visual row — the passively-wrapped tail above survives the
+erase and shows up as a residual status_bar copy. Each resize through
+this window leaves one residual; multiple resizes stack duplicates
+(the "7 status_bars" symptom).
+
+Root C (commit `689d002`) added the wrap-aware `\x1b[0J` erase path
+specifically to handle passive wrap, but its wrap detection used
+`len()` too — so it only triggered for ASCII-wide rows (dividers)
+and missed emoji/CJK rows.
+
+Fix: import `string_width` from `ink.layout.measure` and replace the
+three `len()` calls in the wrap-aware branch (the `may_wrap` check,
+the `old_visual` loop, and the `new_visual` loop). `string_width`
+strips ANSI escapes and counts display columns (CJK = 2, combining
+marks = 0), matching what the terminal actually wraps on. ASCII
+behaviour is unchanged (`string_width("xxx") == len("xxx")`), so the
+existing divider / palette-open tests still pass.
+
 ### Fixed — resize no longer hides scrollback content (Root D)
 
 Windows Terminal (and most VT-100 terminals) re-wrap scrollback content
