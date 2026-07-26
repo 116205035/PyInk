@@ -6,6 +6,263 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — resize no longer eats static: erase whole viewport + redraw retained static tail (Root P)
+
+Symptom: after Root O, every horizontal shrink made the blank gap
+between the static output (chat history) and the live frame **grow**.
+Root O anchored the erase to the DSR-reported cursor row, but
+``cpr_debug.log`` showed Windows Terminal's reflow drifts that row
+wildly (cursor_row ranged 40-48 — earlier 7-47 — while rows=48 stayed
+constant). Every erase that overshot the old frame's top permanently
+blanked static rows (PyInk never repaints static), so the visible gap
+was the union of all historical erase overshoots — monotonically
+growing. Even with a perfect cursor_row, Root O's +2 safety margin ate
+2 static rows per resize; its "overshoot is harmless" comment assumed
+a pre-existing gap above the frame that Jarvis doesn't have (static
+fills the viewport).
+
+Fix (Root P — static tail redraw): make the erase reversible instead
+of trying to aim it.
+
+* ``Instance`` retains the most recent 500 logical lines of flushed
+  static text verbatim (ANSI included) in ``_static_tail_text``;
+  ``_flush_static_and_frame`` is the only writer, ``reset_static``
+  clears it.
+* ``force_repaint`` no longer queries the cursor at all. It emits
+  ``\x1b[1;1H\x1b[0J`` (in-place viewport erase — scrollback
+  untouched), redraws a height-budgeted suffix of the retained static
+  bottom-anchored directly above the frame, then paints the new frame
+  at ``frame_top = rows - visual_h_new + 1``.
+* Static selection (``_select_static_tail``) walks retained lines
+  newest-first with a 1-row safety margin: ``_visual_height``
+  over-estimates surface as a few bounded blank rows at the viewport
+  top, never as lost messages or cumulative damage.
+
+DSR/CPR machinery (``_query_cursor`` / ``_handle_cpr`` / key-parser
+CPR routing) is preserved but the paint path no longer uses it.
+
+Validation: mock-driven tests cover viewport-erase + frame anchor,
+static-tail redraw ordering (erase → static → frame), budget trimming
+(oldest lines dropped, newest kept), no-DSR assertion, ``reset_static``
+tail clearing, and tail length capping. Manual verification on Windows
+Terminal still required.
+
+### Fixed — resize uses DSR for old-frame-bottom, paints new frame at viewport bottom (Root O, superseded by Root P)
+
+Symptom: after Root N, alternating resize on Windows Terminal still left
+**severe live residue** — 3 rows of stale frame content above the new
+frame on every shrink. Diagnostic data (``cpr_debug.log`` analysis)
+showed why: Root N anchored the ERASE extent to ``new_rows``, but
+Windows Terminal's horizontal reflow moves the cursor (= old frame's
+last row) upward when cols shrink. Across multiple events cursor_row
+ranged 7-47 while rows=48 stayed constant — Root N's erase range
+(``[new_frame_top+1, end]`` anchored to ``new_rows``) missed the old
+frame's actual post-rewrap position by 1-N rows, leaving residue
+proportional to the cursor drift.
+
+Fix (Root O — split-anchor): the erase and the new-frame paint use
+DIFFERENT anchors because they target DIFFERENT rows.
+
+* **Erase anchor = DSR cursor_row** (= old frame bottom post-rewrap;
+  PyInk's pre-resize cursor sits at frame bottom, reflow preserves
+  that logical position). Erase extent = ``max(visual_h_old_at_new_cols,
+  visual_h_new) + 2`` rows above cursor_row. The +2 covers
+  ``_visual_height``'s known inaccuracy vs Windows Terminal's actual
+  reflow (the Root J/K/L lesson). Overshoot is harmless (just blanks
+  a couple of extra rows in the gap between static content and the
+  frame); undershoot leaves residue.
+* **New-frame anchor = ``rows``** (from the resize signal). The new
+  frame always parks at the viewport bottom regardless of where the
+  old frame ended up.
+
+``force_repaint`` branch now does:
+
+1. ``visual_h_new = _visual_height(new_frame, cols)``
+2. ``visual_h_old_at_new_cols = _visual_height(prev_frame, cols)`` if
+   prev exists; else equal to ``visual_h_new``.
+3. ``cursor_row = self._query_cursor()``
+4. If ``cursor_row`` returned a row AND ``prev_frame`` exists:
+   ``erase_h = max(h_old, h_new) + 2``;
+   ``erase_top = max(1, cursor_row - erase_h + 1)``;
+   ``branch = "root_o"``.
+   Else (DSR timeout, or no prev frame): ``erase_top = new_frame_top``;
+   ``branch = "root_o_fallback"`` — same tradeoff Root N made for the
+   timeout path.
+5. ``\\x1b[{erase_top};1H\\x1b[0J`` blanks from the erase anchor to
+   end-of-viewport. Scrollback untouched.
+6. ``new_frame_top = rows - visual_h_new + 1``. Cursor-down by
+   ``new_frame_top - erase_top`` rows (no movement if equal).
+7. ``_paint_initial`` paints the new frame; cursor parks at the
+   frame's last visual row (bottom-parked contract).
+
+Known tradeoff: ``_visual_height`` is the same potentially-inaccurate
+function Root J/K/L used, but here it only sizes the ERASE extent
+(overshoot is harmless). The new frame's anchor is exact (derived
+from ``rows``), so paint position is never wrong.
+
+Validation:
+
+* Mock-driven tests cover: Root O primary path (cursor_row drives
+  erase_top, ``rows`` drives new_frame_top); DSR-timeout fallback
+  (Root N-style anchor when cursor_row is None); cursor-drift
+  scenarios (different cursor_row values produce the same final
+  new_frame position).
+* Manual testing remains required (Jarvis live resize on Windows
+  Terminal) per the PRD acceptance criteria.
+
+### Fixed — resize anchors frame to viewport bottom, not cursor row (Root N)
+
+Symptom: after Root M (DSR Cursor Query), force_repaint was still
+painting the frame in the middle of the viewport on Windows Terminal
+— leaving blank rows below the frame and old-frame residue above.
+Diagnostic data (``cpr_debug.log``) confirmed Root M's core
+assumption was broken: the CPR-reported cursor row is NEVER equal to
+``rows`` post-resize on Windows Terminal. Across 57 force_repaint
+events, ``cursor_row`` ranged 7-47 while ``rows=48`` stayed constant.
+Horizontal resize causes the cursor's viewport-relative row to drift
+wildly (cursor_row dropped from 47 to 10 as cols shrank from 156 to
+131). PyInk's "cursor parks at frame bottom" invariant does not hold
+across Windows Terminal's reflow.
+
+Fix (Root N — viewport-bottom anchor): ignore ``cursor_row`` entirely
+and anchor the new frame to ``rows`` (from the resize signal). The
+``force_repaint`` branch now does:
+
+1. ``visual_h = _visual_height(new_frame, cols)``
+2. ``frame_top = max(0, rows - visual_h)``
+3. ``CUP(frame_top + 1, 1)`` + ``\x1b[0J`` — precise erase of just
+   the rows the new frame will occupy. Scrollback untouched
+   (no ``\x1b[2J`` push, no ``\x1b[3J`` scrollback wipe). Static
+   content above ``frame_top`` is preserved.
+4. ``_paint_initial`` paints the new frame; cursor parks at the
+   frame's last visual row (bottom-parked contract).
+
+This is Root I's positioning logic combined with Root M's precise
+erase range — best of both, no DSR dependency for the anchor. The
+``_query_cursor`` call is kept for diagnostic logging only so the
+next resize test continues to gather cursor_row data; its result is
+NOT used for the anchor.
+
+Known tradeoff: if ``visual_h`` changes between resizes (frame
+height shrinks from 6 to 4), 1-2 rows of old frame content may
+survive above the new ``frame_top``. Mitigation options if observed:
+safety-margin erase, or track ``_last_visual_h`` and erase
+``max(prev, new)`` rows.
+
+The DSR machinery (``_query_cursor``, ``_handle_cpr``, ``_cpr_*``
+slots, terminal CPR callback) stays in place untouched. Cleanup is
+a follow-up if Root N holds up in manual testing.
+
+Validation:
+
+* Mock-driven tests cover: ``frame_top`` is independent of
+  ``cursor_row`` (a wildly-wrong cursor row produces the same CUP
+  target as a correct one); Root I blind ``\x1b[1;1H`` fallback is
+  gone; ``\x1b[2J`` and ``\x1b[999B`` are absent.
+* Manual testing remains required (Jarvis live resize on Windows
+  Terminal) per the PRD acceptance criteria.
+
+### Fixed — resize uses DSR Cursor Query for precise frame erase (Root M)
+
+Symptom: after Root I, alternating resize on Windows Terminal still
+left residue — the live frame's wrapped tails (right-aligned
+status_bar with emoji/CJK, full-width dividers) survived the
+``\x1b[1;1H\x1b[0J`` clear because PyInk couldn't predict where the
+old frame's visual rows actually sat after Windows Terminal's
+post-resize re-wrap. ``string_width``-based visual-height prediction
+(Root J/K/L) didn't model WT's emoji / CJK / pending-wrap behaviour
+and was wrong by ±1 row, leaving a residual copy of the frame above
+the new one every cycle.
+
+Root cause: Windows Terminal's re-wrap is a black box from PyInk's
+perspective. Any solution that relies on PyInk unilaterally computing
+the cursor's post-rewrap row is fighting the terminal instead of
+asking it.
+
+Fix (Root M — DSR Cursor Query): use the VT-100 standardized cursor
+query mechanism to ask the terminal where the cursor actually sits
+after the rewrap, then derive the new frame's visual top from that
+row. ``_paint_now``'s ``force_repaint`` branch now does:
+
+1. Send ``\x1b[6n`` (DSR — Device Status Report) to stdout.
+2. Wait up to 50 ms for the input thread to receive
+   ``\x1b[<row>;<col>R`` (CPR — Cursor Position Report).
+3. ``frame_top = max(0, cpr_row - visual_h_new)``.
+4. ``CUP(frame_top+1, 1)`` + ``\x1b[0J`` — precise erase of just the
+   rows the new frame will occupy. Scrollback is untouched (no
+   ``\x1b[2J`` push, no ``\x1b[3J`` scrollback wipe). Viewport-static
+   content above the frame is preserved — the core requirement that
+   Root I sacrificed.
+5. ``_paint_initial`` paints the new frame; cursor parks at the
+   frame's last visual row (bottom-parked contract).
+
+PyInk's existing invariant — every paint leaves the cursor at the
+frame's last visual row — is what makes step 3 correct: pre-resize
+the cursor was at the frame bottom; post-rewrap its viewport-relative
+row IS the new frame bottom.
+
+On timeout (rare — Windows Terminal round-trip is typically 1–5 ms,
+20 ms under load; 50 ms is generous) the path degrades to Root I
+(``\x1b[1;1H\x1b[0J`` + bottom park). Tradeoff there: viewport-static
+content is wiped but scrollback is preserved.
+
+Concurrency / thread coordination:
+
+* ``Instance._query_cursor`` runs on the painter thread (typically the
+  resize-scheduled throttle thread). It bumps ``_cpr_generation``,
+  marks it pending, writes DSR, and waits on ``_cpr_event`` (50 ms
+  timeout).
+* The Terminal's input thread runs the existing KeyParser; sequences
+  are now also matched against the CSI CPR regex
+  (``^\x1b\[(\d+);(\d+)R$``). Matches route to
+  ``Instance._handle_cpr(row, col)`` instead of being emitted as a
+  (harmless empty) Key. The handler validates the generation, writes
+  ``_cpr_row`` under ``self._cpr_lock``, and signals ``_cpr_event``.
+* **CPR state is guarded by a dedicated ``_cpr_lock``** (a plain
+  ``threading.Lock``), NOT the painter's ``self._lock``. This is
+  load-bearing: ``_paint_now`` holds ``self._lock`` across the entire
+  paint including the call to ``_query_cursor``'s
+  ``_cpr_event.wait(timeout=0.05)``. The input thread (which runs
+  ``_handle_cpr``) is a different thread from the painter, so if
+  ``_handle_cpr`` tried to acquire ``self._lock`` it would block
+  until the 50 ms timeout fired — at which point the late CPR would
+  write ``_cpr_row`` and signal the event, but the painter had
+  already returned ``None`` and fallen back to Root I. In effect
+  every real-terminal force_repaint would silently degrade to Root
+  I. Mock-based tests don't catch this because they patch
+  ``_query_cursor`` and never exercise the cross-thread lock
+  acquisition. The dedicated ``_cpr_lock`` keeps the painter's outer
+  ``self._lock`` irrelevant to the CPR protocol — no nested locking,
+  no release/reacquire gymnastics.
+* ``_cpr_pending`` is cleared on timeout or after consumption, so a
+  stale late-arriving CPR is rejected (returns ``False``) rather than
+  poisoning a future query (the ConPTY reorder race documented in
+  ``research/cpr-validation.md`` §5).
+* A stray CPR (e.g. misbehaving terminal, literal ``R`` keystroke)
+  never matches the regex — bare ``R`` and ``\x1b[R`` are excluded —
+  and even if it did, ``_handle_cpr`` returns ``False`` when nothing
+  is pending, so the sequence surfaces as a normal Key. Safety
+  default preserved.
+
+CPR is opt-out via ``Terminal.set_cpr_callback(None)``; the callback
+slot starts ``None`` so a bare CPR before registration is never
+silently swallowed.
+
+Validation:
+
+* ``test_cpr.py`` (in Jarvis task
+  ``.trellis/tasks/07-24-resize-anchor-cursor-bottom/research/``)
+  manually verified on Windows Terminal that DSR/CPR round-trip
+  works, honours CUP, and reports viewport-relative post-rewrap row
+  semantics. See ``research/cpr-validation.md`` for the full report.
+* Mock-driven tests cover: DSR-success path emits precise CUP; DSR
+  timeout falls back to Root I; stale-generation CPR is rejected;
+  non-CPR sequences (literal ``R``, ``\x1b[R``) are not intercepted.
+
+Manual testing remains required (Jarvis live resize on Windows
+Terminal) per the PRD acceptance criteria — automated tests cover
+the byte contract but not the visual outcome.
+
 ### Fixed — resize clears viewport in place, preserves scrollback (Root I)
 
 Symptom: after Root H, alternating resize on Windows Terminal pushed

@@ -10,9 +10,24 @@ from __future__ import annotations
 import io
 import threading
 import time
+from unittest.mock import patch
 
 from ink import Box, Newline, Text, render
 from ink.core.signal import signal
+
+
+def _mock_query_cursor(row: int | None):
+    """Return a context manager that patches ``Instance._query_cursor``
+    to return ``row`` (or ``None`` when ``row`` is ``None``).
+
+    Tests use this to drive the Root M force-repaint path
+    deterministically without waiting for the real 50 ms DSR timeout
+    or sending actual escape sequences.
+    """
+    return patch(
+        "ink.render.instance.Instance._query_cursor",
+        return_value=row,
+    )
 
 
 def _render_silent(tree: object, **kwargs: object) -> tuple[object, io.StringIO]:
@@ -453,13 +468,14 @@ def test_force_repaint_bypasses_equality_early_return() -> None:
     """
     inst, _out = _render_silent(Text("fixed"), columns=20, rows=3)
     try:
-        assert not inst._force_repaint  # type: ignore[attr-defined]
-        inst._force_repaint = True  # type: ignore[attr-defined]
-        # Paint consumes the flag — a subsequent paint without setting
-        # the flag again must NOT re-emit an identical frame (the
-        # equality early-return takes over again).
-        inst._paint_now()  # type: ignore[attr-defined]
-        assert not inst._force_repaint  # type: ignore[attr-defined]
+        with _mock_query_cursor(None):
+            assert not inst._force_repaint  # type: ignore[attr-defined]
+            inst._force_repaint = True  # type: ignore[attr-defined]
+            # Paint consumes the flag — a subsequent paint without setting
+            # the flag again must NOT re-emit an identical frame (the
+            # equality early-return takes over again).
+            inst._paint_now()  # type: ignore[attr-defined]
+            assert not inst._force_repaint  # type: ignore[attr-defined]
     finally:
         inst.unmount()  # type: ignore[attr-defined]
 
@@ -477,18 +493,19 @@ def test_force_repaint_routes_through_repaint_frame() -> None:
     """
     inst, out = _render_silent(Text("fixed"), columns=20, rows=3)
     try:
-        out.truncate(0)
-        out.seek(0)
-        inst._force_repaint = True  # type: ignore[attr-defined]
-        inst._paint_now()  # type: ignore[attr-defined]
-        repaint = out.getvalue()
-        # The fixed string must reappear even though the frame didn't
-        # change — proves the equality early-return was bypassed.
-        assert "fixed" in repaint
-        # ``repaint_frame`` always line-clears (``\x1b[2K``) before
-        # each row; the incremental ``write_diff`` path emits no such
-        # sequence when frames are identical.
-        assert "\x1b[2K" in repaint
+        with _mock_query_cursor(None):
+            out.truncate(0)
+            out.seek(0)
+            inst._force_repaint = True  # type: ignore[attr-defined]
+            inst._paint_now()  # type: ignore[attr-defined]
+            repaint = out.getvalue()
+            # The fixed string must reappear even though the frame didn't
+            # change — proves the equality early-return was bypassed.
+            assert "fixed" in repaint
+            # ``repaint_frame`` always line-clears (``\x1b[2K``) before
+            # each row; the incremental ``write_diff`` path emits no such
+            # sequence when frames are identical.
+            assert "\x1b[2K" in repaint
     finally:
         inst.unmount()  # type: ignore[attr-defined]
 
@@ -537,29 +554,24 @@ def test_force_repaint_uses_clear_to_end_when_old_frame_wider_than_cols() -> Non
     )
 
 
-def test_force_repaint_clears_viewport_and_positions_cursor_at_frame_top() -> None:
-    """``_force_repaint`` makes ``_paint_now`` emit ``\\x1b[1;1H\\x1b[0J``
-    (cursor home + clear-to-end-of-viewport) then absolute-position the
-    cursor at the new frame's visual top, then paint via
-    ``_paint_initial``.
+def test_force_repaint_root_p_erases_full_viewport_without_touching_scrollback() -> None:
+    """Root P: ``_force_repaint`` emits ``\\x1b[1;1H\\x1b[0J`` (erase the
+    whole viewport in place), redraws the retained static tail, then
+    repaints the frame bottom-anchored.
 
-    Root I (replacing Root H): Root H used ``\\x1b[2J\\x1b[H`` (CC-style).
-    Windows Terminal pushes viewport content into scrollback on
-    ``\\x1b[2J`` — alternating resize (shrink then grow) duplicated the
-    live frame into scrollback and shoved pre-existing scrollback
-    further up out of view. CC avoids this by pairing ``\\x1b[2J`` with
-    ``\\x1b[3J`` (clear scrollback), but Jarvis requires native
-    scrollback preservation so that path is closed.
+    Unlike Root I (which this superficially resembles), the erase is not
+    destructive: ``_static_tail_text`` retains recently flushed static
+    text, so whatever ``\\x1b[0J`` blanks is immediately redrawn from the
+    buffer. Root O's DSR-anchored partial erase was retired because
+    Windows Terminal's post-reflow cursor row drifts (cpr_debug.log:
+    cursor_row ranged 40-48 while rows=48 stayed constant) and every
+    erase overshoot permanently blanked static rows — the monotonically
+    growing gap between static and frame.
 
-    ``\\x1b[1;1H`` + ``\\x1b[0J`` blanks every visible cell WITHOUT
-    scrolling. Scrollback is untouched. Tradeoff: viewport-visible
-    static content is wiped on resize (same as CC minus the scrollback
-    wipe).
-
-    Validation: ``force_repaint`` output contains ``\\x1b[1;1H`` and
-    ``\\x1b[0J`` (in-place clear). Neither ``\\x1b[2J`` (would push to
-    scrollback) nor ``\\x1b[999B`` (Root D relative anchor) should
-    appear.
+    Validation: force_repaint output contains ``\\x1b[1;1H\\x1b[0J`` and
+    a CUP to ``frame_top``. ``\\x1b[2J`` (scrollback push), ``\\x1b[999B``
+    (Root D relative anchor) and ``\\x1b[6n`` (DSR — Root P no longer
+    consults the cursor) must not appear.
     """
     inst, out = _render_silent(Text("fixed"), columns=20, rows=3)
     try:
@@ -568,11 +580,13 @@ def test_force_repaint_clears_viewport_and_positions_cursor_at_frame_top() -> No
         inst._force_repaint = True  # type: ignore[attr-defined]
         inst._paint_now()  # type: ignore[attr-defined]
         repaint = out.getvalue()
-        assert "\x1b[1;1H" in repaint, (
-            f"expected \\x1b[1;1H (cursor home, in-place), got: {repaint!r}"
+        assert "\x1b[1;1H\x1b[0J" in repaint, (
+            f"expected \\x1b[1;1H\\x1b[0J (in-place viewport erase), "
+            f"got: {repaint!r}"
         )
-        assert "\x1b[0J" in repaint, (
-            f"expected \\x1b[0J (clear-to-end-of-viewport, no scrollback push), got: {repaint!r}"
+        # frame_top = rows - visual_h + 1 = 3 - 1 + 1 = 3.
+        assert "\x1b[3;1H" in repaint, (
+            f"expected \\x1b[3;1H (CUP to frame_top=3), got: {repaint!r}"
         )
         # ``\\x1b[2J`` is FORBIDDEN in this path — it pushes viewport
         # content into scrollback on Windows Terminal.
@@ -584,6 +598,29 @@ def test_force_repaint_clears_viewport_and_positions_cursor_at_frame_top() -> No
         assert "\x1b[999B" not in repaint, (
             f"Root D anchor \\x1b[999B should be gone, got: {repaint!r}"
         )
+        # Root P never consults the cursor — no DSR query.
+        assert "\x1b[6n" not in repaint, (
+            f"DSR \\x1b[6n must not appear in Root P, got: {repaint!r}"
+        )
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_force_repaint_routes_through_repaint_frame_with_query_mock() -> None:
+    """Companion to :func:`test_force_repaint_routes_through_repaint_frame`
+    — ensures the existing repaint_frame contract holds under Root M
+    when DSR times out (mocked to keep the test fast).
+    """
+    inst, out = _render_silent(Text("fixed"), columns=20, rows=3)
+    try:
+        with _mock_query_cursor(None):
+            out.truncate(0)
+            out.seek(0)
+            inst._force_repaint = True  # type: ignore[attr-defined]
+            inst._paint_now()  # type: ignore[attr-defined]
+            repaint = out.getvalue()
+            assert "fixed" in repaint
+            assert "\x1b[2K" in repaint
     finally:
         inst.unmount()  # type: ignore[attr-defined]
 
@@ -626,14 +663,15 @@ def test_force_repaint_anchors_cursor_at_viewport_bottom() -> None:
     """
     inst, out = _render_silent(Text("fixed"), columns=20, rows=3)
     try:
-        out.truncate(0)
-        out.seek(0)
-        inst._force_repaint = True  # type: ignore[attr-defined]
-        inst._paint_now()  # type: ignore[attr-defined]
-        repaint = out.getvalue()
-        # Root D's anchor sequence is GONE — replaced by absolute
-        # cursor positioning (Root H).
-        assert "\x1b[999B" not in repaint
+        with _mock_query_cursor(None):
+            out.truncate(0)
+            out.seek(0)
+            inst._force_repaint = True  # type: ignore[attr-defined]
+            inst._paint_now()  # type: ignore[attr-defined]
+            repaint = out.getvalue()
+            # Root D's anchor sequence is GONE — replaced by absolute
+            # cursor positioning (Root H).
+            assert "\x1b[999B" not in repaint
     finally:
         inst.unmount()  # type: ignore[attr-defined]
 
@@ -659,5 +697,553 @@ def test_non_force_repaint_does_not_emit_cursor_anchor() -> None:
         )
     finally:
         inst.unmount()  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# Root P (erase viewport + redraw retained static tail + bottom-anchored frame)
+# ---------------------------------------------------------------------------
+
+
+def test_force_repaint_root_p_erases_viewport_and_anchors_frame_to_bottom() -> None:
+    """Root P, no retained static: the repaint is exactly
+    ``\\x1b[1;1H\\x1b[0J`` + CUP to ``frame_top`` + ``_paint_initial``.
+
+    ``frame_top = rows - visual_h_new + 1`` — the frame is anchored to
+    the viewport bottom, and nothing above it is written when the
+    static tail is empty.
+    """
+    inst, out = _render_silent(Text("fixed"), columns=20, rows=10)
+    try:
+        out.truncate(0)
+        out.seek(0)
+        inst._force_repaint = True  # type: ignore[attr-defined]
+        inst._paint_now()  # type: ignore[attr-defined]
+        repaint = out.getvalue()
+        assert repaint.startswith("\x1b[1;1H\x1b[0J"), (
+            f"expected repaint to start with viewport erase, got: {repaint!r}"
+        )
+        # frame_top = 10 - 1 + 1 = 10.
+        assert "\x1b[10;1H" in repaint, (
+            f"expected \\x1b[10;1H (CUP to frame_top=10), got: {repaint!r}"
+        )
+        assert "fixed" in repaint
+        assert "\x1b[6n" not in repaint
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_force_repaint_root_p_redraws_static_tail_above_frame() -> None:
+    """Root P: static flushed via ``write_static`` is redrawn from the
+    retained tail, bottom-anchored directly above the frame.
+
+    rows=10, frame visual_h=1 → frame_top=10, budget=9, selection
+    budget=8 (1 safety row). Three 1-row static lines fit → static_h=3,
+    ``start_row = 9 - 3 + 1 = 7``. Emission order must be: viewport
+    erase → CUP(7) → static text → CUP(10) → frame.
+    """
+    inst, out = _render_silent(Text("fixed"), columns=20, rows=10)
+    try:
+        inst.write_static("msg1\nmsg2\nmsg3\n")  # type: ignore[attr-defined]
+        out.truncate(0)
+        out.seek(0)
+        inst._force_repaint = True  # type: ignore[attr-defined]
+        inst._paint_now()  # type: ignore[attr-defined]
+        repaint = out.getvalue()
+        assert "\x1b[7;1Hmsg1\nmsg2\nmsg3" in repaint, (
+            f"expected static tail redrawn at row 7, got: {repaint!r}"
+        )
+        i_erase = repaint.index("\x1b[1;1H\x1b[0J")
+        i_static = repaint.index("\x1b[7;1Hmsg1")
+        i_frame = repaint.index("\x1b[10;1H")
+        assert i_erase < i_static < i_frame, (
+            f"emission order must be erase → static → frame, got: {repaint!r}"
+        )
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_force_repaint_root_p_static_tail_respects_budget() -> None:
+    """Root P: when the retained static is taller than the space above
+    the frame, only the NEWEST lines that fit the budget are redrawn —
+    older lines are dropped (they remain in scrollback from the
+    original flush) rather than pushed behind the frame.
+    """
+    inst, out = _render_silent(Text("fixed"), columns=20, rows=5)
+    try:
+        inst.write_static("".join(f"m{i}\n" for i in range(10)))  # type: ignore[attr-defined]
+        out.truncate(0)
+        out.seek(0)
+        inst._force_repaint = True  # type: ignore[attr-defined]
+        inst._paint_now()  # type: ignore[attr-defined]
+        repaint = out.getvalue()
+        # frame_top = 5, budget = 4, selection budget = 3 → newest 3
+        # lines (m7..m9), start_row = 4 - 3 + 1 = 2.
+        assert "\x1b[2;1Hm7\nm8\nm9" in repaint, (
+            f"expected newest 3 lines redrawn at row 2, got: {repaint!r}"
+        )
+        assert "m6\n" not in repaint, (
+            f"m6 must be dropped (over budget), got: {repaint!r}"
+        )
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_force_repaint_root_p_does_not_query_cursor() -> None:
+    """Root P: the post-reflow cursor position is NOT an input to any
+    computation (WT's cursor drifts on reflow — that was Root O's fatal
+    dependency). ``_query_cursor`` must not be called and no DSR byte
+    may hit stdout.
+    """
+    inst, out = _render_silent(Text("fixed"), columns=20, rows=10)
+    try:
+        with patch(
+            "ink.render.instance.Instance._query_cursor",
+            side_effect=AssertionError("_query_cursor called in Root P"),
+        ):
+            out.truncate(0)
+            out.seek(0)
+            inst._force_repaint = True  # type: ignore[attr-defined]
+            inst._paint_now()  # type: ignore[attr-defined]
+        assert "\x1b[6n" not in out.getvalue()
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_force_repaint_first_paint_path_emits_no_erase() -> None:
+    """With an empty ``current_frame`` the first-paint branch
+    (``write_diff(None, new_frame)``) runs before the force_repaint
+    branch, so no erase/CUP sequences are emitted.
+    """
+    inst, out = _render_silent(Text("fixed"), columns=20, rows=10)
+    try:
+        inst.current_frame = ""  # type: ignore[attr-defined]
+        out.truncate(0)
+        out.seek(0)
+        inst._force_repaint = True  # type: ignore[attr-defined]
+        inst._paint_now()  # type: ignore[attr-defined]
+        repaint = out.getvalue()
+        assert "fixed" in repaint
+        assert "\x1b[0J" not in repaint, (
+            f"first-paint path should not emit \\x1b[0J, got: {repaint!r}"
+        )
+        assert "\x1b[" not in repaint.replace("\x1b[2K", ""), (
+            f"first-paint path should not emit CUP, got: {repaint!r}"
+        )
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_reset_static_clears_retained_tail() -> None:
+    """``reset_static`` (user /clear gesture) empties the retained tail —
+    a later resize must not resurrect cleared static text."""
+    inst, out = _render_silent(Text("fixed"), columns=20, rows=10)
+    try:
+        inst.write_static("secret-message\n")  # type: ignore[attr-defined]
+        inst.reset_static()  # type: ignore[attr-defined]
+        # Re-establish a painted frame (reset_static blanked
+        # ``current_frame``; the next paint is a first paint).
+        inst._paint_now()  # type: ignore[attr-defined]
+        out.truncate(0)
+        out.seek(0)
+        inst._force_repaint = True  # type: ignore[attr-defined]
+        inst._paint_now()  # type: ignore[attr-defined]
+        repaint = out.getvalue()
+        assert "secret-message" not in repaint, (
+            f"cleared static must not be redrawn, got: {repaint!r}"
+        )
+        assert "\x1b[1;1H\x1b[0J" in repaint  # root_p still ran
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_static_tail_trimmed_to_max_lines() -> None:
+    """The retained tail is capped at ``_STATIC_TAIL_MAX_LINES`` logical
+    lines so long sessions don't grow the buffer without bound."""
+    from ink.render.instance import _STATIC_TAIL_MAX_LINES
+
+    inst, out = _render_silent(Text("fixed"), columns=20, rows=10)
+    try:
+        total = _STATIC_TAIL_MAX_LINES + 100
+        inst.write_static("".join(f"L{i}\n" for i in range(total)))  # type: ignore[attr-defined]
+        tail = inst._static_tail_text  # type: ignore[attr-defined]
+        tail_lines = tail.split("\n")
+        assert len(tail_lines) <= _STATIC_TAIL_MAX_LINES, (
+            f"tail must be capped at {_STATIC_TAIL_MAX_LINES} lines, "
+            f"got {len(tail_lines)}"
+        )
+        assert "L0\n" not in tail, "oldest lines must be evicted"
+        assert f"L{total - 1}\n" in tail, "newest lines must be kept"
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_query_cursor_sends_dsr_and_returns_row_on_signal() -> None:
+    """``_query_cursor`` writes ``\\x1b[6n`` to stdout, waits on
+    ``_cpr_event``, and returns ``_cpr_row`` when signalled.
+
+    Drives the protocol directly: start ``_query_cursor`` on a worker
+    thread (so the test main thread can simulate the input loop's
+    ``_handle_cpr``), capture the DSR bytes, fire the CPR callback
+    BEFORE the 50 ms timeout elapses, and assert the returned row
+    matches.
+    """
+    inst, out = _render_silent(Text("x"), columns=20, rows=5)
+    try:
+        result: dict[str, object] = {}
+
+        def worker() -> None:
+            result["row"] = inst._query_cursor()  # type: ignore[attr-defined]
+
+        t = threading.Thread(target=worker)
+        t.start()
+        # Poll for DSR appearance in stdout (worker writes it almost
+        # immediately), then dispatch CPR right away so the worker's
+        # 50 ms timeout doesn't elapse first.
+        deadline = time.monotonic() + 0.2
+        while time.monotonic() < deadline:
+            if "\x1b[6n" in out.getvalue():
+                break
+            time.sleep(0.002)
+        assert "\x1b[6n" in out.getvalue(), (
+            f"expected \\x1b[6n (DSR) in stdout, got: {out.getvalue()!r}"
+        )
+        # Dispatch CPR before the worker's 50 ms timeout fires.
+        consumed = inst._handle_cpr(row=7, col=1)  # type: ignore[attr-defined]
+        assert consumed is True, "_handle_cpr should consume when awaiting"
+        t.join(timeout=0.5)
+        assert not t.is_alive(), "_query_cursor did not return after CPR"
+        assert result.get("row") == 7, (
+            f"expected _query_cursor to return row=7, got {result.get('row')!r}"
+        )
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_query_cursor_returns_none_on_timeout() -> None:
+    """When no CPR arrives within 50 ms, ``_query_cursor`` returns
+    ``None`` and clears ``_cpr_pending`` so a later CPR can't poison
+    the next query."""
+    inst, _out = _render_silent(Text("x"), columns=20, rows=5)
+    try:
+        # No CPR will arrive — should time out.
+        start = time.monotonic()
+        row = inst._query_cursor()  # type: ignore[attr-defined]
+        elapsed = time.monotonic() - start
+        assert row is None
+        # Generous lower bound (50 ms timeout + scheduler slack).
+        assert elapsed >= 0.04, (
+            f"expected ≥40 ms wait (50 ms timeout), got {elapsed:.3f}s"
+        )
+        # Pending must be cleared so a stale late CPR is rejected.
+        assert inst._cpr_pending is None  # type: ignore[attr-defined]
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_handle_cpr_rejects_when_not_pending() -> None:
+    """``_handle_cpr`` returns ``False`` (and does NOT signal the event)
+    when no DSR is in flight. Safety default — a stray CPR from a
+    misbehaving terminal or a literal ``R`` keystroke is never silently
+    swallowed."""
+    inst, _out = _render_silent(Text("x"), columns=20, rows=5)
+    try:
+        assert inst._cpr_pending is None  # type: ignore[attr-defined]
+        # Event should stay clear.
+        assert not inst._cpr_event.is_set()  # type: ignore[attr-defined]
+        consumed = inst._handle_cpr(row=10, col=1)  # type: ignore[attr-defined]
+        assert consumed is False
+        assert not inst._cpr_event.is_set()  # type: ignore[attr-defined]
+        assert inst._cpr_row is None  # type: ignore[attr-defined]
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_handle_cpr_rejects_stale_generation_after_timeout() -> None:
+    """When a DSR times out, ``_cpr_pending`` is cleared. A late CPR
+    arriving afterwards must be rejected (returns ``False``) rather
+    than poisoning the next query.
+
+    Sequence:
+
+    1. Call ``_query_cursor`` on a worker thread; let it time out.
+    2. After timeout, ``_cpr_pending is None``.
+    3. Fire ``_handle_cpr`` — must return ``False`` and not set the
+       event.
+    """
+    inst, _out = _render_silent(Text("x"), columns=20, rows=5)
+    try:
+        result: dict[str, object] = {}
+
+        def worker() -> None:
+            result["row"] = inst._query_cursor()  # type: ignore[attr-defined]
+
+        t = threading.Thread(target=worker)
+        t.start()
+        # Wait for the timeout to fire (50 ms + slack).
+        t.join(timeout=0.2)
+        assert not t.is_alive(), "worker should have timed out by now"
+        assert result.get("row") is None
+        # Pending was cleared by the timeout path.
+        assert inst._cpr_pending is None  # type: ignore[attr-defined]
+        # Now a late CPR arrives — must be rejected.
+        assert not inst._cpr_event.is_set()  # type: ignore[attr-defined]
+        consumed = inst._handle_cpr(row=12, col=1)  # type: ignore[attr-defined]
+        assert consumed is False
+        assert not inst._cpr_event.is_set()  # type: ignore[attr-defined]
+        assert inst._cpr_row is None  # type: ignore[attr-defined]
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_handle_cpr_rejects_when_newer_generation_in_flight() -> None:
+    """Race-condition guard (ConPTY reorder): when a fresh DSR has been
+    issued (``_cpr_pending`` set to a newer generation), a stale CPR
+    for the previous generation must NOT match.
+
+    Setup:
+
+    1. Bump generation by issuing DSR (``gen=1``).
+    2. Without delivering a CPR, bump again (``gen=2``).
+    3. Fire ``_handle_cpr`` — the implicit generation from gen=1 is
+       stale. Implementation note: the current design tracks only the
+       *latest* pending generation, so the stale-response case is
+       handled by the same ``_cpr_pending is None`` check after a
+       timeout clears it. This test exercises the simpler invariant:
+       once a CPR has been consumed, ``_cpr_pending`` is None and a
+       second CPR (the stale echo) is rejected.
+    """
+    inst, _out = _render_silent(Text("x"), columns=20, rows=5)
+    try:
+        # Issue a DSR and immediately fulfil it.
+        inst._cpr_event.clear()  # type: ignore[attr-defined]
+        inst._cpr_generation += 1  # type: ignore[attr-defined]
+        inst._cpr_pending = inst._cpr_generation  # type: ignore[attr-defined]
+        inst._cpr_row = None  # type: ignore[attr-defined]
+        consumed = inst._handle_cpr(row=3, col=1)  # type: ignore[attr-defined]
+        assert consumed is True
+        # ``_cpr_pending`` is cleared after consumption.
+        assert inst._cpr_pending is None  # type: ignore[attr-defined]
+        # A stale duplicate CPR (from the same generation) arrives —
+        # must be rejected because nothing is pending.
+        consumed2 = inst._handle_cpr(row=3, col=1)  # type: ignore[attr-defined]
+        assert consumed2 is False
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_terminal_cpr_callback_consumes_cpr_sequence() -> None:
+    """The Terminal's dispatcher routes CSI CPR sequences through the
+    registered callback instead of emitting them as Keys. Outside an
+    active DSR the callback returns ``False`` and the CPR surfaces as
+    a (harmless empty) Key — safety default."""
+    from ink.render.terminal import Terminal
+
+    term = Terminal(io.StringIO(), stdin=io.StringIO())
+    try:
+        consumed: list[tuple[int, int]] = []
+
+        def handler(row: int, col: int) -> bool:
+            consumed.append((row, col))
+            return True
+
+        term.set_cpr_callback(handler)
+        callbacks: list = []
+        # Simulate the input loop's dispatch path.
+        term._dispatch_sequences(["\x1b[25;1R"], callbacks)
+        assert consumed == [(25, 1)], (
+            f"expected CPR handler to fire once with (25, 1), got {consumed!r}"
+        )
+        # The CPR was consumed — no Key dispatch happens (callbacks
+        # list stays empty because the dispatcher short-circuits).
+    finally:
+        term.set_cpr_callback(None)
+
+
+def test_terminal_cpr_callback_passthrough_when_not_consumed() -> None:
+    """When the registered handler returns ``False`` (no DSR in flight),
+    the dispatcher falls through to normal Key emission. A literal
+    capital ``R`` keystroke also does not match the CPR regex and is
+    delivered as a normal Key."""
+    from ink.render.terminal import Terminal
+
+    term = Terminal(io.StringIO(), stdin=io.StringIO())
+    try:
+        # Handler that always rejects — CPR should fall through.
+        term.set_cpr_callback(lambda r, c: False)
+        received: list = []
+        term._key_callbacks.append(lambda k: received.append(k))
+        term._dispatch_sequences(["\x1b[25;1R"], list(term._key_callbacks))
+        # CPR fell through — parse_key returns an empty-input Key.
+        assert len(received) == 1
+        assert received[0].input == ""
+
+        # A literal ``R`` keystroke must NOT be intercepted as CPR.
+        received.clear()
+        term._dispatch_sequences(["R"], list(term._key_callbacks))
+        assert len(received) == 1
+        assert received[0].input == "R"
+    finally:
+        term.set_cpr_callback(None)
+
+
+def test_terminal_cpr_regex_does_not_match_non_cpr() -> None:
+    """The CPR regex matches ONLY the exact ``\\x1b[<n>;<n>R`` form.
+    Other ``R``-terminated sequences (e.g. ``\\x1b[R`` cursor-move,
+    bare ``R``) must not be misinterpreted as CPR."""
+    from ink.render.terminal import _CPR_RE
+
+    # Valid CPRs.
+    assert _CPR_RE.match("\x1b[1;1R") is not None
+    assert _CPR_RE.match("\x1b[999;999R") is not None
+    assert _CPR_RE.match("\x1b[25;80R") is not None
+    # NOT CPRs.
+    assert _CPR_RE.match("R") is None
+    assert _CPR_RE.match("\x1b[R") is None
+    assert _CPR_RE.match("\x1b[25R") is None  # missing ;col
+    assert _CPR_RE.match("\x1b[25;1A") is None  # wrong final byte
+    assert _CPR_RE.match("\x1b[?25;1R") is None  # has intermediate '?'
+
+
+def test_handle_cpr_does_not_deadlock_when_painter_holds_lock() -> None:
+    """REGRESSION: ``_handle_cpr`` must NOT acquire ``self._lock``.
+
+    The real ``_paint_now`` runs under ``self._lock`` (acquired at the
+    method head, held across the whole body). The ``force_repaint``
+    branch calls ``_query_cursor`` inside that lock, and ``_query_cursor``
+    blocks on ``_cpr_event.wait(timeout=0.05)``. The terminal's input
+    thread (a DIFFERENT thread from the painter) receives the CPR bytes
+    and dispatches ``_handle_cpr``.
+
+    If ``_handle_cpr`` tries to acquire ``self._lock`` it will BLOCK on
+    the painter's held lock — the painter won't release it until
+    ``_cpr_event.wait`` times out (50 ms later), at which point the
+    late ``_handle_cpr`` writes ``_cpr_row`` and sets the event — but
+    the painter has already returned ``None`` and fallen back to Root
+    I. **Every real-terminal force_repaint silently degrades to
+    Root I.** Mock-based tests don't catch this because they patch
+    ``_query_cursor`` and never exercise the deadlock path.
+
+    This test simulates the production threading exactly:
+
+    1. Main thread acquires ``self._lock`` (mimics ``_paint_now``'s
+       outer ``with self._lock:``).
+    2. Worker thread runs ``_query_cursor`` — writes DSR, blocks on
+       the event wait (still under the main thread's lock).
+    3. After 20 ms (well within the 50 ms timeout), a second "input"
+       thread fires ``_handle_cpr``.
+    4. The worker must wake up and return the CPR row BEFORE the 50 ms
+       timeout — i.e., the test thread holding ``self._lock`` must
+       NOT deadlock the input thread.
+
+    Pass criterion: the worker returns the CPR row (not ``None``) and
+    the round-trip completes in well under 50 ms. A buggy impl that
+    uses ``self._lock`` for CPR state would deadlock and the worker
+    would time out at ~50 ms, returning ``None``.
+    """
+    inst, _out = _render_silent(Text("x"), columns=20, rows=5)
+    try:
+        result: dict[str, object] = {}
+
+        def worker() -> None:
+            # ``_query_cursor`` will write DSR + wait. With the bug,
+            # the input thread's ``_handle_cpr`` blocks on the
+            # painter's ``self._lock`` (held by the test's main
+            # thread) and the worker times out at 50 ms. With the
+            # fix, ``_handle_cpr`` uses the separate ``_cpr_lock``
+            # and the worker returns well inside the timeout.
+            result["row"] = inst._query_cursor()  # type: ignore[attr-defined]
+            result["done_at"] = time.monotonic()
+
+        # Hold the painter's lock for the entire test duration —
+        # mirrors ``_paint_now``'s outer ``with self._lock:``.
+        with inst._lock:  # type: ignore[attr-defined]
+            start = time.monotonic()
+            t = threading.Thread(target=worker)
+            t.start()
+
+            # Wait for the worker to send DSR (it does this immediately
+            # after acquiring _cpr_lock and bumping generation).
+            deadline = time.monotonic() + 0.2
+            while time.monotonic() < deadline:
+                if inst._cpr_pending is not None:  # type: ignore[attr-defined]
+                    break
+                time.sleep(0.001)
+            assert inst._cpr_pending is not None, (
+                "worker did not set _cpr_pending before timeout"
+            )
+
+            # Wait 20 ms so the input thread's CPR arrives well inside
+            # the worker's 50 ms timeout window. Then dispatch CPR
+            # from another thread (simulates the input thread).
+            time.sleep(0.02)
+            cpr_thread = threading.Thread(
+                target=lambda: inst._handle_cpr(row=4, col=1)  # type: ignore[attr-defined]
+            )
+            cpr_thread.start()
+            cpr_thread.join(timeout=1.0)
+            assert not cpr_thread.is_alive(), (
+                "_handle_cpr deadlocked — input thread blocked on self._lock "
+                "while painter (test main thread) holds it"
+            )
+
+            # Worker should already have returned because _handle_cpr
+            # signalled the event.
+            t.join(timeout=1.0)
+            elapsed = time.monotonic() - start
+
+        assert not t.is_alive(), (
+            f"worker did not finish — elapsed={elapsed:.3f}s; "
+            f"result={result!r}"
+        )
+        # The load-bearing assertion: row is 4 (NOT None — would
+        # indicate a timeout fallback to Root I).
+        assert result.get("row") == 4, (
+            f"expected _query_cursor to return row=4 (CPR delivered "
+            f"through the lock without deadlock), got {result.get('row')!r}; "
+            f"elapsed={elapsed:.3f}s"
+        )
+        # And it returned well under the 50 ms timeout (20 ms sleep +
+        # dispatch + slack). If it had deadlocked and timed out we'd
+        # see ≥ 50 ms.
+        assert elapsed < 0.05, (
+            f"expected CPR round-trip to complete well under 50 ms; "
+            f"elapsed={elapsed:.3f}s indicates a deadlock-induced timeout"
+        )
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_handle_cpr_uses_dedicated_lock_not_painter_lock() -> None:
+    """Structural check: ``_handle_cpr`` and ``_query_cursor`` must use
+    ``_cpr_lock`` (a dedicated lock), not ``self._lock``. This is the
+    fix for the deadlock documented in
+    :func:`test_handle_cpr_does_not_deadlock_when_painter_holds_lock`.
+
+    The test holds ``self._lock`` continuously and confirms that
+    ``_handle_cpr`` runs and returns without blocking. If the handler
+    ever acquires ``self._lock`` (the bug), this test hangs / fails.
+    """
+    inst, _out = _render_silent(Text("x"), columns=20, rows=5)
+    try:
+        # Put the instance in a state where a DSR is "in flight".
+        with inst._cpr_lock:  # type: ignore[attr-defined]
+            inst._cpr_generation += 1  # type: ignore[attr-defined]
+            inst._cpr_pending = inst._cpr_generation  # type: ignore[attr-defined]
+            inst._cpr_row = None  # type: ignore[attr-defined]
+        inst._cpr_event.clear()  # type: ignore[attr-defined]
+
+        # Acquire the painter's lock for the whole call. A correct
+        # ``_handle_cpr`` returns immediately; a buggy one that
+        # acquires ``self._lock`` blocks here forever (or until the
+        # test framework's timeout kicks in).
+        with inst._lock:  # type: ignore[attr-defined]
+            consumed = inst._handle_cpr(row=42, col=1)  # type: ignore[attr-defined]
+            assert consumed is True
+            assert inst._cpr_row == 42  # type: ignore[attr-defined]
+            assert inst._cpr_pending is None  # type: ignore[attr-defined]
+            assert inst._cpr_event.is_set()  # type: ignore[attr-defined]
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
 
 

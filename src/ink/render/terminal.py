@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import codecs
 import os
+import re
 import select
 import shutil
 import signal as _signal
@@ -103,6 +104,18 @@ _ENTER_BRACKETED_PASTE = "\x1b[?2004h"
 _EXIT_BRACKETED_PASTE = "\x1b[?2004l"
 
 
+# Root M (DSR Cursor Query) — CSI CPR response matcher.
+#
+# DSR (Device Status Report) is ``\x1b[6n``; the terminal replies with
+# ``\x1b[<row>;<col>R`` (CPR, Cursor Position Report). ``row`` and ``col``
+# are 1-indexed and viewport-relative in default mode (no origin mode).
+# We use the report to derive the new frame's visual top after a resize
+# — see :meth:`ink.render.instance.Instance._query_cursor`. The regex is
+# anchored so a stray capital ``R`` keystroke (single-char sequence) and
+# other ``R``-terminated CSI sequences (e.g. ``\x1b[R``) don't match.
+_CPR_RE = re.compile(r"^\x1b\[(\d+);(\d+)R$")
+
+
 class Terminal:
     """Cross-platform terminal wrapper around a :class:`TextIO` stdout.
 
@@ -143,6 +156,12 @@ class Terminal:
         "_key_parser",
         "_paste_buffer",
         "_utf8_decoder",
+        # Root M (DSR Cursor Query) — optional callback fired from the
+        # input loop when a CSI CPR response (``\x1b[<row>;<col>R``)
+        # arrives. The handler returns ``True`` to consume the sequence
+        # (instance was awaiting a CPR) or ``False`` to let it surface
+        # as a regular Key. See :meth:`set_cpr_callback`.
+        "_cpr_callback",
         "_raw_lock",
         "_lock",
     )
@@ -196,6 +215,11 @@ class Terminal:
         )
         self._raw_lock = threading.RLock()
         self._lock = threading.RLock()
+        # Root M (DSR Cursor Query) — starts as ``None`` so a bare CPR
+        # arrival (e.g. from a misbehaving terminal that emits one
+        # spontaneously) is never silently swallowed before the Instance
+        # has had a chance to register its handler.
+        self._cpr_callback: Callable[[int, int], bool] | None = None
 
     # ------------------------------------------------------------------
     # Size detection
@@ -639,6 +663,53 @@ class Terminal:
     # Keyboard input
     # ------------------------------------------------------------------
 
+    def set_cpr_callback(
+        self,
+        callback: Callable[[int, int], bool] | None,
+    ) -> None:
+        """Register ``callback(row, col)`` for CSI CPR responses.
+
+        Root M (DSR Cursor Query): the Instance registers its
+        ``_handle_cpr`` here so the input loop can route CPR replies
+        without going through the normal Key pipeline. The callback
+        returns ``True`` to consume the sequence (an active DSR was in
+        flight) or ``False`` to let it fall through and surface as a
+        regular Key (default safety — a stray CPR is treated as an
+        unknown CSI sequence and emits an empty-input Key).
+
+        Passing ``None`` clears the callback. Thread-safe under
+        ``self._raw_lock`` (the same lock the input loop acquires when
+        feeding the parser and dispatching sequences).
+        """
+        with self._raw_lock:
+            self._cpr_callback = callback
+
+    def _try_dispatch_cpr(self, sequence: str) -> bool:
+        """If ``sequence`` is a CSI CPR and a handler is registered,
+        invoke it. Returns ``True`` when consumed.
+
+        Called from :meth:`_dispatch_sequences` for every parsed
+        sequence BEFORE the paste-buffering / Key-emit path runs.
+        Returning ``True`` short-circuits the rest of the dispatcher
+        for that sequence.
+        """
+        m = _CPR_RE.match(sequence)
+        if m is None:
+            return False
+        with self._raw_lock:
+            callback = self._cpr_callback
+        if callback is None:
+            return False
+        row = int(m.group(1))
+        col = int(m.group(2))
+        try:
+            return bool(callback(row, col))
+        except Exception:
+            # A misbehaving handler must not crash the input loop. If
+            # it raised, treat as "not consumed" so the sequence still
+            # surfaces as a (harmless empty) Key.
+            return False
+
     def read_key(self, timeout: float | None = None) -> Key | None:
         """Block until a key is pressed, returning the parsed :class:`Key`.
 
@@ -835,6 +906,13 @@ class Terminal:
         mid-dispatch is safe.
         """
         for seq in sequences:
+            # Root M (DSR Cursor Query) — intercept CSI CPR responses
+            # before they reach the paste / Key pipeline. If a CPR
+            # callback is registered AND the instance is awaiting a
+            # reply, the callback consumes the sequence; otherwise it
+            # falls through as a regular (empty-input) Key.
+            if self._try_dispatch_cpr(seq):
+                continue
             key = parse_key(seq)
             if key.paste_end:
                 # Close the active paste. If we somehow see a closing

@@ -50,6 +50,7 @@ from ink.core.reconciler import Reconciler
 from ink.core.signal import effect, signal
 from ink.hooks._box_metrics_runtime import bump_layout_epoch
 from ink.layout import clear_box_refs, layout, render_layout_to_string
+from ink.layout.measure import string_width
 from ink.render.diff import _paint_initial, _visual_height, repaint_frame, write_diff
 from ink.render.terminal import Terminal
 
@@ -58,6 +59,12 @@ if TYPE_CHECKING:
     from ink.render.pipeline import RenderOptions
 
 __all__ = ["Instance"]
+
+# Root P: how many logical lines of flushed static text are retained for
+# the force_repaint static-tail redraw. Must comfortably exceed the
+# largest realistic viewport height (rows) so the redraw can always
+# refill the region above the frame.
+_STATIC_TAIL_MAX_LINES = 500
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +87,7 @@ class Instance:
         "static_lines",
         "_static_dirty",
         "_static_rows_approx",
+        "_static_tail_text",
         "_static_refs",
         "_unmounted",
         "_mount_complete",
@@ -90,6 +98,22 @@ class Instance:
         "_ctrl_c_dispose",
         "_size_signal",
         "_force_repaint",
+        # Root M (DSR Cursor Query) — see ``_query_cursor`` / ``_handle_cpr``.
+        # ``_cpr_event`` is signalled by the input thread when a CPR response
+        # arrives; ``_cpr_row`` holds the row reported by the terminal;
+        # ``_cpr_generation`` tags each DSR so stale responses (from a prior
+        # resize, arrived after another DSR was issued) can be discarded;
+        # ``_cpr_pending`` is the generation currently awaited (``None`` when
+        # no DSR is in flight); ``_cpr_lock`` guards all of those fields so
+        # ``_handle_cpr`` (running on the input thread) can acquire it
+        # without deadlocking against the painter thread's ``self._lock``
+        # (which is held across ``_paint_now`` → ``_query_cursor`` →
+        # ``_cpr_event.wait``).
+        "_cpr_event",
+        "_cpr_row",
+        "_cpr_generation",
+        "_cpr_pending",
+        "_cpr_lock",
         "_lock",
     )
 
@@ -119,6 +143,15 @@ class Instance:
         # new write and back to False once the paint loop has flushed.
         self.static_lines: list[str] = []
         self._static_dirty: bool = False
+        # Root P: verbatim copy of the most recent flushed static text
+        # (ANSI included), trimmed to the last ``_STATIC_TAIL_MAX_LINES``
+        # logical lines. ``_flush_static_and_frame`` is the only writer
+        # (every static byte to the terminal passes through it), and the
+        # ``force_repaint`` branch re-emits a height-budgeted suffix of
+        # it on resize so erasing the viewport is no longer destructive
+        # to static content. Cleared by ``reset_static`` (the user asked
+        # for a clear — a later resize must not resurrect the text).
+        self._static_tail_text: str = ""
         # Approximate count of terminal rows consumed by ALL flushed
         # static content (cumulative, never reset). Used to compute the
         # frame's available row budget so :func:`write_diff` can cap
@@ -167,7 +200,36 @@ class Instance:
         # to reset the terminal's passive-wrap state. Reading + clearing
         # happens inside ``_paint_now`` under ``self._lock``.
         self._force_repaint: bool = False
+        # Root M (DSR Cursor Query) state. ``_cpr_event`` bridges the input
+        # thread (which sees the CPR response) and whatever thread is running
+        # ``_paint_now`` (typically the resize-scheduled throttle thread).
+        # ``_cpr_row`` is written by ``_handle_cpr`` under ``self._cpr_lock``
+        # (a SEPARATE lock from ``self._lock`` — see its docstring for why);
+        # ``_cpr_event.wait()`` in ``_query_cursor`` wakes up and reads it.
+        # ``_cpr_generation`` is bumped on every DSR; ``_cpr_pending`` holds
+        # the generation the instance is currently waiting on (``None`` when
+        # not awaiting). See ``_query_cursor`` / ``_handle_cpr`` for the
+        # protocol details.
+        self._cpr_event: threading.Event = threading.Event()
+        self._cpr_row: int | None = None
+        self._cpr_generation: int = 0
+        self._cpr_pending: int | None = None
+        # Dedicated, non-reentrant lock for CPR coordination fields above.
+        # MUST be separate from ``self._lock``: ``_paint_now`` holds
+        # ``self._lock`` across the entire paint, including the call to
+        # ``_query_cursor``'s ``_cpr_event.wait(timeout=0.05)``. The
+        # input thread's ``_handle_cpr`` would deadlock trying to acquire
+        # ``self._lock`` if CPR state shared it. Using a dedicated lock
+        # means the painter's outer ``self._lock`` is irrelevant to the
+        # CPR protocol — no nested locking, no release/reacquire gymnastics.
+        self._cpr_lock = threading.Lock()
         self._lock = threading.RLock()
+        # Register the CPR handler on the terminal so the input loop can
+        # route CSI CPR responses here. The terminal's dispatcher checks
+        # ``_cpr_pending`` (via the registered handler's return value) to
+        # decide whether to consume the sequence as CPR or emit it as a
+        # normal key. See ``Terminal.set_cpr_callback``.
+        self.terminal.set_cpr_callback(self._handle_cpr)
 
     # ------------------------------------------------------------------
     # Public API
@@ -375,6 +437,7 @@ class Instance:
             # PyInk state reset.
             self.current_frame = ""
             self._static_rows_approx = 0
+            self._static_tail_text = ""
             self.static_lines.clear()
             self._static_dirty = False
             for static_ref in self._static_refs:
@@ -584,36 +647,76 @@ class Instance:
                 # erase + repaint that walks the cursor back to frame
                 # origin.
                 if force_repaint:
-                    # Root I: absolute cursor home + ``\x1b[0J`` (clear
-                    # viewport in place, NO scrollback push).
+                    # Root P (static tail redraw): erase the whole
+                    # viewport, redraw the retained static tail, then
+                    # paint the new frame bottom-anchored.
                     #
-                    # Root H tried ``\x1b[2J`` (CC-style) but Windows
-                    # Terminal pushes viewport content into scrollback
-                    # on ``\x1b[2J`` — duplicated the live frame into
-                    # scrollback and shoved pre-existing scrollback
-                    # further up out of view. CC avoids this by pairing
-                    # ``\x1b[2J`` with ``\x1b[3J`` (clear scrollback),
-                    # but we can't wipe scrollback — user wants native
-                    # scrollback preserved.
+                    # Supersedes Root O (DSR-anchored erase). Root O
+                    # derived ``erase_top`` from the post-rewrap cursor
+                    # row, but cpr_debug.log showed Windows Terminal's
+                    # horizontal reflow drifts the cursor wildly
+                    # (cursor_row 40-48 with rows=48 constant, earlier
+                    # 7-47). Every erase that overshot the old frame's
+                    # top permanently blanked static rows — PyInk never
+                    # repaints static — so the visible gap above the
+                    # frame grew monotonically (union of all historical
+                    # erase overshoots; the +2 margin alone ate 2 static
+                    # rows per resize even with a perfect cursor_row).
                     #
-                    # ``\x1b[1;1H`` (cursor to (0,0)) + ``\x1b[0J``
-                    # (clear cursor-to-end-of-viewport) blanks every
-                    # visible cell without scrolling. Scrollback is
-                    # untouched. Then absolute cursor-down to frame's
-                    # visual top, paint. Cursor parks at viewport bottom
-                    # (bottom-parked contract).
-                    #
-                    # Tradeoff: viewport-visible static content (last
-                    # few rows of conversation history that hadn't yet
-                    # scrolled into scrollback) is wiped on resize.
-                    # Scrollback itself preserved. Same tradeoff as CC
-                    # minus the scrollback wipe.
+                    # Root P makes the erase reversible: whatever static
+                    # we blank, we immediately redraw from
+                    # ``_static_tail_text``. The cursor row is no longer
+                    # an input to any computation, so WT's reflow quirks
+                    # (pending-wrap resolution, blank-line reclamation)
+                    # can't corrupt the layout. DSR is not sent.
+                    visual_h_new = _visual_height(new_frame, cols or 80)
+                    new_frame_top = max(1, (rows or 1) - visual_h_new + 1)
+                    # Rows above the frame available for static. One row
+                    # of safety margin: ``_visual_height`` may
+                    # under-estimate (emoji/CJK width drift, Root J/K/L
+                    # lesson), and an over-tall static redraw would end
+                    # up hidden behind the frame — bounded blank rows
+                    # are the safe failure direction.
+                    budget = new_frame_top - 1
+                    static_suffix, static_h = self._select_static_tail(
+                        max(0, budget - 1), cols or 80
+                    )
                     self.stdout.write("\x1b[1;1H\x1b[0J")
-                    visual_h = _visual_height(new_frame, cols or 80)
-                    frame_top = max(0, (rows or 1) - visual_h)
-                    if frame_top > 0:
-                        self.stdout.write(f"\x1b[{frame_top}B")
-                    _paint_initial(new_frame, self.stdout)
+                    if static_suffix:
+                        # Bottom-anchor the suffix directly above the
+                        # frame so the newest static line stays adjacent
+                        # to it; under-estimates surface as blank rows
+                        # at the viewport top, never as lost messages.
+                        start_row = max(1, budget - static_h + 1)
+                        self.stdout.write(f"\x1b[{start_row};1H")
+                        self.stdout.write(static_suffix)
+                        # The suffix may cut a logical line that opened
+                        # an SGR style whose reset lies outside the
+                        # retained window — don't let it bleed into the
+                        # frame paint.
+                        self.stdout.write("\x1b[0m")
+                    if new_frame:
+                        self.stdout.write(f"\x1b[{new_frame_top};1H")
+                        _paint_initial(new_frame, self.stdout)
+                    else:
+                        self.stdout.write("\r")
+                    # The frame now occupies [new_frame_top, rows];
+                    # everything above counts as static for the
+                    # cursor-up cap on later diff paints.
+                    self._static_rows_approx = budget
+                    frame_top = new_frame_top  # for diagnostic log
+                    visual_h = visual_h_new  # for diagnostic log
+                    branch = "root_p"
+                    self._cpr_debug_log(
+                        "force_repaint",
+                        cols=cols,
+                        rows=rows,
+                        visual_h=visual_h,
+                        frame_top=frame_top,
+                        branch=branch,
+                        static_h=static_h,
+                        new_frame_repr=(new_frame[:80].replace("\n", "\\n") if new_frame else ""),
+                    )
                 elif height_delta >= 1 and available_rows:
                     repaint_frame(
                         prev_frame, new_frame, self.stdout, available_rows, cols,
@@ -668,12 +771,52 @@ class Instance:
         # calls can cap cursor-UP movements and avoid the viewport-clamp
         # cursor drift (see ``_static_rows_approx`` docstring).
         self._static_rows_approx += static_text.count("\n")
+        # Root P: retain the raw text for the force_repaint static-tail
+        # redraw. Appending to one string (rather than a line list)
+        # handles chunks that don't end on a line boundary — a trailing
+        # partial line is continued by the next chunk automatically.
+        self._static_tail_text += static_text
+        tail_lines = self._static_tail_text.split("\n")
+        if len(tail_lines) > _STATIC_TAIL_MAX_LINES:
+            self._static_tail_text = "\n".join(tail_lines[-_STATIC_TAIL_MAX_LINES:])
         # Step 3 — paint the new frame from the cursor's current position.
         if new_frame:
             write_diff(None, new_frame, self.stdout)
         else:
             # No live frame — emit CR so subsequent paints start at col 1.
             self.stdout.write("\r")
+
+    def _select_static_tail(self, budget: int, cols: int) -> tuple[str, int]:
+        """Pick a suffix of the retained static text that fits ``budget``.
+
+        Returns ``(text, visual_height_estimate)``. Walks the retained
+        logical lines from newest to oldest, accumulating per-line wrap
+        height, and stops before the first line that would exceed the
+        budget. Under-selection is deliberate: the failure mode of an
+        over-estimated line is a few blank rows at the viewport top,
+        while an over-tall selection would slide behind the live frame
+        and hide the newest messages.
+
+        A single trailing newline is stripped before splitting so the
+        newest real content line (not a phantom empty line) anchors the
+        bottom of the redraw.
+        """
+        if budget <= 0 or not self._static_tail_text:
+            return "", 0
+        text = self._static_tail_text
+        if text.endswith("\n"):
+            text = text[:-1]
+        lines = text.split("\n")
+        chosen: list[str] = []
+        height = 0
+        for line in reversed(lines):
+            line_h = max(1, (string_width(line) + cols - 1) // cols)
+            if height + line_h > budget:
+                break
+            chosen.append(line)
+            height += line_h
+        chosen.reverse()
+        return "\n".join(chosen), height
         self.stdout.flush()
 
     def _resolve_columns(self) -> int:
@@ -687,6 +830,138 @@ class Instance:
         if isinstance(override, int) and override > 0:
             return override
         return self.terminal.rows
+
+    # ------------------------------------------------------------------
+    # Root M (DSR Cursor Query) — CPR protocol
+    # ------------------------------------------------------------------
+
+    def _query_cursor(self) -> int | None:
+        """Send DSR (``\\x1b[6n``) and wait for the terminal's CPR reply.
+
+        Returns the viewport-relative row (1-indexed) the terminal reports
+        as the cursor's current position, or ``None`` on timeout (50 ms).
+
+        Protocol:
+
+        1. Bump ``_cpr_generation`` and mark it pending. The input loop
+           will only honour a CPR response whose implicit generation
+           matches ``_cpr_pending`` — protecting against stale replies
+           from a previous DSR arriving after a newer one was issued
+           (the ConPTY reorder race; see ``research/cpr-validation.md``
+           §5 race-condition warning).
+        2. Clear ``_cpr_event`` and ``_cpr_row`` so a stale signal from
+           a previous query doesn't bleed in.
+        3. Write ``\\x1b[6n`` and flush. The terminal's reply
+           (``\\x1b[<row>;<col>R``) arrives on stdin; the input thread
+           parses it and calls :meth:`_handle_cpr`.
+        4. ``_cpr_event.wait(timeout=0.05)``. Windows Terminal's
+           end-to-end latency is typically 1–5 ms; 50 ms is generous.
+           On timeout we clear ``_cpr_pending`` (so a late CPR can't
+           poison a future query) and return ``None``.
+
+        The bottom-parked cursor invariant (every paint leaves the
+        cursor at the frame's last visual row) means the reported row
+        IS the new frame's bottom — callers derive the new frame's top
+        as ``max(0, cpr_row - visual_h_new)``.
+
+        Locking: this method may be called with ``self._lock`` held
+        (it usually is — ``_paint_now`` acquires it for the whole paint
+        and calls us from inside the ``force_repaint`` branch). The
+        wait therefore runs while ``self._lock`` is held; this is safe
+        ONLY because :meth:`_handle_cpr` does NOT acquire ``self._lock``
+        — it uses the dedicated ``self._cpr_lock`` instead. Sharing
+        ``self._lock`` here would deadlock the input thread (a separate
+        thread from the painter) for the duration of the 50 ms wait,
+        guaranteeing that every real-terminal force_repaint times out.
+        See ``_cpr_lock``'s docstring for the full rationale.
+        """
+        with self._cpr_lock:
+            self._cpr_event.clear()
+            self._cpr_row = None
+            self._cpr_generation += 1
+            self._cpr_pending = self._cpr_generation
+        try:
+            self.stdout.write("\x1b[6n")
+            self.stdout.flush()
+        except (ValueError, OSError):
+            # stdout closed during shutdown — treat as timeout.
+            with self._cpr_lock:
+                self._cpr_pending = None
+            return None
+        if self._cpr_event.wait(timeout=0.05):
+            return self._cpr_row
+        # Timeout. Clear pending so a late CPR (arriving after the
+        # timeout window) is discarded by ``_handle_cpr``'s generation
+        # check rather than corrupting a future query.
+        with self._cpr_lock:
+            self._cpr_pending = None
+        return None
+
+    def _handle_cpr(self, row: int, col: int) -> bool:
+        """Input-thread callback for a CSI CPR response.
+
+        Returns ``True`` when the response was consumed (i.e. the
+        instance was awaiting a CPR for the matching generation),
+        ``False`` when it should be treated as a regular keystroke
+        (no DSR in flight, or a stale generation arrived).
+
+        Thread coordination:
+
+        * Acquire ``self._cpr_lock`` (a dedicated lock, NOT the
+          painter's ``self._lock``) so reads of ``_cpr_pending`` and
+          writes of ``_cpr_row`` are atomic relative to ``_query_cursor``
+          on the painter thread. Using the painter's ``self._lock``
+          here would deadlock: ``_paint_now`` holds it across the
+          call to ``_query_cursor``'s ``_cpr_event.wait``. The input
+          thread (which runs this handler) is a different thread from
+          the painter, so it cannot re-enter the RLock — it would
+          block until the 50 ms timeout fires, guaranteeing every
+          real-terminal force_repaint hits the timeout fallback.
+        * If ``_cpr_pending is None`` (no DSR awaited) → return ``False``
+          so the terminal's dispatcher emits the sequence as a Key.
+          This preserves the safety default: a stray CPR from a
+          misbehaving terminal or a literal ``R`` keystroke is never
+          silently swallowed.
+        * Otherwise write ``_cpr_row``, clear ``_cpr_pending`` and
+          signal ``_cpr_event`` — the painter wakes up and reads
+          ``_cpr_row``.
+
+        Note: ``col`` is currently unused (Root M only needs the row)
+        but is accepted so the terminal's dispatcher signature stays
+        symmetric with the CPR wire format.
+        """
+        with self._cpr_lock:
+            if self._cpr_pending is None:
+                return False
+            self._cpr_row = row
+            self._cpr_pending = None
+        self._cpr_event.set()
+        return True
+
+    # TEMP Root M diagnostic — remove after cpr_debug.log analysis.
+    # Captures per-event data so we can correlate ``cpr_row`` vs
+    # ``new_rows`` and confirm (or rule out) the bottom-parked cursor
+    # invariant violation on Windows Terminal resize.
+    def _cpr_debug_log(self, event: str, **fields) -> None:
+        """TEMP diagnostic for Root M — remove after debug cycle completes."""
+        import datetime
+
+        path = (
+            r"D:/Projects/Jarvis/.trellis/tasks/"
+            r"07-24-resize-anchor-cursor-bottom/cpr_debug.log"
+        )
+        ts = datetime.datetime.now().isoformat(timespec="milliseconds")
+        parts = [f"event={event}", f"ts={ts}"]
+        for k, v in fields.items():
+            parts.append(f"{k}={v!r}")
+        line = " ".join(parts) + "\n"
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+        except OSError:
+            # Don't let logging break rendering (e.g. missing parent dir
+            # in CI / non-Jarvis consumers of PyInk).
+            pass
 
     def _dispose_render_loop_locked(self) -> None:
         """Stop the render-loop effect without touching ``current_frame``.
