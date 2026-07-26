@@ -51,7 +51,7 @@ from ink.core.signal import effect, signal
 from ink.hooks._box_metrics_runtime import bump_layout_epoch
 from ink.layout import clear_box_refs, layout, render_layout_to_string
 from ink.layout.measure import string_width
-from ink.render.diff import _paint_initial, _visual_height, repaint_frame, write_diff
+from ink.render.diff import _visual_height, repaint_frame, write_diff
 from ink.render.terminal import Terminal
 
 if TYPE_CHECKING:
@@ -720,8 +720,37 @@ class Instance:
                         parts.append("\x1b[0m")
                         self.stdout.write("".join(parts))
                     if new_frame:
-                        self.stdout.write(f"\x1b[{new_frame_top};1H")
-                        _paint_initial(new_frame, self.stdout)
+                        # Per-line CUP for the frame too — the WHOLE
+                        # force_repaint path must be free of
+                        # free-flowing output. ``_paint_initial`` walks
+                        # down with newlines, so a frame whose actual
+                        # height exceeds ``visual_h_new`` (emoji
+                        # statusbar wrap miscount — cpr_debug.log shows
+                        # visual_h flapping 4↔6 for the same content)
+                        # overruns the viewport bottom and SCROLLS,
+                        # dumping the just-redrawn static top rows into
+                        # the scrollback (observed: history incl. the
+                        # welcome banner duplicated after resize
+                        # storms). Absolute CUP caps every line at its
+                        # computed row; a wrapping line's overflow is
+                        # overwritten by the next line's CUP and the
+                        # last line's wrap stays pending at the
+                        # bottom-right corner — control sequences don't
+                        # resolve pending-wrap, so nothing scrolls.
+                        frame_parts: list[str] = []
+                        frame_row = new_frame_top
+                        for line in new_frame.split("\n"):
+                            frame_parts.append(f"\x1b[{frame_row};1H\x1b[2K")
+                            frame_parts.append(line)
+                            frame_row += max(
+                                1,
+                                (string_width(line) + (cols or 80) - 1)
+                                // (cols or 80),
+                            )
+                        # Park at column 1 of the last line's row
+                        # (bottom-parked contract for later diff paints).
+                        frame_parts.append("\r")
+                        self.stdout.write("".join(frame_parts))
                     else:
                         self.stdout.write("\r")
                     # The frame now occupies [new_frame_top, rows];

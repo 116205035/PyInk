@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — frame paint in force_repaint is per-line CUP too (Root P.2)
+
+Symptom: after Root P.1, scrollback still gained duplicate history
+(including the welcome banner) during resize storms. Root P.1 made the
+static redraw per-line CUP but left the frame paint on
+``_paint_initial``'s free-flowing newline walk: a frame whose actual
+height exceeds ``visual_h_new`` (emoji statusbar wrap miscount —
+cpr_debug.log shows visual_h flapping 4↔6 for the same content)
+overran the viewport bottom, scrolled, and dumped the just-redrawn
+static top rows into the scrollback.
+
+Fix: the force_repaint frame paint now positions every frame line with
+an absolute CUP + ``\x1b[2K``, advancing rows by estimated wrap height
+and parking with a final ``\r``. The entire force_repaint byte stream
+is now free of newlines: no emission can run off the bottom edge, so
+scrolling during a resize repaint is structurally impossible end to
+end. The regression test asserts per-line CUP for both static and
+frame lines and that no bare ``\n`` appears in the repaint.
+
 ### Fixed — Root P static redraw is per-line CUP positioned (scroll-pollution regression)
 
 Symptom: after Root P, repeated alternating resize left **duplicated

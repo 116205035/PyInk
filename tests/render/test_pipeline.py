@@ -803,8 +803,16 @@ def test_force_repaint_root_p_static_redraw_cannot_scroll() -> None:
     Contract: every static line is preceded by an absolute CUP, a
     wrapping line advances the next CUP by its estimated height, and
     no bare ``\\n`` appears between the erase and the frame paint.
+    The frame itself is painted per-line CUP as well (Root P.2) — a
+    free-flowing frame whose emoji statusbar wraps past
+    ``visual_h_new`` scrolls and dumps the redrawn static into
+    scrollback (observed: history incl. the welcome banner duplicated).
     """
-    inst, out = _render_silent(Text("fixed"), columns=20, rows=10)
+    inst, out = _render_silent(
+        Box(Text("line-a"), Text("line-b"), flexDirection="column"),
+        columns=20,
+        rows=10,
+    )
     try:
         # wide = 45 chars → wraps to ceil(45/20) = 3 rows at cols=20.
         inst.write_static("top\n" + "w" * 45 + "\nlast\n")  # type: ignore[attr-defined]
@@ -813,18 +821,26 @@ def test_force_repaint_root_p_static_redraw_cannot_scroll() -> None:
         inst._force_repaint = True  # type: ignore[attr-defined]
         inst._paint_now()  # type: ignore[attr-defined]
         repaint = out.getvalue()
-        # budget = 9, selection budget = 8; heights: last=1, wide=3,
-        # top=1 → all fit, static_h = 5, start_row = 9 - 5 + 1 = 5.
-        # Rows: top@5, wide@6 (occupies est. 6-8), last@9.
-        assert "\x1b[5;1Htop" in repaint, (
-            f"expected top at row 5, got: {repaint!r}"
+        # frame visual_h = 2 → frame_top = 9, budget = 8, selection
+        # budget = 7; heights: last=1, wide=3, top=1 → static_h = 5,
+        # start_row = 8 - 5 + 1 = 4.
+        # Rows: top@4, wide@5 (occupies est. 5-7), last@8.
+        assert "\x1b[4;1Htop" in repaint, (
+            f"expected top at row 4, got: {repaint!r}"
         )
-        assert f"\x1b[6;1H{'w' * 45}" in repaint, (
-            f"expected wide line at row 6, got: {repaint!r}"
+        assert f"\x1b[5;1H{'w' * 45}" in repaint, (
+            f"expected wide line at row 5, got: {repaint!r}"
         )
-        assert "\x1b[9;1Hlast" in repaint, (
-            f"expected last at row 9 (wide line advanced 3 rows), "
+        assert "\x1b[8;1Hlast" in repaint, (
+            f"expected last at row 8 (wide line advanced 3 rows), "
             f"got: {repaint!r}"
+        )
+        # Frame lines painted per-line CUP at rows 9 and 10.
+        assert "\x1b[9;1H\x1b[2Kline-a" in repaint, (
+            f"expected frame line-a at row 9, got: {repaint!r}"
+        )
+        assert "\x1b[10;1H\x1b[2Kline-b" in repaint, (
+            f"expected frame line-b at row 10, got: {repaint!r}"
         )
         # No free-flowing newline anywhere in the repaint — newlines are
         # what lets an over-tall emission scroll the terminal.
