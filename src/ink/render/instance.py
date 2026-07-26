@@ -708,27 +708,11 @@ class Instance:
                         for line in static_lines:
                             parts.append(f"\x1b[{row};1H")
                             parts.append(line)
-                            w = string_width(line)
-                            if w and w % (cols or 80) == 0:
-                                # The line fills its last visual row
-                                # exactly, leaving the cursor in
-                                # pending-wrap. Left unresolved (the next
-                                # op is a CUP, not text), Windows
-                                # Terminal keeps the row's soft-wrap flag
-                                # set and its reflow will JOIN the next
-                                # row into this one on grow / re-split on
-                                # shrink — the glued mega-line fragments
-                                # seen in scrollback after resize storms
-                                # (long table rows of width 87/90/94 hit
-                                # exact multiples at common widths).
-                                # ``\r\n`` resolves the wrap as a HARD
-                                # line end, mirroring ``_paint_initial``.
-                                # Safe: the estimate is exact for these
-                                # lines, so the cursor sits at
-                                # ``row + h - 1 <= budget < rows`` —
-                                # never the bottom row, never a scroll.
-                                parts.append("\r\n")
-                            row += max(1, (w + (cols or 80) - 1) // (cols or 80))
+                            row += max(
+                                1,
+                                (string_width(line) + (cols or 80) - 1)
+                                // (cols or 80),
+                            )
                         # The suffix may cut a logical line that opened
                         # an SGR style whose reset lies outside the
                         # retained window — don't let it bleed into the
@@ -755,24 +739,14 @@ class Instance:
                         # resolve pending-wrap, so nothing scrolls.
                         frame_parts: list[str] = []
                         frame_row = new_frame_top
-                        frame_lines = new_frame.split("\n")
-                        for i, line in enumerate(frame_lines):
+                        for line in new_frame.split("\n"):
                             frame_parts.append(f"\x1b[{frame_row};1H\x1b[2K")
                             frame_parts.append(line)
-                            w = string_width(line)
-                            if (
-                                i < len(frame_lines) - 1
-                                and w
-                                and w % (cols or 80) == 0
-                            ):
-                                # Same pending-wrap hard-break as the
-                                # static loop above — but never on the
-                                # LAST frame line: that one can end on
-                                # the viewport's bottom row, where a
-                                # newline would scroll. It keeps the
-                                # bare ``\r`` park below.
-                                frame_parts.append("\r\n")
-                            frame_row += max(1, (w + (cols or 80) - 1) // (cols or 80))
+                            frame_row += max(
+                                1,
+                                (string_width(line) + (cols or 80) - 1)
+                                // (cols or 80),
+                            )
                         # Park at column 1 of the last line's row
                         # (bottom-parked contract for later diff paints).
                         frame_parts.append("\r")

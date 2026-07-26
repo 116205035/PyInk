@@ -6,36 +6,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed — exact-full-width redraw lines get a hard break (Root P.3)
-
-Symptom: after alternating resizes, scrollback showed **glued mega-line
-fragments** — long table content joined by huge space runs and
-re-split at odd columns. Concentrated in the newest history (the
-retained-tail redraw window) and specifically in long markdown table
-rows (widths 87/90/94 — exactly the common terminal widths passed
-through during a resize storm).
-
-Cause: the Root P.1 per-line CUP redraw never emits newlines. A line
-whose display width is an exact multiple of ``cols`` fills its last
-visual row and leaves the cursor in pending-wrap; with only a CUP
-following, the wrap is never resolved and Windows Terminal keeps the
-row's soft-wrap flag set. WT's reflow then JOINs the following row
-into it on grow (trailing blank cells become the giant space runs) and
-re-splits on shrink — cascading into the observed corruption. Normal
-paints never hit this because ``_paint_initial`` separates every row
-with ``\r\n`` (a hard break that resolves the wrap).
-
-Fix: in the force_repaint static + frame loops, lines with
-``width % cols == 0`` are followed by ``\r\n``. This is scroll-safe by
-construction: the height estimate is exact for such lines, so the
-cursor sits at ``row + h - 1 <= budget < rows`` — never the bottom
-row. The final frame line is exempt (it may end on the bottom row; it
-keeps the bare ``\r`` park).
-
-Validation: regression test asserts exact-full lines get ``\r\n`` and
-non-exact lines don't; the P.1 no-bare-newline invariant still holds
-for estimated lines.
-
 ### Fixed — frame paint in force_repaint is per-line CUP too (Root P.2)
 
 Symptom: after Root P.1, scrollback still gained duplicate history

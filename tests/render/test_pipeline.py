@@ -851,47 +851,6 @@ def test_force_repaint_root_p_static_redraw_cannot_scroll() -> None:
         inst.unmount()  # type: ignore[attr-defined]
 
 
-def test_force_repaint_root_p_exact_full_lines_get_hard_break() -> None:
-    """Root P.3: a static line whose display width is an EXACT multiple
-    of ``cols`` fills its last visual row, leaving the cursor in
-    pending-wrap. If the wrap is not resolved (the next op is a CUP),
-    Windows Terminal keeps the row's soft-wrap flag and its reflow
-    later JOINs the next row into it on grow / re-splits on shrink —
-    the glued mega-line table fragments observed in scrollback after
-    resize storms (table rows of width 87/90/94 hitting exact terminal
-    widths mid-storm).
-
-    Contract: exact-full lines are followed by ``\\r\\n`` (hard break,
-    mirroring ``_paint_initial``); other lines are not. The ``\\r\\n``
-    is scroll-safe because the estimate is exact for these lines
-    (cursor at ``row + h - 1 <= budget < rows`` — never the bottom).
-    """
-    inst, out = _render_silent(Text("fixed"), columns=20, rows=10)
-    try:
-        # exact = 40 chars → 40 % 20 == 0 → 2 full visual rows.
-        # partial = 45 chars → 45 % 20 != 0 → no hard break.
-        inst.write_static("x" * 40 + "\n" + "y" * 45 + "\n")  # type: ignore[attr-defined]
-        out.truncate(0)
-        out.seek(0)
-        inst._force_repaint = True  # type: ignore[attr-defined]
-        inst._paint_now()  # type: ignore[attr-defined]
-        repaint = out.getvalue()
-        # frame_top = 10, budget = 9, selection budget = 8; heights:
-        # y-line = 3, x-line = 2 → static_h = 5, start_row = 9-5+1 = 5.
-        assert f"\x1b[5;1H{'x' * 40}\r\n" in repaint, (
-            f"exact-full line must be followed by \\r\\n, got: {repaint!r}"
-        )
-        assert f"\x1b[7;1H{'y' * 45}" in repaint, (
-            f"partial line at row 7, got: {repaint!r}"
-        )
-        # The partial line must NOT be followed by \r\n.
-        assert f"{'y' * 45}\r\n" not in repaint, (
-            f"non-exact line must not get \\r\\n, got: {repaint!r}"
-        )
-    finally:
-        inst.unmount()  # type: ignore[attr-defined]
-
-
 def test_force_repaint_root_p_does_not_query_cursor() -> None:
     """Root P: the post-reflow cursor position is NOT an input to any
     computation (WT's cursor drifts on reflow — that was Root O's fatal
