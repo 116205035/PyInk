@@ -149,8 +149,20 @@ def Static(
             # Each item is written on its own line; the trailing newline
             # ensures the next frame's first row lands below the new text.
             payload = "\n".join(chunks) + "\n"
-            inst.write_static(payload)
+            # Mark BEFORE writing. ``write_static`` paints synchronously,
+            # and the paint writes the instance ``_size_signal`` — a
+            # signal this effect is subscribed to (``render_item`` reads
+            # it transitively, e.g. via a ``use_window_size`` columns
+            # probe). On the first paint that write notifies, re-entering
+            # ``_flush`` *before* the counter update below would run —
+            # the re-entrant pass would see ``start == 0`` and flush the
+            # entire history a second time (observed: Jarvis startup
+            # showed banner + full history twice). Marking first makes
+            # the re-entrant run see ``len(current) <= start`` and
+            # return; a write failure degrades to skipped items rather
+            # than a duplicated transcript.
             last_flushed.value = len(current)
+            inst.write_static(payload)
 
         # The effect runs synchronously on mount (flushing the initial
         # items) and re-runs whenever a reactive source changes. It is

@@ -299,6 +299,56 @@ def test_instance_write_static_empty_is_noop() -> None:
     inst.unmount()
 
 
+def test_static_marks_flushed_before_write_static() -> None:
+    """Regression (Jarvis startup duplicate history): ``_flush`` must
+    update ``last_flushed`` BEFORE calling ``inst.write_static``.
+
+    ``write_static`` paints synchronously, and that paint writes the
+    instance ``_size_signal`` (``(0,0) → (cols, rows)`` on the very
+    first paint — a real change, so subscribers are notified). The
+    ``_flush`` effect subscribes to that signal transitively whenever
+    ``render_item`` reads it (e.g. a ``use_window_size`` columns probe).
+    PyInk effects re-run *synchronously* on notification, so the
+    re-entrant ``_flush`` used to fire before the counter update and
+    flush the entire item list a second time — Jarvis showed the
+    welcome banner + full history twice on every startup.
+
+    This test has ``render_item`` read ``_size_signal`` directly so the
+    first flush reproduces the re-entrancy; every item must still be
+    written exactly once.
+    """
+    from ink.hooks._runtime import _get_current_instance
+
+    def App() -> Any:
+        def _render(item: Any, idx: int) -> Any:
+            inst = _get_current_instance()
+            # Subscribe _flush to the instance size signal (the read
+            # mirrors Jarvis's ``_columns_fn`` → ``use_window_size``).
+            cols = (
+                inst._size_signal.value[0]  # type: ignore[attr-defined]
+                if inst is not None
+                else 0
+            )
+            return Text(f"item{idx}-w{cols}")
+
+        return Box(
+            Static(["a", "b", "c", "d", "e"], _render),
+            Text("frame"),
+            flexDirection="column",
+        )
+
+    inst, out = _render_silent(App(), columns=20, rows=10)
+    try:
+        written = out.getvalue()
+        for i in range(5):
+            assert written.count(f"item{i}") == 1, (
+                f"item{i} flushed {written.count(f'item{i}')} times "
+                f"(re-entrant double flush), output: {written!r}"
+            )
+    finally:
+        inst.unmount()
+
+
 def test_instance_write_static_after_unmount_is_silent() -> None:
     inst, _out = _render_silent(Text("frame"), columns=20, rows=3)
     inst.unmount()
