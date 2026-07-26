@@ -738,8 +738,10 @@ def test_force_repaint_root_p_redraws_static_tail_above_frame() -> None:
 
     rows=10, frame visual_h=1 → frame_top=10, budget=9, selection
     budget=8 (1 safety row). Three 1-row static lines fit → static_h=3,
-    ``start_row = 9 - 3 + 1 = 7``. Emission order must be: viewport
-    erase → CUP(7) → static text → CUP(10) → frame.
+    ``start_row = 9 - 3 + 1 = 7``. Each line is emitted with its own
+    absolute CUP (never a free-flowing ``\\n`` stream — see the
+    scroll-pollution regression test below). Emission order must be:
+    viewport erase → static lines (rows 7,8,9) → CUP(10) → frame.
     """
     inst, out = _render_silent(Text("fixed"), columns=20, rows=10)
     try:
@@ -749,8 +751,8 @@ def test_force_repaint_root_p_redraws_static_tail_above_frame() -> None:
         inst._force_repaint = True  # type: ignore[attr-defined]
         inst._paint_now()  # type: ignore[attr-defined]
         repaint = out.getvalue()
-        assert "\x1b[7;1Hmsg1\nmsg2\nmsg3" in repaint, (
-            f"expected static tail redrawn at row 7, got: {repaint!r}"
+        assert "\x1b[7;1Hmsg1\x1b[8;1Hmsg2\x1b[9;1Hmsg3" in repaint, (
+            f"expected per-line CUP static redraw at rows 7-9, got: {repaint!r}"
         )
         i_erase = repaint.index("\x1b[1;1H\x1b[0J")
         i_static = repaint.index("\x1b[7;1Hmsg1")
@@ -778,11 +780,56 @@ def test_force_repaint_root_p_static_tail_respects_budget() -> None:
         repaint = out.getvalue()
         # frame_top = 5, budget = 4, selection budget = 3 → newest 3
         # lines (m7..m9), start_row = 4 - 3 + 1 = 2.
-        assert "\x1b[2;1Hm7\nm8\nm9" in repaint, (
-            f"expected newest 3 lines redrawn at row 2, got: {repaint!r}"
+        assert "\x1b[2;1Hm7\x1b[3;1Hm8\x1b[4;1Hm9" in repaint, (
+            f"expected newest 3 lines redrawn at rows 2-4, got: {repaint!r}"
         )
-        assert "m6\n" not in repaint, (
+        assert "m6" not in repaint, (
             f"m6 must be dropped (over budget), got: {repaint!r}"
+        )
+    finally:
+        inst.unmount()  # type: ignore[attr-defined]
+
+
+def test_force_repaint_root_p_static_redraw_cannot_scroll() -> None:
+    """Regression: the static redraw must be scroll-proof by
+    construction. Retained lines were rendered at an older (usually
+    wider) width, so after a shrink they re-wrap and ``_visual_height``'s
+    cumulative estimate error over a full-viewport suffix is unbounded.
+    A free-flowing ``\\n`` emission that overruns the viewport bottom
+    SCROLLS — dumping the redrawn duplicate content into scrollback
+    (observed: markdown table fragments multiplying at several widths
+    in mid-scrollback after repeated resize).
+
+    Contract: every static line is preceded by an absolute CUP, a
+    wrapping line advances the next CUP by its estimated height, and
+    no bare ``\\n`` appears between the erase and the frame paint.
+    """
+    inst, out = _render_silent(Text("fixed"), columns=20, rows=10)
+    try:
+        # wide = 45 chars → wraps to ceil(45/20) = 3 rows at cols=20.
+        inst.write_static("top\n" + "w" * 45 + "\nlast\n")  # type: ignore[attr-defined]
+        out.truncate(0)
+        out.seek(0)
+        inst._force_repaint = True  # type: ignore[attr-defined]
+        inst._paint_now()  # type: ignore[attr-defined]
+        repaint = out.getvalue()
+        # budget = 9, selection budget = 8; heights: last=1, wide=3,
+        # top=1 → all fit, static_h = 5, start_row = 9 - 5 + 1 = 5.
+        # Rows: top@5, wide@6 (occupies est. 6-8), last@9.
+        assert "\x1b[5;1Htop" in repaint, (
+            f"expected top at row 5, got: {repaint!r}"
+        )
+        assert f"\x1b[6;1H{'w' * 45}" in repaint, (
+            f"expected wide line at row 6, got: {repaint!r}"
+        )
+        assert "\x1b[9;1Hlast" in repaint, (
+            f"expected last at row 9 (wide line advanced 3 rows), "
+            f"got: {repaint!r}"
+        )
+        # No free-flowing newline anywhere in the repaint — newlines are
+        # what lets an over-tall emission scroll the terminal.
+        assert "\n" not in repaint, (
+            f"repaint must not contain bare \\n (scroll risk), got: {repaint!r}"
         )
     finally:
         inst.unmount()  # type: ignore[attr-defined]

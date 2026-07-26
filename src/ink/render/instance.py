@@ -678,23 +678,47 @@ class Instance:
                     # up hidden behind the frame — bounded blank rows
                     # are the safe failure direction.
                     budget = new_frame_top - 1
-                    static_suffix, static_h = self._select_static_tail(
+                    static_lines, static_h = self._select_static_tail(
                         max(0, budget - 1), cols or 80
                     )
                     self.stdout.write("\x1b[1;1H\x1b[0J")
-                    if static_suffix:
+                    if static_lines:
                         # Bottom-anchor the suffix directly above the
                         # frame so the newest static line stays adjacent
                         # to it; under-estimates surface as blank rows
                         # at the viewport top, never as lost messages.
                         start_row = max(1, budget - static_h + 1)
-                        self.stdout.write(f"\x1b[{start_row};1H")
-                        self.stdout.write(static_suffix)
+                        # Per-line absolute CUP — NEVER a free-flowing
+                        # "\n" stream. The retained lines were rendered
+                        # at some older width, so after a shrink most of
+                        # them re-wrap and ``_visual_height``'s
+                        # cumulative error over a full-viewport suffix
+                        # is unbounded: a free-flowing emission that
+                        # overruns the viewport bottom SCROLLS, dumping
+                        # the redrawn (duplicate) content into the
+                        # scrollback — the "table fragments multiplying
+                        # at several widths in mid-scrollback" bug.
+                        # Absolute positioning makes overrun impossible:
+                        # a mis-estimated line lands on a slightly wrong
+                        # row inside the viewport (self-heals on the
+                        # next repaint) but the cursor can never run off
+                        # the bottom edge, so scrollback stays pristine.
+                        parts: list[str] = []
+                        row = start_row
+                        for line in static_lines:
+                            parts.append(f"\x1b[{row};1H")
+                            parts.append(line)
+                            row += max(
+                                1,
+                                (string_width(line) + (cols or 80) - 1)
+                                // (cols or 80),
+                            )
                         # The suffix may cut a logical line that opened
                         # an SGR style whose reset lies outside the
                         # retained window — don't let it bleed into the
                         # frame paint.
-                        self.stdout.write("\x1b[0m")
+                        parts.append("\x1b[0m")
+                        self.stdout.write("".join(parts))
                     if new_frame:
                         self.stdout.write(f"\x1b[{new_frame_top};1H")
                         _paint_initial(new_frame, self.stdout)
@@ -786,10 +810,10 @@ class Instance:
             # No live frame — emit CR so subsequent paints start at col 1.
             self.stdout.write("\r")
 
-    def _select_static_tail(self, budget: int, cols: int) -> tuple[str, int]:
+    def _select_static_tail(self, budget: int, cols: int) -> tuple[list[str], int]:
         """Pick a suffix of the retained static text that fits ``budget``.
 
-        Returns ``(text, visual_height_estimate)``. Walks the retained
+        Returns ``(lines, visual_height_estimate)``. Walks the retained
         logical lines from newest to oldest, accumulating per-line wrap
         height, and stops before the first line that would exceed the
         budget. Under-selection is deliberate: the failure mode of an
@@ -802,7 +826,7 @@ class Instance:
         bottom of the redraw.
         """
         if budget <= 0 or not self._static_tail_text:
-            return "", 0
+            return [], 0
         text = self._static_tail_text
         if text.endswith("\n"):
             text = text[:-1]
@@ -816,7 +840,7 @@ class Instance:
             chosen.append(line)
             height += line_h
         chosen.reverse()
-        return "\n".join(chosen), height
+        return chosen, height
         self.stdout.flush()
 
     def _resolve_columns(self) -> int:

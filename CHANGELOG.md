@@ -6,6 +6,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — Root P static redraw is per-line CUP positioned (scroll-pollution regression)
+
+Symptom: after Root P, repeated alternating resize left **duplicated
+markdown table fragments at several widths plus stray blank holes in
+mid-scrollback**. Cause: the static-tail redraw was emitted as a
+free-flowing ``\n`` stream sized by ``_visual_height`` — but the
+retained lines were rendered at an older (wider) width, so after a
+shrink they re-wrap and the cumulative estimate error over a
+full-viewport suffix (43+ rows) regularly exceeded the safety margin.
+The over-tall emission overran the viewport bottom and SCROLLED,
+dumping the redrawn duplicate content into the scrollback — once per
+resize event, at each event's width.
+
+Fix: the redraw now positions every static line with an absolute CUP
+(``\x1b[{row};1H``) instead of newline separators, advancing the row
+by each line's estimated wrap height. A mis-estimated line lands on a
+slightly wrong row inside the viewport (self-heals on the next
+repaint), but the cursor can never run off the bottom edge — scrolling
+during the redraw is structurally impossible, so scrollback stays
+pristine. ``_select_static_tail`` now returns the chosen lines as a
+list to support per-line positioning.
+
+Validation: regression test asserts per-line CUP emission, wrap-aware
+row advancement, and that no bare ``\n`` appears in the repaint byte
+stream.
+
 ### Fixed — resize no longer eats static: erase whole viewport + redraw retained static tail (Root P)
 
 Symptom: after Root O, every horizontal shrink made the blank gap
