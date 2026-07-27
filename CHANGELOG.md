@@ -6,6 +6,47 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — StructuredDiff wrap continuation carries indent + bg gutter + sigil
+
+Symptom: when a `+` / `-` row in `StructuredDiff` (full-width-bg mode)
+wrapped to a second visual row, the continuation landed at column 0 —
+losing the parent `⎿` indent, the line-number gutter column, AND the
+`+` / `-` sigil. The wrapped tail was visually misaligned with both
+the parent gutter above and the first row's body column. Surfaced in
+Jarvis's TUI as Edit/Write diffs with long lines wrapping underneath
+the `⎿` gutter to the leftmost column.
+
+Cause: `_build_full_width_bg_row._render`'s wrap-aware continuation
+branch emitted `<bg_open><chunk_body><pad><reset>` — no prefix, no
+gutter, no sigil. The first visual row's prefix + gutter were
+intentionally dropped on continuation under the assumption that the
+parent `⎿` "stays on row 1", but that left the wrapped chunk
+unanchored.
+
+Fix: continuation rows now emit
+`<indent><bg_open><cont_gutter><chunk_body><pad><reset>` where
+`<indent>` is the 5-space continuation indent (the parent `⎿` glyph
+from `first_row_prefix` is NOT extended to continuation — CC parity:
+CC's `⎿` is a separate flex child that doesn't extend down) and
+`<cont_gutter>` is `(gutter_w - 1)` bg-filled spaces + the sigil byte
+(so the body chunk column-aligns with the first row's body). When
+`gutter_w == 0` (no `line_numbers` prop), the gutter and sigil are
+omitted — matches PyInk's existing no-gutter first-row semantics.
+
+CC reference: `claude-code/src/components/StructuredDiff/Fallback.tsx:395-419`
+renders `lineNumStr` (all spaces on continuation) + sigil on every
+visual row, with the parent `⎿` rendered as a separate flex child in
+`MessageResponse.tsx:21-37` that doesn't extend down. PyInk achieves
+the same visual via in-band ANSI (single Text leaf per row) rather
+than separate flex children.
+
+Tests: `test_wrap_continuation_carries_prefix_indent_and_aligned_gutter`
+covers the Jarvis scenario (`indent` + `first_row_prefix` + bg_color +
+wrap). Existing `test_line_numbers_gutter_only_on_first_visual_row_when_wrapped`
+updated to assert CC parity (continuation DOES carry bg-filled gutter
+spaces + sigil). Spec: `spec/frontend/rendering-contracts.md` Section
+3 byte-layout + Tests Required updated.
+
 ### Fixed — frame paint in force_repaint is per-line CUP too (Root P.2)
 
 Symptom: after Root P.1, scrollback still gained duplicate history

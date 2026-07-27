@@ -318,15 +318,38 @@ would apply bg to every cell the leaf touches, including the row's
 prefix area (parent `⎿` gutter), which must keep the default terminal
 bg.
 
-Byte-layout for a wrapped row (`src/ink/externals/diff.py:1039-1105`):
+Byte-layout for a wrapped row (`src/ink/externals/diff.py`,
+`_build_full_width_bg_row._render`'s wrap-aware path):
 
 ```
 <line 1>  <prefix><bg_open><gutter><chunk_body><pad spaces><reset>
-<line 2>  <bg_open><chunk_body><pad spaces><reset>
-<line 3>  <bg_open><chunk_body><pad spaces><reset>
+<line 2>  <indent><bg_open><cont_gutter><chunk_body><pad spaces><reset>
+<line 3>  <indent><bg_open><cont_gutter><chunk_body><pad spaces><reset>
 ```
 
-Two non-obvious tricks:
+where:
+
+- `<prefix>` is `first_row_prefix` for the FIRST body entry's first
+  visual row (e.g. Jarvis's `  ⎿  ` parent gutter), or `indent` for
+  any other entry's first visual row.
+- `<indent>` is the continuation indent (e.g. `     ` 5 spaces), used
+  on every continuation visual row regardless of whether the entry is
+  the first body entry or a subsequent one. The parent `⎿` glyph does
+  NOT extend to continuation rows (CC parity: CC's `⎿` is a separate
+  flex child in `MessageResponse.tsx:21-37` that doesn't extend down
+  — col 0-4 are empty on continuation; PyInk's 5-space `indent`
+  simulates that empty column in-band).
+- `<gutter>` on the first visual row is the full gutter string
+  (`num_str + sigil`, width `gutter_w`). `<cont_gutter>` on
+  continuation rows is `(gutter_w - 1)` bg-filled spaces + the sigil
+  byte (same total width `gutter_w`). The sigil is ALWAYS rendered
+  (CC parity: CC's `Fallback.tsx:399,412-413` keeps the `+`/`-`/` `
+  sigil on every visual row so the reader can tell which diff row a
+  wrapped tail belongs to). When `gutter_w == 0` (no `line_numbers`
+  prop), neither gutter nor sigil is rendered — matches PyInk's
+  no-gutter first-row path.
+
+Three non-obvious tricks:
 
 1. **Trailing reset as pad-shield.** Each visual row's chunk + trailing
    pad ends with its OWN `\x1b[0m` reset. The reset byte at the very
@@ -334,9 +357,16 @@ Two non-obvious tricks:
    is a non-whitespace byte, so the preceding pad spaces survive the
    strip and the bg band fills `target_w` on every visual row. Without
    this, wrapped rows would lose their right-side bg fill.
-2. **Bg re-open per continuation row.** Each continuation row re-opens
-   the bg SGR (`\x1b[48;...m`) at column 0 so the band is active from
-   the start of the row, not just from the chunk's first character.
+2. **Bg re-open after the indent.** Each continuation row opens with
+   `<indent>` (default terminal bg, no SGR) and THEN `<bg_open>` so
+   the bg band activates at column `indent_w` (col 5 in Jarvis's
+   case), not column 0. The indent bytes keep the default terminal
+   bg — matching CC's "parent gutter stays default-bg" rule.
+3. **Continuation gutter spaces + sigil.** The gutter column on
+   continuation is `(gutter_w - 1)` spaces + the sigil byte, all
+   rendered under the active bg. This keeps the body chunk
+   column-aligned with the first row's body (column
+   `indent_w + gutter_w`) so wrapped text lines up vertically.
 
 The factory pre-wraps the body via `wrap_text(body_visible,
 body_chunk_w, mode="wrap")` and emits one paragraph per chunk — but
@@ -391,8 +421,11 @@ suite will not catch this regression.
 - Line exactly at `columns` does not wrap spuriously.
 - CJK-heavy line wraps correctly (each char width 2).
 - For StructuredDiff specifically: bg band spans the full terminal
-  width on every visual row of a wrapped `+` / `-` line; line-number
-  gutter appears only on the first visual row.
+  width on every visual row of a wrapped `+` / `-` line; the gutter
+  column on continuation visual rows is rendered as bg-filled spaces
+  of the same width as the first row's `gutter_str`, followed by the
+  sigil byte (`+` / `-` / ` `), so the body chunk column-aligns with
+  the first row's body across all visual rows of the same entry.
 
 ### Reference Consumers
 

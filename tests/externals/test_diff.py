@@ -2358,12 +2358,20 @@ def test_full_width_bg_band_extends_across_wrapped_visual_rows() -> None:
 
 
 def test_line_numbers_gutter_only_on_first_visual_row_when_wrapped() -> None:
-    """``line_numbers=True`` gutter appears only on the first visual row.
+    """``line_numbers=True`` gutter column + sigil appear on every visual row.
 
-    When a row wraps, the line-number gutter must NOT repeat on
-    continuation visual rows (CC parity — gutter belongs to the source
-    line, not to visual rows). The PR2 refactor's continuation-row
-    layout intentionally omits the gutter.
+    07-28-diff-wrap-continuation-gutter-indent: CC parity extension.
+    When a row wraps, continuation visual rows carry the SAME gutter
+    column width as the first row — but rendered as bg-filled spaces
+    instead of the line number — plus the sigil byte (``+`` / ``-``).
+    CC ``Fallback.tsx:395-419`` renders ``lineNumStr`` (= maxWidth
+    spaces on continuation) + sigil on every wrapped row so the body
+    text column stays aligned across all visual rows.
+
+    The pre-07-28 layout dropped the gutter column AND the sigil on
+    continuation rows, leaving the wrapped chunk at column 0 —
+    misaligned with both the parent ``⎿`` indent and the first row's
+    body column.
     """
     import re
 
@@ -2394,13 +2402,137 @@ def test_line_numbers_gutter_only_on_first_visual_row_when_wrapped() -> None:
     assert "+" in first_bare, (
         f"first visual row should carry + sigil, got: {first_bare!r}"
     )
-    # Continuation visual rows do NOT carry the ``+`` sigil.
+    # 07-28: continuation visual rows DO carry the ``+`` sigil AND a
+    # bg-filled gutter column (spaces, same width as the first row's
+    # gutter_str). Body chunk column-aligns with the first row.
     for cont in add_rows[1:]:
         cont_bare = re.sub(r"\x1b\[[0-9;]*m", "", cont)
-        # Strip leading/trailing whitespace for the sigil check.
-        stripped = cont_bare.strip()
-        assert not stripped.startswith("+"), (
-            f"continuation visual row should NOT carry + sigil, got: {cont_bare!r}"
+        # Sigil is present (after the leading spaces).
+        assert "+" in cont_bare, (
+            f"continuation visual row SHOULD carry + sigil (CC parity), "
+            f"got: {cont_bare!r}"
+        )
+
+
+def test_wrap_continuation_carries_prefix_indent_and_aligned_gutter() -> None:
+    """Wrap continuation rows carry parent indent + bg-filled gutter + sigil.
+
+    07-28-diff-wrap-continuation-gutter-indent regression. Jarvis's
+    archived Edit/Write diff rows embed the parent ``⎿`` gutter via
+    ``indent="     "`` + ``first_row_prefix="  ⎿  "``. When a diff
+    body wraps, the continuation visual rows MUST:
+
+    * begin with the continuation ``indent`` (5 spaces, default bg),
+    * open the bg SGR AFTER the indent bytes (parent gutter stays
+      default-bg),
+    * fill the gutter column with bg-painted spaces + sigil byte so
+      the body chunk column-aligns with the first row's body,
+    * span the full ``target_w`` (here = layout columns).
+
+    The pre-07-28 continuation branch dropped prefix + gutter + sigil,
+    leaving the wrapped chunk at column 0 — misaligned with the
+    parent ``⎿`` indent AND the first row's body column.
+
+    Fixture: empty ``before`` so the add row is the FIRST body row
+    and consumes ``first_row_prefix``. Subsequent wrapped visual
+    rows of the same add row use ``indent``.
+    """
+    import re
+
+    from ink.layout.measure import string_width
+
+    long_after = (
+        "the quick brown fox jumps over the lazy dog "
+        "the quick brown fox jumps over the lazy dog"
+    )
+    out = _render(
+        StructuredDiff(
+            "",
+            long_after,
+            show_header=False,
+            show_markers=False,
+            line_numbers=True,
+            full_width_bg=True,
+            add_bg_color="rgb(34,92,43)",
+            del_bg_color="rgb(122,41,54)",
+            indent="     ",                # 5 spaces — continuation indent
+            first_row_prefix="  ⎞  ",  # ⎞ surrogate, 5 visible cols
+            start_line=5,
+        ),
+        columns=40,
+    )
+    lines = out.split("\n")
+    add_bg_open = f"{ESC}[48;2;34;92;43m"
+    add_rows = [ln for ln in lines if add_bg_open in ln]
+    assert len(add_rows) >= 2, (
+        f"expected the add row to wrap to 2+ visual rows, got {len(add_rows)}: {lines!r}"
+    )
+
+    # First visual row begins with the parent ``⎞`` prefix (5 visible
+    # cols, no bg). Then bg opener. Then gutter ``05+``.
+    first = add_rows[0]
+    first_bare = re.sub(r"\x1b\[[0-9;]*m", "", first)
+    assert first_bare.startswith("  ⎞  "), (
+        f"first visual row should start with first_row_prefix, got: {first_bare!r}"
+    )
+
+    # Continuation rows begin with the 5-space ``indent`` (default bg),
+    # NOT the parent glyph. Bg opener must appear AFTER the indent
+    # bytes — no bg SGR byte before the indent end.
+    indent = "     "
+    for i, cont in enumerate(add_rows[1:], start=1):
+        # Bytes preceding the bg opener are exactly the indent.
+        idx = cont.index(add_bg_open)
+        prefix_bytes = cont[:idx]
+        assert prefix_bytes == indent, (
+            f"continuation row {i}: bytes before bg opener should be the "
+            f"5-space indent {indent!r}, got {prefix_bytes!r}"
+        )
+        # No bg SGR appears before the indent end.
+        for m in re.finditer(r"\x1b\[[0-9;]*m", cont):
+            if m.start() < idx:
+                body = m.group()[2:-1]
+                params = body.split(";")
+                first_param = params[0] if params else ""
+                assert first_param not in (
+                    "48", "40", "41", "42", "43", "44",
+                    "45", "46", "47", "100", "101", "102",
+                    "103", "104", "105", "106", "107",
+                ), (
+                    f"continuation row {i}: bg SGR {m.group()!r} appears "
+                    f"before indent end at offset {m.start()}; row: {cont!r}"
+                )
+        # Sigil byte ``+`` appears in the gutter column (after bg open,
+        # before the body chunk).
+        cont_bare = re.sub(r"\x1b\[[0-9;]*m", "", cont)
+        # The gutter column on continuation is ``(gutter_w - 1) spaces
+        # + sigil``. With start_line=5, max line num is single-digit,
+        # so gutter_w = 2 + 1 = 3 (len("05+")).
+        assert cont_bare.startswith(indent + "  +"), (
+            f"continuation row {i}: expected "
+            f"{(indent + '  +')!r} prefix (5-space indent + 2 bg-filled "
+            f"spaces + sigil), got: {cont_bare!r}"
+        )
+        # Visible width equals the layout width (40 cols).
+        assert string_width(cont_bare) == 40, (
+            f"continuation row {i}: visible width should be 40, got "
+            f"{string_width(cont_bare)}: {cont_bare!r}"
+        )
+
+    # Cross-row body-column alignment: the body chunk of every visual
+    # row starts at column len(indent) + gutter_w. For start_line=5,
+    # gutter_w (= ``len(str(max_num)) + 1 + 1`` for sigil-inclusive) =
+    # 3. So body starts at col 5 + 3 = 8.
+    expected_body_col = len(indent) + 3
+    for i, row in enumerate(add_rows):
+        bare = re.sub(r"\x1b\[[0-9;]*m", "", row)
+        # The body chunk's first non-prefix, non-gutter char is at the
+        # computed column. We assert the char at that column is NOT a
+        # space (body chunks start with a word char in this fixture).
+        body_char = bare[expected_body_col] if len(bare) > expected_body_col else ""
+        assert body_char and not body_char.isspace(), (
+            f"row {i}: expected body chunk to start at col "
+            f"{expected_body_col}, got {bare!r}"
         )
 
 

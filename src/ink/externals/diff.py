@@ -1049,6 +1049,16 @@ def _build_full_width_bg_row(
         # (``\x1b[48;...m``) before its chunk so the band stays active
         # across paragraph breaks.
         #
+        # 07-28-diff-wrap-continuation-gutter-indent: continuation rows
+        # carry the same prefix + bg-filled gutter column + sigil as
+        # the first row (CC ``Fallback.tsx:395-419`` parity). The
+        # pre-fix layout dropped all three on continuation, leaving
+        # the wrapped chunk at column 0 — misaligned with both the
+        # parent ``⎿`` indent and the first row's body column. The
+        # continuation gutter is rendered as ``(gutter_w - 1)`` bg
+        # filled spaces + the sigil byte (so the column width matches
+        # the first row's ``gutter_str`` = ``num_str + sigil``).
+        #
         # Per-token colours: each chunk is rendered under a single
         # base-colour span. Walking Pygments / inline-highlight spans
         # against wrap boundaries to reconstruct per-token colours per
@@ -1072,7 +1082,7 @@ def _build_full_width_bg_row(
                 # Layout:
                 #   <prefix_str>           # default bg, default fg
                 #   <bg_open>              # bg opens
-                #   <gutter_str>           # bg active
+                #   <gutter_str>           # bg active (num + sigil)
                 #   <chunk_body>           # bg active, base fg
                 #   " " * chunk_pad        # bg active (trailing fill)
                 #   <reset>                # closes bg, protects pad
@@ -1085,20 +1095,51 @@ def _build_full_width_bg_row(
                     + _SGR_RESET
                 )
             else:
-                # Continuation visual row: no prefix (parent gutter
-                # stays on row 1), no gutter (line-number gutter stays
-                # on row 1). The chunk + pad fills the FULL target
-                # width (no prefix / gutter to subtract) so the bg
-                # band still spans edge-to-edge. Re-open bg SGR at the
-                # start so the band is active from column 0.
-                chunk_pad = max(0, target_w - string_width(chunk))
+                # Continuation visual row of the SAME diff entry.
+                # Uses ``indent`` (NOT ``prefix_str``) — the parent
+                # ``⎿`` glyph from ``first_row_prefix`` lives on the
+                # first visual row only; continuation rows fall back to
+                # the 5-space ``indent`` (CC parity: CC's parent
+                # ``⎿`` is a separate flex child that doesn't extend
+                # down, so col 0-4 are empty on continuation). Plus
+                # bg-filled gutter column + sigil + chunk + pad.
+                #
+                # CC ``Fallback.tsx:395-419`` renders the gutter column
+                # on continuation as ``' '.repeat(maxWidth) + ' '``
+                # (all spaces, with bg) followed by the sigil (``+`` /
+                # ``-`` / `` ``). PyInk's ``gutter_str`` width is
+                # ``gutter_w`` (already sigil-inclusive), so we render
+                # ``(gutter_w - 1)`` spaces + the sigil to match that
+                # column width on every visual row. The chunk starts at
+                # column ``indent_w + gutter_w`` — same as every
+                # non-first entry's first visual row — so wrapped text
+                # column-aligns across all visual rows of the same
+                # entry AND across entries.
+                #
+                # ``gutter_w == 0`` (no ``line_numbers`` prop) means no
+                # gutter column at all; we skip the gutter spaces and
+                # sigil entirely (matches the no-gutter first-row path).
+                indent_w = string_width(indent)
+                if gutter_w > 0:
+                    cont_gutter_str = " " * (gutter_w - 1) + sigil
+                    cont_gutter_w = gutter_w
+                else:
+                    cont_gutter_str = ""
+                    cont_gutter_w = 0
+                chunk_pad = max(
+                    0, target_w - indent_w - cont_gutter_w - string_width(chunk)
+                )
                 # Layout:
+                #   <indent>               # default bg, default fg (5 spaces)
                 #   <bg_open>              # bg opens
+                #   <cont_gutter_str>      # bg active (spaces + sigil)
                 #   <chunk_body>           # bg active, base fg
                 #   " " * chunk_pad        # bg active (trailing fill)
                 #   <reset>                # closes bg, protects pad
                 rendered_lines.append(
-                    bg_open_seq
+                    indent
+                    + bg_open_seq
+                    + cont_gutter_str
                     + chunk_body
                     + " " * chunk_pad
                     + _SGR_RESET
