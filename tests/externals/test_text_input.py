@@ -3397,3 +3397,99 @@ def test_ignore_arrows_when_signal_evaluates_per_keypress(
     assert _wait_for(lambda: _last_change_is(changes, "YabX"))
 
     inst.unmount()
+
+
+# ---------------------------------------------------------------------------
+# External ``cursor_signal`` prop (symmetric to ``value_signal``)
+# ---------------------------------------------------------------------------
+
+
+def test_cursor_signal_external_write_moves_caret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """External write to ``cursor_signal`` repositions the caret.
+
+    Mirrors the bug in Jarvis's Tab-completion: the caller writes
+    ``value_signal`` to a longer string but without a ``cursor_signal``
+    the caret stays at the old position. With the prop wired, writing
+    both signals lands the caret at the new offset and ``on_cursor_change``
+    fires to confirm it.
+    """
+    buf = signal("ab")
+    cur = signal(2)
+    seen: list[int] = []
+    inst, _ = _mount(
+        TextInput(
+            value_signal=buf,
+            cursor_signal=cur,
+            on_cursor_change=seen.append,
+        ),
+        monkeypatch=monkeypatch,
+    )
+    # Drain the initial fire so the next observation is unambiguous.
+    _wait_for(lambda: len(seen) >= 1)
+    seen.clear()
+
+    # Programmatic Tab-completion style write: extend the buffer AND
+    # push the caret to its tail in lockstep.
+    buf.value = "abcde"
+    cur.value = 5
+    assert _wait_for(lambda: 5 in seen)
+    assert cur.value == 5
+
+    inst.unmount()
+
+
+def test_cursor_signal_internal_writes_propagate_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Typing through the keyboard still updates the external cursor signal.
+
+    The component's internal ``_set_cursor`` writes to the bound signal,
+    so external readers (e.g. Jarvis's caret mirror) see live caret
+    motion without needing ``on_cursor_change`` plumbing.
+    """
+    buf = signal("")
+    cur = signal(0)
+    changes: list[str] = []
+    feed: list[bytes] = [b"a", b"b"]
+    inst, _ = _mount(
+        TextInput(
+            value_signal=buf,
+            cursor_signal=cur,
+            on_change=changes.append,
+        ),
+        monkeypatch=monkeypatch,
+        feed=feed,
+    )
+    assert _wait_for(lambda: _last_change_is(changes, "ab"))
+    # Internal keystroke handlers must have written through to ``cur``.
+    assert cur.value == 2
+    inst.unmount()
+
+
+def test_cursor_signal_omitted_keeps_internal_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ``cursor_signal`` the component behaves exactly as before.
+
+    Regression guard: adding the prop must not perturb existing callers
+    who don't supply it. Internal ``signal(len(initial_value))`` seeds
+    the caret and typing advances it as before.
+    """
+    changes: list[str] = []
+    cursors: list[int] = []
+    feed: list[bytes] = [b"x"]
+    inst, _ = _mount(
+        TextInput(
+            initial_value="hi",
+            on_change=changes.append,
+            on_cursor_change=cursors.append,
+        ),
+        monkeypatch=monkeypatch,
+        feed=feed,
+    )
+    assert _wait_for(lambda: _last_change_is(changes, "hix"))
+    # Last reported cursor offset must be at end of "hix" (3).
+    assert cursors and cursors[-1] == 3
+    inst.unmount()

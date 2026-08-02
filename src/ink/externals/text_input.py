@@ -881,6 +881,12 @@ def _TextInputImpl(**props: Any) -> Element:
     # mutate it programmatically). When ``None`` (default), the
     # component owns its own internal signal — same as before.
     value_signal: Signal[str] | None = props.get("value_signal")
+    # Optional external ``cursor`` signal — symmetric to ``value_signal``.
+    # Lets the caller move the caret programmatically (e.g. after writing
+    # a Tab-completion into ``value_signal`` the caller also pushes the
+    # cursor to the end). When ``None`` (default) the component owns an
+    # internal signal seeded at ``len(initial_value)``.
+    cursor_signal: Signal[int] | None = props.get("cursor_signal")
 
     # Initial cursor sits at end of the initial value — matches
     # ink-text-input and the common "open input, type to append" UX.
@@ -891,7 +897,10 @@ def _TextInputImpl(**props: Any) -> Element:
         value: Signal[str] = value_signal
     else:
         value = signal(initial_value)
-    cursor: Signal[int] = signal(len(initial_value))
+    if cursor_signal is not None:
+        cursor: Signal[int] = cursor_signal
+    else:
+        cursor = signal(len(initial_value))
     selection: Signal[tuple[int, int] | None] = signal(None)
 
     # Keep the latest callback without resubscribing the input handler.
@@ -1524,6 +1533,7 @@ def TextInput(
     is_active: bool | Signal[bool] | Callable[[], bool] = True,
     ignore_arrows_when: bool | Signal[bool] | Callable[[], bool] = False,
     value_signal: Signal[str] | None = None,
+    cursor_signal: Signal[int] | None = None,
     **box_props: Any,
 ) -> Element:
     """Create a single-line or multi-line text input.
@@ -1739,4 +1749,5 @@ def TextInput(
         rows=rows,
         box_props=box_props,
         value_signal=value_signal,
+        cursor_signal=cursor_signal,
     )
