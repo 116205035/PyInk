@@ -48,6 +48,8 @@ _ANSI_RE = re.compile(
 _COMBINING_RE = re.compile("[̀-ͯ᪰-᫿᷀-᷿⃐-⃿︠-︯]")
 
 try:  # pragma: no cover - import-guard depends on environment
+    from wcwidth import iter_graphemes as _iter_graphemes_upstream
+    from wcwidth import wcswidth as _wcswidth_upstream
     from wcwidth import wcwidth as _wcwidth
 
     _HAS_WCWIDTH = True
@@ -71,22 +73,30 @@ def _char_width(ch: str) -> int:
 def wcswidth(s: str) -> int:
     """Display width of ``s`` ignoring ANSI escape sequences.
 
-    Equivalent to :func:`wcwidth.wcswidth` but ANSI-stripped and tolerant
-    of unprintable characters (returns 0 for them instead of -1).
+    Delegates to upstream ``wcwidth.wcswidth`` (0.8.x), which is
+    grapheme-cluster-aware and handles emoji presentation sequences,
+    keycaps, ZWJ families, regional flags, and skin-tone modifiers.
+    Returns 0 for unprintable / control-character inputs.
     """
     stripped = _ANSI_RE.sub("", s)
+    if not stripped:
+        return 0
     if _HAS_WCWIDTH:
-        total = 0
-        for ch in stripped:
-            w = _wcwidth(ch)
-            total += w if w >= 0 else 0
-        return total
-    # ASCII fallback: combining marks don't count.
+        w = _wcswidth_upstream(stripped)
+        return w if w >= 0 else 0
+    # ASCII fallback (no wcwidth installed) — keep the existing path.
     return sum(0 if _COMBINING_RE.match(ch) else 1 for ch in stripped)
 
 
 def string_width(s: str) -> int:
     """Return the display width of ``s``.
+
+    Grapheme-cluster-aware: emoji presentation sequences, keycaps, ZWJ
+    families, regional flags, and skin-tone modifiers count as a single
+    cluster with the width the terminal will actually render. See
+    ``.trellis/spec/frontend/rendering-contracts.md §2`` for the contract.
+    Wrap helpers (``wrap_text``, ``_hard_break``, ``_take_visible``)
+    iterate clusters atomically and never split one across lines.
 
     Examples
     --------
@@ -104,6 +114,24 @@ def string_width(s: str) -> int:
 
 def _strip_ansi(s: str) -> str:
     return _ANSI_RE.sub("", s)
+
+
+def _iter_clusters(s: str) -> list[tuple[str, int]]:
+    """Return ``[(cluster_str, cluster_width), ...]`` for ``s``.
+
+    ANSI escape sequences are stripped first; cluster boundaries come
+    from ``wcwidth.iter_graphemes`` and width from ``wcwidth.wcswidth``.
+    Falls back to per-codepoint iteration when wcwidth is unavailable,
+    matching the legacy behaviour.
+    """
+    stripped = _strip_ansi(s)
+    if _HAS_WCWIDTH:
+        out: list[tuple[str, int]] = []
+        for cl in _iter_graphemes_upstream(stripped):
+            w = _wcswidth_upstream(cl)
+            out.append((cl, w if w >= 0 else 0))
+        return out
+    return [(ch, _char_width(ch)) for ch in stripped]
 
 
 def _split_visible_chunks(s: str) -> list[tuple[str, bool]]:
@@ -125,24 +153,27 @@ def _split_visible_chunks(s: str) -> list[tuple[str, bool]]:
 
 
 def _visible_chars(s: str) -> list[tuple[str, int]]:
-    """Return ``[(char, width)]`` for every visible character in ``s``.
+    """Return ``[(cluster, width)]`` for every grapheme cluster in ``s``.
 
-    Combining marks are returned with width 0 and stay attached to their
-    preceding base character at the cursor's current position.
+    ANSI escapes are stripped; the unit of iteration is a grapheme
+    cluster (so emoji ZWJ families, keycaps, presentation sequences and
+    regional flags are returned as atomic units).
     """
-    out: list[tuple[str, int]] = []
-    for ch in _strip_ansi(s):
-        out.append((ch, _char_width(ch)))
-    return out
+    return _iter_clusters(s)
 
 
 def _hard_break(s: str, width: int) -> list[str]:
-    """Force-break ``s`` every ``width`` display cells (may split words)."""
+    """Force-break ``s`` every ``width`` display cells (may split words).
+
+    Iterates per grapheme cluster so cluster boundaries stay atomic —
+    an emoji presentation sequence, keycap, ZWJ family or regional flag
+    is never split across two lines. If a single cluster is wider than
+    ``width`` it is emitted as its own overflowing line.
+    """
     if width <= 0:
         return [_strip_ansi(s)]
     lines: list[str] = []
     chunks = _split_visible_chunks(s)
-    # Build a list of (text, is_escape) tokens, then iterate.
     current: list[str] = []
     current_w = 0
     pending_escape: list[str] = []  # escapes carried into the next line
@@ -152,13 +183,12 @@ def _hard_break(s: str, width: int) -> list[str]:
             # we're at the start of a line they get emitted first.
             current.append(chunk)
             continue
-        for ch in chunk:
-            w = _char_width(ch)
+        for cl, w in _iter_clusters(chunk):
             if current_w + w > width and current_w > 0:
                 lines.append("".join(current))
                 current = list(pending_escape)
                 current_w = 0
-            current.append(ch)
+            current.append(cl)
             current_w += w
     if current_w > 0 or any(c for c in current if _ANSI_RE.fullmatch(c or "")):
         lines.append("".join(current))
@@ -324,7 +354,10 @@ def _leading_escapes(s: str) -> str:
 
 
 def _take_visible(s: str, width: int) -> str:
-    """Return the longest prefix of ``s`` whose visible width ≤ ``width``."""
+    """Return the longest prefix of ``s`` whose visible width ≤ ``width``.
+
+    Grapheme clusters are atomic: a cluster is taken whole or not at all.
+    """
     if width <= 0:
         return ""
     chunks = _split_visible_chunks(s)
@@ -334,11 +367,10 @@ def _take_visible(s: str, width: int) -> str:
         if is_escape:
             out.append(chunk)
             continue
-        for ch in chunk:
-            w = _char_width(ch)
+        for cl, w in _iter_clusters(chunk):
             if used + w > width:
                 return "".join(out)
-            out.append(ch)
+            out.append(cl)
             used += w
     return "".join(out)
 
@@ -346,7 +378,8 @@ def _take_visible(s: str, width: int) -> str:
 def _take_visible_tail(s: str, width: int) -> str:
     """Return the longest suffix of ``s`` whose visible width ≤ ``width``.
 
-    ANSI escapes at the tail of the result are kept.
+    ANSI escapes at the tail of the result are kept. Grapheme clusters
+    are atomic: a cluster is taken whole or not at all.
     """
     if width <= 0:
         return ""
@@ -357,11 +390,10 @@ def _take_visible_tail(s: str, width: int) -> str:
         if is_escape:
             out.append(chunk)
             continue
-        for ch in reversed(chunk):
-            w = _char_width(ch)
+        for cl, w in reversed(_iter_clusters(chunk)):
             if used + w > width:
                 return "".join(reversed(out))
-            out.append(ch)
+            out.append(cl)
             used += w
     return "".join(reversed(out))
 

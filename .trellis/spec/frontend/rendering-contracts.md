@@ -144,8 +144,13 @@ shrink to the parent's content box.
   width of `s` in terminal cells.
 - It strips CSI (SGR) and OSC 8 hyperlink sequences before measuring, so
   strings carrying inline styles measure correctly.
-- CJK full-width characters count as 2 cells; combining characters and
-  emoji are handled via `wcwidth` (a required dependency).
+- CJK full-width characters count as 2 cells. **Measurement is
+  grapheme-cluster-aware** via `wcwidth` >= 0.8.x's `wcswidth`: emoji
+  presentation sequences (`☠️`, `❤️`), keycap sequences (`1️⃣`), ZWJ
+  families (`👨‍👩‍👧`), regional indicator pairs / flags (`🇨🇳`), and
+  skin-tone modifiers (`👍🏽`) each count as a single cluster occupying
+  the cells the terminal actually renders. Text-presentation sequences
+  (`❤︎` via U+FE0E) count as 1 cell.
 - Use this **anywhere** you compute column widths, padding, or
   truncation on strings that may carry ANSI sequences.
 
@@ -157,6 +162,9 @@ helpers).
 - Table column width calculation: `max(widths[idx], string_width(cell))`
 - Padding computation: `" " * (width - string_width(text))`
 - Truncation / hardWrap budget
+- Any wrap / truncate / pad operation on text that may contain emoji
+  clusters — `wrap_text`'s helpers iterate clusters atomically and
+  never split one across lines.
 - Any `len(s)` on a string that came from `_render_inline` /
   `apply_style` / `_wrap_osc8` / any function that emits SGR sequences
 
@@ -196,17 +204,45 @@ visible and treats CJK full-width characters as 1 cell.
 computation on strings that may carry ANSI sequences or contain
 full-width characters.
 
+### Common Mistake: Wrap splits an emoji cluster across lines
+
+**Symptom**: A long line containing an emoji cluster wraps with the
+cluster's trailing variation selector (VS16 / VS15), ZWJ, or combining
+keycap byte at the start of the next line, breaking the glyph in half.
+Visually the emoji's base lands at the end of one row and its
+modification bytes leak onto the next.
+
+**Cause**: Wrap helpers (`wrap_text`, `_hard_break`, `_word_break`,
+`_take_visible`, `_take_visible_tail`) iterated per codepoint, so a
+cluster of N codepoints could be split at any codepoint boundary when
+the budget ran out mid-cluster.
+
+**Fix**: The wrap helpers in `measure.py` iterate `_iter_clusters`
+(grapheme-segmented via `wcwidth.iter_graphemes`) so cluster boundaries
+are atomic — a cluster is taken whole onto a line or moved whole to the
+next line, never split. Callers do not need to change; the atomicity
+contract is honoured inside `wrap_text`.
+
 ### Tests Required
 
 - Table with styled cells (bold, inline code) aligns correctly.
 - Table with CJK characters (全角 = 2 cells) aligns correctly.
 - Table with mixed styled + CJK content aligns correctly.
+- Table with emoji cluster cells (☠️, 👨‍👩‍👧, 🇨🇳) aligns correctly —
+  each cluster measures 2 cells, same as 2 ASCII chars.
+- `wrap_text` does not split a grapheme cluster across two lines
+  (presentation sequence, keycap, ZWJ family, regional flag each tested
+  with a width that forces a wrap mid-cluster).
 
 ### Reference Consumer
 
 `src/ink/externals/markdown.py:_render_table` — column widths, cell
 padding, and key-value fallback all use `string_width()` since PR2 of
-the `pyink-markdown-render-polish` task.
+the `pyink-markdown-render-polish` task. `tests/layout/test_measure.py`
+covers every cluster type at the unit level (width, wrap atomicity),
+and `tests/layout/test_measure_integration.py` covers the end-to-end
+render alignment (cluster rows wrap correctly through the layout
+engine).
 
 ---
 

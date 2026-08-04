@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: Terminals",
     "Typing :: Typed",
 ]
-dependencies = ["wcwidth>=0.2.0"]
+dependencies = ["wcwidth>=0.8.0"]
 
 [project.urls]
 Homepage = "https://github.com/116205035/PyInk"

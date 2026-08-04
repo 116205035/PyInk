@@ -53,6 +53,77 @@ def test_string_width_mixed() -> None:
 
 
 # ---------------------------------------------------------------------------
+# string_width — grapheme clusters (PR1)
+# ---------------------------------------------------------------------------
+
+
+def test_string_width_emoji_presentation_sequence() -> None:
+    # Skull-and-crossbones + VS16 (U+2620 U+FE0F) — base codepoint is
+    # narrow text; VS16 forces emoji presentation → 2 cells.
+    assert string_width("☠️") == 2
+    # Snowflake + VS16.
+    assert string_width("❄️") == 2
+    # Arrow + VS16.
+    assert string_width("➡️") == 2
+    # Heart + VS16.
+    assert string_width("❤️") == 2
+
+
+def test_string_width_emoji_keycap_sequence() -> None:
+    # Digit + VS16 + combining enclosing keycap (U+20E3) → one cluster, 2 cells.
+    assert string_width("1️⃣") == 2
+    # Asterisk keycap.
+    assert string_width("*️⃣") == 2
+    # Hash keycap.
+    assert string_width("#️⃣") == 2
+
+
+def test_string_width_emoji_zwj_family() -> None:
+    # Man + ZWJ + Woman + ZWJ + Girl — UAX #29 clusters into a single
+    # grapheme → 2 cells.
+    assert string_width("\U0001f468‍\U0001f469‍\U0001f467") == 2
+    # Couple with heart: Woman + ZWJ + heavy black heart + VS16 + ZWJ + Man.
+    assert string_width("\U0001f469‍❤️‍\U0001f468") == 2
+
+
+def test_string_width_regional_flag() -> None:
+    # Two regional indicator letters form a single flag grapheme → 2 cells.
+    assert string_width("\U0001f1e8\U0001f1f3") == 2  # China
+    assert string_width("\U0001f1fa\U0001f1f8") == 2  # United States
+    assert string_width("\U0001f1ea\U0001f1fa") == 2  # European Union
+
+
+def test_string_width_skin_tone_modifier() -> None:
+    # Thumbs up + medium skin tone (U+1F3FD) → one cluster, 2 cells.
+    assert string_width("\U0001f44d\U0001f3fd") == 2
+    # Handshake + medium skin tone.
+    assert string_width("\U0001f91d\U0001f3fd") == 2
+
+
+def test_string_width_vs15_text_presentation() -> None:
+    # Heart + VS15 (U+FE0E) → text presentation, narrow width 1.
+    assert string_width("❤︎") == 1
+    # NOTE: 🎉︎ (party popper U+1F389 + VS15) is a known wcwidth 0.8.1 bug
+    # where it returns 2 instead of 1 (default-emoji codepoint ignores
+    # VS15). We accept upstream behaviour for MVP — no assertion here.
+
+
+def test_string_width_mixed_clusters_ascii() -> None:
+    # 'a' (1) + skull-presentation (2) + 'b' (1) = 4.
+    assert string_width("a☠️b") == 4
+
+
+def test_string_width_mixed_clusters_cjk() -> None:
+    # '你' (2) + skull-presentation (2) + '好' (2) = 6.
+    assert string_width("你☠️好") == 6
+
+
+def test_string_width_cluster_with_ansi() -> None:
+    # Skull-presentation cluster wrapped in SGR colour codes → 2 cells.
+    assert string_width("\x1b[31m☠️\x1b[0m") == 2
+
+
+# ---------------------------------------------------------------------------
 # wrap_text — modes
 # ---------------------------------------------------------------------------
 
@@ -189,3 +260,66 @@ def test_truncate_end_preserves_newline_split_for_multi_line() -> None:
     assert out[0] == "short"
     assert string_width(out[1]) <= 20
     assert out[2] == "end"
+
+
+# ---------------------------------------------------------------------------
+# string_width — wrap atomicity on grapheme clusters (PR2)
+# ---------------------------------------------------------------------------
+
+_SKULL = "☠️"  # skull + VS16 → presentation sequence, width 2
+_KEYCAP = "1️⃣"  # digit + VS16 + combining keycap, width 2
+_ZWJ_FAMILY = "\U0001f468‍\U0001f469‍\U0001f467"  # man+woman+girl, width 2
+_FLAG_CN = "\U0001f1e8\U0001f1f3"
+_FLAG_US = "\U0001f1fa\U0001f1f8"
+
+
+def test_wrap_never_splits_presentation_sequence() -> None:
+    lines = wrap_text(_SKULL * 3, 4, mode="wrap")
+    assert lines == [_SKULL * 2, _SKULL]
+    for line in lines:
+        assert line == _SKULL * (len(line) // len(_SKULL))
+
+
+def test_wrap_never_splits_keycap() -> None:
+    lines = wrap_text(_KEYCAP * 3, 4, mode="wrap")
+    assert lines == [_KEYCAP * 2, _KEYCAP]
+
+
+def test_wrap_never_splits_zwj_family() -> None:
+    lines = wrap_text(_ZWJ_FAMILY + "!", 2, mode="hard")
+    assert lines == [_ZWJ_FAMILY, "!"]
+
+
+def test_wrap_never_splits_regional_flag() -> None:
+    lines = wrap_text(_FLAG_CN + _FLAG_US, 2, mode="hard")
+    assert lines == [_FLAG_CN, _FLAG_US]
+
+
+def test_wrap_hard_mode_preserves_cluster_boundary() -> None:
+    # Clusters: ('a',1), ('☠️',2), ('b',1) at width 2.
+    # 'a' fills line 1 (1 cell); 'a' + '☠️' would be 3 > 2 so ☠️ breaks
+    # to its own line 2; 'b' breaks to line 3.
+    lines = wrap_text("a" + _SKULL + "b", 2, mode="hard")
+    assert lines == ["a", _SKULL, "b"]
+
+
+def test_wrap_hard_mode_cluster_wider_than_width_overflows() -> None:
+    # A 2-cell ZWJ family in a 1-cell column must not loop or split.
+    lines = wrap_text(_ZWJ_FAMILY, 1, mode="hard")
+    assert lines == [_ZWJ_FAMILY]
+
+
+def test_wrap_truncate_end_keeps_cluster() -> None:
+    out = wrap_text("a" + _SKULL + "b", 3, mode="truncate")
+    assert len(out) == 1
+    assert string_width(out[0]) <= 3
+    # Cluster atomic: either both halves of ☠️ present or neither.
+    assert out[0].count("☠") == out[0].count("️")
+
+
+def test_wrap_truncate_start_keeps_cluster() -> None:
+    out = wrap_text("a" + _SKULL + "b", 3, mode="truncate-start")
+    assert len(out) == 1
+    assert string_width(out[0]) <= 3
+    # Cluster atomic: either both halves of ☠️ present or neither.
+    assert out[0].count("☠") == out[0].count("️")
