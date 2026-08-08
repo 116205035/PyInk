@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 
 from ink.layout.measure import (
+    _char_width,
     string_width,
+    wcswidth,
     wrap_text,
 )
 
@@ -50,6 +52,41 @@ def test_string_width_combining_marks() -> None:
 def test_string_width_mixed() -> None:
     # 'a' (1) + 'b' (1) + ANSI (0) + '你' (2) + ANSI (0) + 'c' (1) = 5.
     assert string_width("ab\x1b[31m你\x1b[0mc") == 1 + 1 + 2 + 1
+
+
+# ---------------------------------------------------------------------------
+# string_width — tab handling (regression: tab used to crash _paint_text)
+# ---------------------------------------------------------------------------
+
+
+def test_char_width_tab_is_one_cell() -> None:
+    """Tab returns 1 (not 0 like other control chars).
+
+    POSIX wcwidth returns -1 for control chars; the helper used to map
+    that to 0 for *every* control char including tab. A 0-width tab
+    caused :func:`string_width` to under-count while the per-char paint
+    loop still advanced — crashing ``grid.put`` with IndexError.
+    """
+    assert _char_width("\t") == 1
+
+
+def test_string_width_tab_counts_as_one_cell() -> None:
+    """Tab in a string contributes 1 cell to total visible width."""
+    assert string_width("a\tb") == 3
+    assert string_width("\t") == 1
+    assert string_width("ab\tcd") == 5
+
+
+def test_wcswidth_tab_does_not_poison_whole_string() -> None:
+    """Pre-replace keeps POSIX ``wcswidth`` from returning -1 → 0.
+
+    Without the sanitize step, ``wcswidth('a\\tb')`` would return 0
+    (because POSIX wcswidth short-circuits to -1 on any control char),
+    masking the actual visible width of the rest of the string.
+    """
+    assert wcswidth("a\tb") == 3
+    # Mix with CJK to ensure cluster path still works alongside tab.
+    assert wcswidth("你\thello") == 2 + 1 + 5
 
 
 # ---------------------------------------------------------------------------

@@ -76,6 +76,20 @@ def test_text_plain_renders_verbatim() -> None:
     assert render_to_string(Text("Hello World")) == "Hello World"
 
 
+def test_text_with_tab_does_not_crash() -> None:
+    """Regression: tab in content used to crash grid.put with IndexError.
+
+    ``string_width`` under-counted tab-bearing strings (POSIX wcswidth
+    returns -1 on control chars), so ``_paint_text`` allocated too few
+    cells and the per-char loop wrote past the row end. Tab now counts
+    as 1 cell across both ``string_width`` and ``_char_width``.
+    """
+    # Bare tab.
+    assert render_to_string(Text("a\tb")) == "a\tb"
+    # Tab in the middle of a longer line still fits within columns.
+    assert render_to_string(Text(".gitignore:2:.jarvis/\t.gitignore.md")) is not None
+
+
 def test_text_callable_evaluated_once() -> None:
     calls = {"n": 0}
 

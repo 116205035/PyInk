@@ -58,7 +58,19 @@ except ImportError:  # pragma: no cover - exercised only without the dep
 
 
 def _char_width(ch: str) -> int:
-    """Display width of a single non-ANSI character (0 for combining)."""
+    """Display width of a single non-ANSI character (0 for combining).
+
+    Tab (``\\t``) is special-cased to 1 cell: POSIX ``wcwidth`` returns
+    -1 for control chars which would otherwise map to 0 here, but a
+    0-width tab causes :func:`string_width` to under-count the row
+    capacity in :func:`ink.layout.render_layout._paint_text` while the
+    per-char loop still advances for following visible chars — landing
+    them past the allocated row and triggering ``IndexError`` on
+    ``grid.put``. TUI convention (matches Textual / Rich): tab renders
+    as a single cell, no tab-stop expansion.
+    """
+    if ch == "\t":
+        return 1
     if _HAS_WCWIDTH:
         w = _wcwidth(ch)
         # ``wcwidth`` returns -1 for non-printable control chars; treat
@@ -77,15 +89,24 @@ def wcswidth(s: str) -> int:
     grapheme-cluster-aware and handles emoji presentation sequences,
     keycaps, ZWJ families, regional flags, and skin-tone modifiers.
     Returns 0 for unprintable / control-character inputs.
+
+    Tab (``\\t``) is pre-replaced with a regular space before
+    delegation: POSIX ``wcswidth`` short-circuits to -1 the moment it
+    sees any control char, which would otherwise zero out the entire
+    string width and crash ``_paint_text`` 's row-capacity calculation.
     """
     stripped = _ANSI_RE.sub("", s)
     if not stripped:
         return 0
+    # Tab → space so wcwidth's POSIX-strict -1 return doesn't poison
+    # the whole string. Per-char width (``_char_width``) keeps the tab
+    # visible at its own 1-cell value during the paint loop.
+    sanitized = stripped.replace("\t", " ")
     if _HAS_WCWIDTH:
-        w = _wcswidth_upstream(stripped)
+        w = _wcswidth_upstream(sanitized)
         return w if w >= 0 else 0
     # ASCII fallback (no wcwidth installed) — keep the existing path.
-    return sum(0 if _COMBINING_RE.match(ch) else 1 for ch in stripped)
+    return sum(0 if _COMBINING_RE.match(ch) else 1 for ch in sanitized)
 
 
 def string_width(s: str) -> int:
@@ -128,8 +149,15 @@ def _iter_clusters(s: str) -> list[tuple[str, int]]:
     if _HAS_WCWIDTH:
         out: list[tuple[str, int]] = []
         for cl in _iter_graphemes_upstream(stripped):
-            w = _wcswidth_upstream(cl)
-            out.append((cl, w if w >= 0 else 0))
+            # Single-codepoint clusters (incl. ``\t``) honour the tab
+            # 1-cell special case via ``_char_width``; multi-codepoint
+            # clusters (emoji presentation, keycap, ZWJ, flag) keep
+            # their wcswidth value, which matches ``string_width``.
+            if len(cl) == 1:
+                out.append((cl, _char_width(cl)))
+            else:
+                w = _wcswidth_upstream(cl)
+                out.append((cl, w if w >= 0 else 0))
         return out
     return [(ch, _char_width(ch)) for ch in stripped]
 
