@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ink-python"
-version = "0.2.0"
+name = "ink"
+version = "0.2.2"
 description = "Python ink-style TUI framework built on signals"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -37,7 +37,7 @@ Issues = "https://github.com/116205035/PyInk/issues"
 highlight = ["pygments>=2.14"]
 markdown = ["markdown-it-py>=3.0"]
 big-text = ["pyfiglet>=1.0"]
-all = ["ink-python[highlight,markdown,big-text]"]
+all = ["ink[highlight,markdown,big-text]"]
 dev = [
     "pytest>=7.0",
     "pytest-cov",
