@@ -52,12 +52,20 @@ design decisions.
 ## Install
 
 PyInk is **not on PyPI** yet — for now it ships source-only. Clone
-the repo and install editable:
+the repo and install editable. Requires **Python ≥ 3.11**.
 
 ```bash
 git clone https://github.com/116205035/PyInk.git
 cd PyInk
-pip install -e ".[dev]"
+
+# Always install into an isolated venv, not your system/anaconda Python.
+python -m venv .venv
+.venv/Scripts/activate        # Windows (git bash: source .venv/Scripts/activate)
+# .venv/bin/activate          # macOS / Linux
+
+# Pick ONE depending on what you'll do:
+pip install -e ".[dev]"       # running tests / mypy / ruff
+pip install -e ".[all]"       # also running examples (markdown, BigText, etc.)
 ```
 
 ### Optional extras (Phase 3 / Phase 6)
@@ -281,8 +289,10 @@ examples additionally accept `Esc`.
 
 ## Development
 
+Run from the repo root, inside the `.venv` you created during install.
+
 ```bash
-python -m pytest tests -v          # ~1100 tests (unit + integration)
+python -m pytest tests -v          # 1470+ tests (unit + integration)
 python -m mypy src/ink tests examples
 python -m ruff check src/ink tests examples
 ```
