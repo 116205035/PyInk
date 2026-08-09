@@ -377,6 +377,7 @@ def _build_displayed_line(
     selection: tuple[int, int] | None,
     mask: str | None = None,
     line_text_raw: str | None = None,
+    cursor_visible: bool = True,
 ) -> str:
     """Render one line of the buffer with cursor + selection overlays.
 
@@ -474,7 +475,7 @@ def _build_displayed_line(
         ch = line_text[i]
         w = _char_width(ch)
 
-        if cursor_style == "bar" and width == cursor_col and not cursor_emitted:
+        if cursor_style == "bar" and width == cursor_col and not cursor_emitted and cursor_visible:
             # Close any active selection so the bar's reset doesn't get
             # tangled with the selection's reset.
             emit_selection_close()
@@ -494,6 +495,7 @@ def _build_displayed_line(
             cursor_style in ("block", "underline")
             and width == cursor_col
             and not cursor_emitted
+            and cursor_visible
         ):
             emit_selection_close()
             out.append(_cursor_cell(cursor_style, char=ch, cursor_color=cursor_color))
@@ -510,7 +512,7 @@ def _build_displayed_line(
         i += 1
 
     # End-of-line cursor position (cursor_col == total line width).
-    if not cursor_emitted and width == cursor_col:
+    if not cursor_emitted and width == cursor_col and cursor_visible:
         emit_selection_close()
         out.append(_cursor_cell(cursor_style, char="", cursor_color=cursor_color))
         cursor_emitted = True
@@ -887,6 +889,15 @@ def _TextInputImpl(**props: Any) -> Element:
     # cursor to the end). When ``None`` (default) the component owns an
     # internal signal seeded at ``len(initial_value)``.
     cursor_signal: Signal[int] | None = props.get("cursor_signal")
+    # ``cursor_visible`` may be a ``bool``, a ``Signal[bool]``, or a
+    # 0-arg callable returning ``bool``. Re-evaluated inside
+    # :func:`_render_lines` (which runs in the render-loop effect's
+    # tracking context) so Signal / callable reads establish
+    # subscriptions. When false the cursor SGR cell is suppressed on
+    # every line and the placeholder branch falls back to plain dim
+    # text — visual signal that the input is inactive without disabling
+    # :func:`handle_key` (use ``is_active`` for that).
+    cursor_visible: object = props["cursor_visible"]
 
     # Initial cursor sits at end of the initial value — matches
     # ink-text-input and the common "open input, type to append" UX.
@@ -1338,6 +1349,7 @@ def _TextInputImpl(**props: Any) -> Element:
         cur_value = value.value
         cur_cursor = cursor.value
         cur_sel = selection.value
+        cur_cursor_visible = _resolve_is_active(cursor_visible)
 
         # Empty buffer with placeholder: render the cursor at column 0
         # (on the placeholder's first character for block/underline, or
@@ -1347,6 +1359,8 @@ def _TextInputImpl(**props: Any) -> Element:
         # cells aligned with their normal-editing appearance.
         if not cur_value and placeholder:
             scroll_offset_sig.value = 0
+            if not cur_cursor_visible:
+                return [apply_style(placeholder, dimColor=True)]
             if cursor_style == "bar":
                 # Bar cursor sits in its own 1-cell slot at column 0;
                 # placeholder trails it in dim.
@@ -1395,6 +1409,7 @@ def _TextInputImpl(**props: Any) -> Element:
                 selection=cur_sel,
                 mask=mask,
                 line_text_raw=line_text_raw,
+                cursor_visible=cur_cursor_visible,
             )
             if avail_width is not None and avail_width >= 1:
                 cursor_col: int | None = None
@@ -1532,6 +1547,7 @@ def TextInput(
     cursor_style: CursorStyle = "block",
     is_active: bool | Signal[bool] | Callable[[], bool] = True,
     ignore_arrows_when: bool | Signal[bool] | Callable[[], bool] = False,
+    cursor_visible: bool | Signal[bool] | Callable[[], bool] = True,
     value_signal: Signal[str] | None = None,
     cursor_signal: Signal[int] | None = None,
     **box_props: Any,
@@ -1631,6 +1647,16 @@ def TextInput(
         input), use reactive props such as
         ``color=lambda: "gray" if not focused else None`` rather than
         relying on ``is_active`` to re-render the component.
+    cursor_visible:
+        Controls whether the in-text cursor cell (bar / block /
+        underline) is rendered. Evaluated inside the render callable
+        so Signal / Callable shapes establish subscriptions and the
+        cursor re-appears / disappears reactively. Accepts the same
+        three shapes as ``is_active``: ``bool``, ``Signal[bool]``,
+        ``Callable[[], bool]``. When false the buffer / placeholder
+        is rendered as plain text — use this to give a "disabled"
+        visual signal without disabling keystroke handling (which
+        is ``is_active``'s job). Defaults to ``True``.
     ignore_arrows_when:
         Controls whether :func:`handle_key` skips ArrowUp / ArrowDown.
         Evaluated on **every keypress** (same shape dispatch as
@@ -1745,6 +1771,7 @@ def TextInput(
         cursor_style=cursor_style,
         is_active=is_active,
         ignore_arrows_when=ignore_arrows_when,
+        cursor_visible=cursor_visible,
         multiline=multiline,
         rows=rows,
         box_props=box_props,

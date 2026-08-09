@@ -169,6 +169,7 @@ def test_text_input_props_capture_defaults() -> None:
     assert el.props["cursor_color"] is None
     assert el.props["cursor_style"] == "block"
     assert el.props["is_active"] is True
+    assert el.props["cursor_visible"] is True
     assert el.props["box_props"] == {}
 
 
@@ -194,6 +195,7 @@ def test_text_input_props_capture_caller_values() -> None:
         cursor_color="green",
         cursor_style="bar",
         is_active=False,
+        cursor_visible=False,
         padding=1,
     )
     assert el.props["initial_value"] == "abc"
@@ -207,6 +209,7 @@ def test_text_input_props_capture_caller_values() -> None:
     assert el.props["cursor_color"] == "green"
     assert el.props["cursor_style"] == "bar"
     assert el.props["is_active"] is False
+    assert el.props["cursor_visible"] is False
     # box_props absorbs the extra kwargs.
     assert el.props["box_props"] == {"padding": 1}
 
@@ -377,6 +380,116 @@ def test_underline_cursor_marks_placeholder_first_char(monkeypatch: pytest.Monke
     finally:
         inst.unmount()
 
+
+# ---------------------------------------------------------------------------
+# cursor_visible prop (disabled-state visual signal)
+#
+# When false the in-text cursor cell (bar / block / underline inverse-video
+# or underline SGR) is suppressed on every line. The placeholder is still
+# rendered as dim text. Used by Jarvis app_shell to give a "disabled"
+# visual when the input is gated (MCP init / viewing sub-agent / etc).
+# ---------------------------------------------------------------------------
+
+
+def test_cursor_visible_false_hides_block_cursor_on_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cursor_visible=False: no inverse-video SGR on the placeholder's first char."""
+    inst, _ = _mount(
+        TextInput(placeholder="name", cursor_visible=False),
+        monkeypatch=monkeypatch,
+    )
+    try:
+        def predicate() -> bool:
+            frame = _frame(inst)
+            return (
+                "name" in _visible(frame)
+                and "\x1b[7m" not in frame
+            )
+
+        assert _wait_for(predicate), (
+            f"expected placeholder without inverse cursor; got {_frame(inst)!r}"
+        )
+    finally:
+        inst.unmount()
+
+
+def test_cursor_visible_false_hides_bar_cursor_on_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cursor_visible=False + bar style: no leading inverse-space cell."""
+    inst, _ = _mount(
+        TextInput(placeholder="name", cursor_style="bar", cursor_visible=False),
+        monkeypatch=monkeypatch,
+    )
+    try:
+        def predicate() -> bool:
+            frame = _frame(inst)
+            return (
+                "name" in _visible(frame)
+                and "\x1b[7m" not in frame
+            )
+
+        assert _wait_for(predicate), (
+            f"expected placeholder without bar cursor; got {_frame(inst)!r}"
+        )
+    finally:
+        inst.unmount()
+
+
+def test_cursor_visible_callable_flips_off_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cursor_visible=lambda: gate.value — flipping the Signal hides the cursor."""
+    from ink.core.signal import Signal
+
+    gate: Signal[bool] = signal(True)
+    inst, _ = _mount(
+        TextInput(placeholder="name", cursor_visible=lambda: gate.value),
+        monkeypatch=monkeypatch,
+    )
+    try:
+        # Initially visible: inverse SGR present.
+        assert _wait_for(lambda: "\x1b[7m" in _frame(inst)), (
+            f"expected cursor visible initially; got {_frame(inst)!r}"
+        )
+        # Flip gate off — cursor SGR must disappear.
+        gate.value = False
+        assert _wait_for(lambda: "\x1b[7m" not in _frame(inst)), (
+            f"expected cursor hidden after gate flip; got {_frame(inst)!r}"
+        )
+        # Placeholder text remains visible.
+        assert "name" in _visible(_frame(inst))
+        # Flip back on — cursor reappears.
+        gate.value = True
+        assert _wait_for(lambda: "\x1b[7m" in _frame(inst)), (
+            f"expected cursor back after gate re-flip; got {_frame(inst)!r}"
+        )
+    finally:
+        inst.unmount()
+
+
+def test_cursor_visible_false_hides_cursor_in_typed_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cursor_visible=False: typed buffer shows the text but no trailing cursor cell."""
+    inst, _ = _mount(
+        TextInput(initial_value="hello", cursor_visible=False),
+        monkeypatch=monkeypatch,
+    )
+    try:
+        def predicate() -> bool:
+            frame = _frame(inst)
+            return (
+                "hello" in _visible(frame)
+                and "\x1b[7m" not in frame
+            )
+
+        assert _wait_for(predicate), (
+            f"expected typed buffer without cursor; got {_frame(inst)!r}"
+        )
+    finally:
+        inst.unmount()
 
 
 def test_mask_renders_asterisks(monkeypatch: pytest.MonkeyPatch) -> None:
