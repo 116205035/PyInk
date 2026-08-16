@@ -2207,3 +2207,45 @@ def test_border_styles_has_rounded_alias() -> None:
     assert "rounded" in BORDER_STYLES
     assert BORDER_STYLES["rounded"] is BORDER_STYLES["round"]
     assert BORDER_STYLES["rounded"]["topLeft"] == "╭"
+
+
+# ---------------------------------------------------------------------------
+# Regression: giant no-space line inside a multi-line paragraph
+# (string_width("\n") == 0 used to kill the layout wrap guard)
+# ---------------------------------------------------------------------------
+
+
+def test_markdown_long_cjk_paragraph_line_wraps_without_blank_runs() -> None:
+    """A paragraph whose second physical line is a giant no-space CJK
+    run (e.g. a stock roster joined by ideographic commas) wraps inside
+    the rendered output — no blank filler rows between the bold header
+    and the wrapped body, and no content clipping.
+
+    Pre-fix the paragraph leaf carried ``\n`` so the wrap guard in
+    ``_layout_node`` never fired; the paragraph measured N wrapped rows
+    but painted 2 physical rows, padding the rest with blanks (the
+    Jarvis TUI "day-group gap" symptom).
+    """
+    body = "、".join(f"股票{i}(10%)" for i in range(60))
+    src = "**08-10（77只）**\n" + body
+    rendered = _render(Markdown(src), columns=40)
+    lines = rendered.split("\n")
+
+    from ink.layout.measure import _strip_ansi, string_width
+
+    plain = [_strip_ansi(ln) for ln in lines]
+
+    # No run of >=2 consecutive blank rows anywhere in the document
+    # (block spacing theme inserts at most 1 blank row between blocks).
+    run = 0
+    for ln in plain:
+        run = run + 1 if not ln.strip() else 0
+        assert run < 2, f"blank run of {run} rows: {plain!r}"
+
+    # No row exceeds the granted width (nothing stays unwrapped).
+    over = [i for i, ln in enumerate(plain) if string_width(ln) > 40]
+    assert not over, f"rows {over} exceed 40 cells: {plain!r}"
+
+    # Content preserved end-to-end.
+    assert "08-10" in plain[0]
+    assert "股票0" in rendered and "股票59" in rendered

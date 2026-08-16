@@ -116,3 +116,76 @@ def test_emoji_cluster_row_measures_same_as_ascii_of_same_width() -> None:
         f"emoji sw={string_width(emoji_out)!r}, ascii sw={string_width(ascii_out)!r}, "
         f"emoji={emoji_out!r}, ascii={ascii_out!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: multi-line leaves wrap (string_width("\n") == 0 regression)
+# ---------------------------------------------------------------------------
+
+
+def _long_cjk_line(groups: int = 40) -> str:
+    """A single no-space CJK line ~``groups`` * 7 display cells wide."""
+    return "、".join(f"股票{i}(10%)" for i in range(groups))
+
+
+def test_multiline_leaf_overwide_line_wraps_without_padding() -> None:
+    """A multi-line leaf whose second physical line exceeds the granted
+    width wraps that line; the leaf's painted rows equal its measured
+    height (no blank-row padding at the end).
+
+    Pre-fix, ``string_width`` returns 0 for any string containing
+    ``\n`` (POSIX ``wcswidth`` rejects control chars), so the wrap
+    guard in ``_layout_node`` never fired for multi-line leaves:
+    ``_measure_text`` reported the wrapped height while ``_paint_text``
+    wrote the unwrapped physical lines, and the painter padded the
+    difference with blank rows after the content.
+    """
+    text = "标题行\n" + _long_cjk_line(60)
+    rendered = render_to_string(
+        Box(Text(text), flexDirection="column"), columns=30
+    )
+    lines = rendered.split("\n")
+
+    # No physical line may stay over the granted width.
+    from ink.layout.measure import string_width as _sw
+
+    over_wide = [i for i, ln in enumerate(lines) if _sw(ln) > 30]
+    assert not over_wide, f"lines {over_wide} exceed 30 cells: {lines!r}"
+
+    # Padded blank rows at the end are the height-vs-paint mismatch.
+    trailing_blank = 0
+    for ln in reversed(lines):
+        if not ln.strip():
+            trailing_blank += 1
+        else:
+            break
+    assert trailing_blank == 0, (
+        f"{trailing_blank} blank padding rows after content: {lines!r}"
+    )
+
+    # Content is preserved: every stock token appears exactly once.
+    for i in (0, 59):
+        assert f"股票{i}" in rendered
+
+
+def test_multiline_leaf_short_lines_stay_unwrapped() -> None:
+    """Multi-line leaves whose lines already fit are untouched — the
+    guard fires on per-line width, not on the mere presence of ``\n``."""
+    text = "第一行\n第二行\n第三行"
+    rendered = render_to_string(
+        Box(Text(text), flexDirection="column"), columns=20
+    )
+    assert rendered.split("\n") == ["第一行", "第二行", "第三行"]
+
+
+def test_single_line_overwide_wrap_unchanged() -> None:
+    """Control anchor: single-line over-wide text keeps wrapping (this
+    path never went through the dead guard and must not regress)."""
+    rendered = render_to_string(
+        Box(Text(_long_cjk_line(40)), flexDirection="column"), columns=30
+    )
+    lines = rendered.split("\n")
+    assert len(lines) > 1
+    assert all(not ln.strip() or ln.strip() for ln in lines)
+    blank = [i for i, ln in enumerate(lines) if not ln.strip()]
+    assert not blank, f"unexpected blank rows {blank}: {lines!r}"

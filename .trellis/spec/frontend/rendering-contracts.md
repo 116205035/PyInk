@@ -151,6 +151,13 @@ shrink to the parent's content box.
   skin-tone modifiers (`👍🏽`) each count as a single cluster occupying
   the cells the terminal actually renders. Text-presentation sequences
   (`❤︎` via U+FE0E) count as 1 cell.
+- **`string_width` returns 0 for any string containing `\n`** (POSIX
+  `wcswidth` rejects control chars; the wrapper maps `-1 → 0`). Width
+  decisions on multi-line text must therefore measure **per physical
+  line** — `ink.layout.flex._max_line_width(text)` is the single helper
+  for "does any line of this leaf exceed W" (the `_layout_node` wrap
+  guard). Never feed a multi-line string straight into a
+  `string_width(s) > W` comparison.
 - Use this **anywhere** you compute column widths, padding, or
   truncation on strings that may carry ANSI sequences.
 
@@ -223,6 +230,29 @@ are atomic — a cluster is taken whole onto a line or moved whole to the
 next line, never split. Callers do not need to change; the atomicity
 contract is honoured inside `wrap_text`.
 
+### Common Mistake: Multi-line text never wraps; blank rows pad the leaf
+
+**Symptom**: A `Text` leaf whose content spans multiple physical lines
+(including at least one line wider than the granted width) renders that
+line unwrapped — clipped at the grid edge (content loss) — while the
+leaf claims the *wrapped* height. The painter pads the difference with
+blank rows: blank blocks mid-document and/or a large blank band at the
+end of the leaf. Seen in the Jarvis TUI as huge gaps inside a long CJK
+roster message plus ~24 blank rows between the message end and the
+input row.
+
+**Cause**: `string_width(s)` returns **0** whenever `s` contains `\n`,
+so the `_layout_node` wrap guard `string_width(source_text) >
+max_w_for_text` evaluated as `0 > W` — always false for multi-line
+leaves. `_measure_text` (which splits on `\n` and wraps per paragraph
+for height) then disagreed with `_paint_text` (which writes physical
+lines), and the box padded the height gap with blanks.
+
+**Fix**: The guard measures per line via `_max_line_width`
+(`flex.py`); `wrap_text` itself already pre-splits on `\n` and wraps
+per paragraph, so the guarded call needed no change. Never reintroduce
+a whole-string `string_width` comparison on possibly-multi-line text.
+
 ### Tests Required
 
 - Table with styled cells (bold, inline code) aligns correctly.
@@ -233,6 +263,11 @@ contract is honoured inside `wrap_text`.
 - `wrap_text` does not split a grapheme cluster across two lines
   (presentation sequence, keycap, ZWJ family, regional flag each tested
   with a width that forces a wrap mid-cluster).
+- Multi-line leaf with an over-wide line wraps with zero trailing blank
+  rows, and short-line multi-line leaves stay unwrapped
+  (`tests/layout/test_measure_integration.py::test_multiline_leaf_*`);
+  markdown end-to-end roster case in
+  `tests/externals/test_markdown.py::test_markdown_long_cjk_paragraph_line_wraps_without_blank_runs`.
 
 ### Reference Consumer
 

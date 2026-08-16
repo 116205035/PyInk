@@ -705,6 +705,22 @@ def _measure_paragraph(text: str, max_width: float) -> tuple[int, int]:
     return width, len(lines)
 
 
+def _max_line_width(text: str) -> int:
+    """Widest physical line in ``text`` (0 for empty input).
+
+    ``string_width`` returns 0 for any string containing ``\\n`` (POSIX
+    ``wcswidth`` rejects control chars and the wrapper maps ``-1 → 0``),
+    so using it on a multi-line leaf zeroes out the wrap guard in
+    ``_layout_node`` — the leaf keeps unwrapped physical lines while
+    ``_measure_text`` reports the wrapped height, and the painter pads
+    the difference with blank rows. Measure per line so the guard sees
+    over-wide lines inside multi-line leaves.
+    """
+    if "\n" not in text:
+        return string_width(text)
+    return max((string_width(line) for line in text.split("\n")), default=0)
+
+
 # ---------------------------------------------------------------------------
 # Layout main entry
 # ---------------------------------------------------------------------------
@@ -971,7 +987,7 @@ def _layout_node(
             source_text is not None
             and max_w_for_text != float("inf")
             and max_w_for_text >= 1
-            and string_width(source_text) > max_w_for_text
+            and _max_line_width(source_text) > max_w_for_text
             and (prev_wrapped_w is None or max_w_for_text < prev_wrapped_w)
         )
         if should_wrap:
