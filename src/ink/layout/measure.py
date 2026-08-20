@@ -24,6 +24,7 @@ __all__ = [
     "string_width",
     "wcswidth",
     "wrap_text",
+    "wrap_text_rows",
 ]
 
 #: Supported wrap modes for :func:`wrap_text`.
@@ -234,24 +235,51 @@ def _word_break(s: str, width: int) -> list[str]:
     Latin words and Hangul runs stay atomic; a word longer than a
     full line is hard-split via :func:`_hard_break`.
     """
+    return [row for row, _start, _end in _word_break_rows(s, width)]
+
+
+def _word_break_rows(s: str, width: int) -> list[tuple[str, int, int]]:
+    """Word-wrap ``s``; return ``(row_text, start, end)`` per row.
+
+    The half-open char spans partition ``[0, len(s))`` in order
+    (each row's ``end`` equals the next row's ``start``; the last row
+    ends at ``len(s)``). Whitespace dropped at a wrap boundary stays
+    inside the preceding row's span — it is not rendered, and a
+    cursor offset inside the dropped run reads as end-of-row. This
+    offset map lets callers (``TextInput``) wrap the raw text first
+    and splice per-row overlays (cursor / selection SGR) afterwards,
+    instead of wrapping an already-styled string whose escape runs
+    could be split from the cells they style.
+    """
     if width <= 0:
-        return [_strip_ansi(s)]
-    # Tokenise keeping whitespace runs and ANSI runs as separate tokens.
+        return [(_strip_ansi(s), 0, len(s))]
     tokens = _tokenise_words(s)
-    lines: list[str] = []
+    rows: list[tuple[str, int, int]] = []
     current: list[str] = []
     current_w = 0
-    for tok_kind, tok_text in tokens:
+    row_start: int | None = None
+
+    def flush(end: int) -> None:
+        nonlocal current, current_w, row_start
+        rows.append(
+            ("".join(current), row_start if row_start is not None else end, end)
+        )
+        current = []
+        current_w = 0
+        row_start = None
+
+    for tok_kind, tok_text, tok_start, tok_end in tokens:
+        if row_start is None:
+            row_start = tok_start
         if tok_kind == "escape":
             current.append(tok_text)
             continue
         if tok_kind == "space":
             ws_w = wcswidth(tok_text)  # U+3000 ideographic space is 2 cells
             if current_w + ws_w > width:
-                # Break here — drop trailing whitespace on this line.
-                lines.append("".join(current))
-                current = []
-                current_w = 0
+                # Break here — drop trailing whitespace on this row.
+                # The dropped run stays inside this row's span.
+                flush(tok_end)
                 continue
             current.append(tok_text)
             current_w += ws_w
@@ -262,28 +290,43 @@ def _word_break(s: str, width: int) -> list[str]:
             current.append(tok_text)
             current_w += tok_w
             continue
-        # Doesn't fit on current line — flush if there's content.
+        # Doesn't fit on current row — flush if there's content.
         if current_w > 0:
-            # Trim trailing spaces on the line we're about to flush.
+            # Trim trailing spaces on the row we're about to flush.
             while current and current[-1] == " ":
                 current.pop()
             if current:
-                lines.append("".join(current))
-            current = []
-            current_w = 0
-        # Word is now at the start of a fresh line.
+                flush(tok_start)
+            else:
+                current = []
+                current_w = 0
+                row_start = tok_start
+        # Word is now at the start of a fresh row.
         if tok_w <= width:
             current.append(tok_text)
             current_w = tok_w
+            row_start = tok_start
             continue
-        # Word longer than ``width``: hard-split it.
+        # Word longer than ``width``: hard-split it. The parts are
+        # consecutive substrings of the token, so spans accumulate.
+        part_off = tok_start
         for part in _hard_break(tok_text, width):
-            lines.append(part)
-    if current_w > 0 or not lines:
+            rows.append((part, part_off, part_off + len(part)))
+            part_off += len(part)
+        current = []
+        current_w = 0
+        row_start = None
+    if current_w > 0 or not rows:
         while current and current[-1] == " ":
             current.pop()
-        lines.append("".join(current))
-    return lines if lines else [""]
+        rows.append(
+            (
+                "".join(current),
+                row_start if row_start is not None else len(s),
+                len(s),
+            )
+        )
+    return rows if rows else [("", 0, 0)]
 
 
 #: Hangul blocks. Korean line breaking is space-based (UAX #14 LB28
@@ -321,46 +364,57 @@ def _is_cjk_breakable(cluster: str) -> bool:
     return not any(lo <= o <= hi for lo, hi in _HANGUL_RANGES)
 
 
-def _merge_kinsoku(tokens: list[tuple[str, str]]) -> list[tuple[str, str]]:
+def _merge_kinsoku(
+    tokens: list[tuple[str, str, int, int]],
+) -> list[tuple[str, str, int, int]]:
     """Glue kinsoku punctuation onto the adjacent word token.
 
     Closers (``。``, ``、``, ``」`` …) merge into the *previous* word
     token so they can never be pushed to a line start; openers
     (``（``, ``「`` …) merge into the *following* word token so they
     can never dangle at a line end. Chained openers accumulate onto
-    the next word token together.
+    the next word token together. Spans widen to cover the merged
+    text (adjacent tokens are contiguous in the source).
     """
-    merged: list[tuple[str, str]] = []
-    for kind, text in tokens:
+    merged: list[tuple[str, str, int, int]] = []
+    for kind, text, start, end in tokens:
         if (
             kind == "word"
             and text in _KINSOKU_NO_LINE_START
             and merged
             and merged[-1][0] == "word"
         ):
-            merged[-1] = ("word", merged[-1][1] + text)
+            _pk, pt, ps, _pe = merged[-1]
+            merged[-1] = ("word", pt + text, ps, end)
         else:
-            merged.append((kind, text))
-    out: list[tuple[str, str]] = []
+            merged.append((kind, text, start, end))
+    out: list[tuple[str, str, int, int]] = []
     glue = ""
-    for kind, text in merged:
+    glue_start = -1
+    for kind, text, start, end in merged:
         if kind != "word":
             if glue:
-                out.append(("word", glue))
+                out.append(("word", glue, glue_start, start))
                 glue = ""
-            out.append((kind, text))
+                glue_start = -1
+            out.append((kind, text, start, end))
         elif text in _KINSOKU_NO_LINE_END:
+            if glue_start < 0:
+                glue_start = start
             glue += text
         else:
-            out.append(("word", glue + text))
+            out.append(("word", glue + text, start if not glue else glue_start, end))
             glue = ""
+            glue_start = -1
     if glue:
-        out.append(("word", glue))
+        out.append(("word", glue, glue_start, glue_start + len(glue)))
     return out
 
 
-def _tokenise_words(s: str) -> list[tuple[str, str]]:
-    """Yield ``(kind, text)`` tokens; kind ∈ {"word", "space", "escape"}.
+def _tokenise_words(s: str) -> list[tuple[str, str, int, int]]:
+    """Yield ``(kind, text, start, end)`` tokens; kind ∈ {"word",
+    "space", "escape"}; ``start`` / ``end`` are char offsets into
+    ``s`` (half-open, contiguous across tokens).
 
     A "word" is a maximal run of clusters that must stay unbroken:
     latin words, Hangul runs, and kinsoku-glued groups are atomic.
@@ -369,34 +423,52 @@ def _tokenise_words(s: str) -> list[tuple[str, str]]:
     (UAX #14 subset). "space" is a run of whitespace clusters;
     "escape" is one ANSI sequence.
     """
-    tokens: list[tuple[str, str]] = []
+    tokens: list[tuple[str, str, int, int]] = []
+    pos = 0
     for chunk, is_escape in _split_visible_chunks(s):
         if is_escape:
-            tokens.append(("escape", chunk))
+            tokens.append(("escape", chunk, pos, pos + len(chunk)))
+            pos += len(chunk)
             continue
+        chunk_base = pos
+        cl_off = 0
         word: list[str] = []
+        word_start = -1
         pending_space: list[str] = []
+        space_start = -1
         for cl, _w in _iter_clusters(chunk):
+            cl_start = chunk_base + cl_off
+            cl_off += len(cl)
             if cl.isspace():
+                if space_start < 0:
+                    space_start = cl_start
                 pending_space.append(cl)
                 continue
             if pending_space:
                 if word:
-                    tokens.append(("word", "".join(word)))
+                    tokens.append(("word", "".join(word), word_start, space_start))
                     word = []
-                tokens.append(("space", "".join(pending_space)))
+                    word_start = -1
+                tokens.append(("space", "".join(pending_space), space_start, cl_start))
                 pending_space = []
+                space_start = -1
             if _is_cjk_breakable(cl):
                 if word:
-                    tokens.append(("word", "".join(word)))
+                    tokens.append(("word", "".join(word), word_start, cl_start))
                     word = []
-                tokens.append(("word", cl))
+                    word_start = -1
+                tokens.append(("word", cl, cl_start, cl_start + len(cl)))
             else:
+                if word_start < 0:
+                    word_start = cl_start
                 word.append(cl)
         if word:
-            tokens.append(("word", "".join(word)))
+            tokens.append(("word", "".join(word), word_start, chunk_base + cl_off))
         if pending_space:
-            tokens.append(("space", "".join(pending_space)))
+            tokens.append(
+                ("space", "".join(pending_space), space_start, chunk_base + cl_off)
+            )
+        pos = chunk_base + cl_off
     return _merge_kinsoku(tokens)
 
 
@@ -565,3 +637,21 @@ def wrap_text(
             raise ValueError(f"Unknown wrap mode: {mode!r}")
 
     return out_lines
+
+
+def wrap_text_rows(s: str, width: int) -> list[tuple[str, int, int]]:
+    """Word-wrap ``s`` into rows annotated with source char spans.
+
+    Returns ``[(row_text, start, end), ...]`` using the same
+    word-break rules as ``wrap_text(mode="wrap")`` (whitespace and
+    CJK cluster boundaries; latin / Hangul words atomic; overly long
+    words hard-split). The half-open spans partition ``[0, len(s))``
+    so a caller can map a char offset in ``s`` to exactly one row —
+    the primitive ``TextInput`` uses to splice cursor / selection
+    overlays per row after wrapping the raw text.
+
+    ``s`` must not contain ``\\n`` (pre-split logical lines, as
+    ``TextInput`` does). ``width <= 0`` returns the whole (ANSI-
+    stripped) string as one row spanning the full range.
+    """
+    return _word_break_rows(s, width)

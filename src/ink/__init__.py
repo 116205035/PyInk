@@ -63,6 +63,7 @@ from ink.layout import (
     render_layout_to_string,
     string_width,
     wrap_text,
+    wrap_text_rows,
 )
 from ink.render import Instance, render, render_to_string
 
@@ -105,6 +106,7 @@ __all__ = [
     "render_layout_to_string",
     "string_width",
     "wrap_text",
+    "wrap_text_rows",
     # Built-in components (PR4 + PR7)
     "Box",
     "Newline",

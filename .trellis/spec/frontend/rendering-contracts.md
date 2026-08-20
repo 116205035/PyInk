@@ -257,6 +257,33 @@ reintroduce whitespace-only tokenisation, and do not "fix" CJK
 wrapping at the call site (e.g. `wrap="hard"` on the echo) — that
 splits latin words too.
 
+### Common Mistake: Wrapping an SGR-spliced string (or truncating) instead of wrapping raw text per row
+
+**Symptom**: A component that decorates its buffer with inline SGR
+(cursor cell, selection inverse, syntax colours) either truncates with
+`…` when content exceeds the width, or wraps the already-styled string
+and produces a row ending in a dangling `\x1b[7m` (inverse video leaks
+onto subsequent rows) / a wrapped row that lost its style.
+
+**Cause**: The wrap engine's contract is *raw text*: escape tokens ride
+along with the current row and carry no SGR state re-opening. A flush
+between an opener and its character (or inside a long selection span)
+splits the run from the cells it styles. Truncating to dodge the
+problem hides content (seen from Jarvis: the input showed `...` at the
+front/back instead of wrapping, unlike ink.js, whose `ink-text-input`
+renders a plain wrapping `<Text>`).
+
+**Fix**: Wrap the **raw** text and splice overlays per row using the
+rows' source spans — `ink.layout.measure.wrap_text_rows(s, width)`
+returns `[(row_text, start, end), ...]` whose half-open spans partition
+`[0, len(s))` (dropped wrap-boundary whitespace stays in the preceding
+row's span). Map char offsets (cursor, selection bounds) to exactly one
+row, then decorate that row only. Reference consumer:
+`src/ink/externals/text_input.py` (`_render_lines`) — the input
+wrap-and-grows like ink.js (no ellipsis), reserves one cell on the
+cursor's logical line for the cursor cell, and keeps
+`wrap="truncate-end"` on the Text purely as a safety net.
+
 ### Common Mistake: Multi-line text never wraps; blank rows pad the leaf
 
 **Symptom**: A `Text` leaf whose content spans multiple physical lines
@@ -297,6 +324,13 @@ a whole-string `string_width` comparison on possibly-multi-line text.
   (`tests/layout/test_measure.py` CJK section, plus the nested
   `tests/layout/test_measure_integration.py::
   test_cjk_prefix_echo_wraps_with_prefix_on_first_line`).
+- `wrap_text_rows` spans partition the source (dropped wrap-boundary
+  whitespace stays in the preceding row's span), and a component that
+  splices per-row overlays on top of them (TextInput) renders the
+  cursor on exactly one wrapped row, paints selections on every row
+  they touch, and never ellipsizes wrapped content
+  (`tests/layout/test_measure.py` wrap_text_rows section;
+  `tests/externals/test_text_input.py` wrap-and-grow section).
 - Multi-line leaf with an over-wide line wraps with zero trailing blank
   rows, and short-line multi-line leaves stay unwrapped
   (`tests/layout/test_measure_integration.py::test_multiline_leaf_*`);

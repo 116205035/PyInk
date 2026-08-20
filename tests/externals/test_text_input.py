@@ -2202,79 +2202,74 @@ def test_on_cursor_change_reflects_latest_callback(
 
 
 # ---------------------------------------------------------------------------
-# Long-content layout — Text uses ``wrap="truncate-end"`` so the parent Box
-# never grows past its row budget. (Bug fix: single-line TextInput with very
-# long content used to wrap into extra rows and blow the column layout.)
+# Long-content layout — wrap-and-grow (ink.js parity). Each logical line
+# wraps into extra display rows; nothing is ellipsized. Regression
+# (jarvis): the input used to clip with `...` around a cursor-centred
+# window.
 # ---------------------------------------------------------------------------
 
 
-def test_single_line_input_long_content_does_not_grow_box(
+def test_single_line_input_long_content_wraps_to_extra_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Content longer than the viewport renders as a single visible row.
+    """Content longer than the viewport wraps onto extra visible rows.
 
-    A single-line TextInput whose buffer exceeds the container width must
-    NOT push the parent Box into extra rows — that would cascade into the
-    surrounding column layout and crop sibling components. The internal
-    Text uses ``wrap="truncate-end"`` so long content clips to one row.
+    A single-line TextInput whose buffer exceeds the container width
+    grows vertically (ink-text-input renders a plain wrapping ``<Text>``)
+    — every character stays visible and no ellipsis is emitted.
     """
-    # 40 chars in a 20-col viewport → must overflow horizontally without
-    # adding vertical rows.
     long_value = "a" * 40
     inst, _ = _mount(
         TextInput(initial_value=long_value),
         monkeypatch=monkeypatch,
         columns=20,
-        rows=3,
+        rows=6,
     )
-    # Wait for first paint, then count newlines in the raw frame. A
-    # single-line input renders exactly one content row; the parent Box
-    # has no border so the frame should have at most one newline (the
-    # row terminator).
     assert _wait_for(lambda: "a" in _visible(_frame(inst)))
     frame = _frame(inst)
-    # Strip trailing blank lines the renderer pads the viewport with.
-    # The meaningful content is everything before the first run of empty
-    # padding rows; we count non-empty visible rows.
     visible_lines = [
         line for line in _visible(frame).split("\n") if line.strip()
     ]
-    assert len(visible_lines) <= 1, (
-        f"single-line input should render ≤ 1 visible row, got {visible_lines!r}"
+    # Budget is 19 (one cell reserved for the cursor cell) → 19 + 19 + 2.
+    assert len(visible_lines) == 3, (
+        f"40 chars in a 20-col viewport should wrap to 3 rows, "
+        f"got {visible_lines!r}"
+    )
+    assert "…" not in _visible(frame)
+    assert "".join(visible_lines).count("a") == 40
+    # Cursor sits at end-of-buffer → its inverse cell is on the LAST row.
+    raw_rows = [line for line in frame.split("\n") if line.strip()]
+    assert f"{ESC}[7m" in raw_rows[-1], (
+        f"cursor should render on the last wrapped row: {raw_rows!r}"
     )
     inst.unmount()
 
 
-def test_multi_line_input_each_line_truncates_at_box_width(
+def test_multi_line_input_long_line_wraps_per_logical_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Each physical line of a multi-line TextInput truncates at box width.
+    """Each physical line of a multi-line TextInput wraps at box width.
 
-    A multi-line TextInput with one very long physical line must NOT let
-    that line wrap into extra rows inside its own Box. Each per-line Text
-    child uses ``wrap="truncate-end"`` so a 2-line buffer stays 2 rows
-    even if one line is wider than the viewport.
+    A multi-line TextInput with one very long physical line wraps that
+    line onto extra rows: "short" + 19 + 19 + 2 = 4 visible rows, all
+    content preserved, no ellipsis.
     """
-    # Line 0 is short, line 1 is 40 chars (overflows the 20-col viewport).
     inst, _ = _mount(
         TextInput(initial_value="short\n" + "b" * 40, multiline=True),
         monkeypatch=monkeypatch,
         columns=20,
-        rows=6,
+        rows=8,
     )
     assert _wait_for(lambda: "short" in _visible(_frame(inst)))
     frame = _frame(inst)
     visible_lines = [
         line for line in _visible(frame).split("\n") if line.strip()
     ]
-    # Two logical lines → at most 2 visible content rows (no wrap-induced
-    # extras). We allow ≤ 2 to stay robust to the renderer's own padding
-    # logic but the key assertion is that the long line didn't fan out
-    # into 3+ rows.
-    assert len(visible_lines) <= 2, (
-        f"multi-line input should render ≤ 2 visible rows "
-        f"(one per logical line), got {visible_lines!r}"
+    assert len(visible_lines) == 4, (
+        f"expected 4 wrapped rows (short + 3), got {visible_lines!r}"
     )
+    assert "…" not in _visible(frame)
+    assert "".join(visible_lines).count("b") == 40
     inst.unmount()
 
 
@@ -2438,99 +2433,194 @@ def test_cursor_survives_per_line_truncation_long_content(
     inst.unmount()
 
 
-def test_text_input_long_value_truncates_to_one_row(
+def test_text_input_long_value_wraps_without_ellipsis(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Single-line TextInput with very long content renders exactly 1 row.
+    """Single-line TextInput with very long content wraps, never truncates.
 
-    Regression: long single-line content used to wrap into extra rows
-    inside its own Box and blow the column layout. With per-line
-    pre-truncation + ``wrap="truncate-end"`` the box stays at 1 row.
+    80 chars at budget 19 → 5 rows; every character stays visible and
+    no `…` appears anywhere in the frame.
     """
     long_value = "a" * 80
     inst, _ = _mount(
         TextInput(initial_value=long_value),
         monkeypatch=monkeypatch,
         columns=20,
-        rows=3,
+        rows=8,
     )
     assert _wait_for(lambda: "a" in _visible(_frame(inst)))
 
-    def one_visible_row() -> bool:
-        visible_lines = [
+    def wrapped_rows() -> list[str]:
+        return [
             line for line in _visible(_frame(inst)).split("\n") if line.strip()
         ]
-        return len(visible_lines) == 1
 
-    assert _wait_for(one_visible_row), (
-        f"single-line input should render exactly 1 row; "
-        f"got: {_visible(_frame(inst)).split(chr(10))!r}"
+    assert _wait_for(lambda: len(wrapped_rows()) == 5), (
+        f"80 chars in a 20-col viewport should wrap to 5 rows; "
+        f"got: {wrapped_rows()!r}"
     )
+    assert "…" not in _visible(_frame(inst))
+    assert "".join(wrapped_rows()).count("a") == 80
     inst.unmount()
 
 
 # ---------------------------------------------------------------------------
-# Cursor SGR preservation under per-line truncation (Bug B regression)
+# Wrap-and-grow: cursor / selection / viewport on wrapped display rows
 # ---------------------------------------------------------------------------
 
 
-def test_take_visible_cells_preserves_cursor_sgr_mid_string() -> None:
-    """``_take_visible_cells`` keeps a cursor SGR run that sits *inside* the
-    returned prefix.
+@pytest.mark.parametrize("cursor_style", ["bar", "block", "underline"])
+def test_cursor_renders_on_own_wrapped_row_for_each_style(
+    cursor_style: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cursor cell lands on the display row owning its offset.
 
-    Regression (Bug B): ``_take_visible_cells`` used to drop escapes held in
-    ``pending_trailing`` when a new visible character was appended — so a
-    block cursor over the first character of a long line lost its
-    ``\\x1b[7m<char>\\x1b[0m`` paint as soon as the visible window reached
-    past the cursor. The cursor visually "disappeared" even though the
-    cursor cell was inside the kept window.
-
-    The fix flushes pending escapes into ``out`` *before* the next visible
-    char so the cursor's SGR open + reset both survive into the prefix.
+    Wrapping spreads one logical line over several rows; the cursor /
+    selection SGR is spliced per row via the wrap's source spans, so
+    exactly one row carries the cursor and its SGR stays balanced
+    (every opener has a reset on the same row).
     """
-    from ink.externals.text_input import _take_visible_cells
+    inst, _ = _mount(
+        TextInput(initial_value="a" * 40, cursor_style=cursor_style),  # type: ignore[arg-type]
+        monkeypatch=monkeypatch,
+        columns=20,
+        rows=6,
+    )
+    marker = {"bar": f"{ESC}[7m", "block": f"{ESC}[7m", "underline": f"{ESC}[4m"}[
+        cursor_style
+    ]
+    assert _wait_for(lambda: marker in _frame(inst))
+    raw_rows = [line for line in _frame(inst).split("\n") if line.strip()]
+    cursor_rows = [line for line in raw_rows if marker in line]
+    assert len(cursor_rows) == 1, (
+        f"exactly one wrapped row should carry the cursor: {raw_rows!r}"
+    )
+    # Cursor starts at end-of-buffer → the last row.
+    assert cursor_rows[0] == raw_rows[-1], (
+        f"cursor should be on the last wrapped row: {raw_rows!r}"
+    )
+    for row in raw_rows:
+        openers = row.count(f"{ESC}[7m") + row.count(f"{ESC}[4m")
+        assert row.count(f"{ESC}[0m") >= openers, (
+            f"row has an unclosed cursor/selection SGR: {row!r}"
+        )
+    inst.unmount()
 
-    # Block cursor over 'a' (green + inverse), then more visible text.
-    s = f"{ESC}[32m{ESC}[7ma{ESC}[0mbcdef"
-    # width=1 keeps just the cursor cell — both open and reset must survive.
-    assert _take_visible_cells(s, 1) == f"{ESC}[32m{ESC}[7ma{ESC}[0m"
-    # width=3 keeps cursor + 2 more chars — the cursor SGR run is still
-    # intact (open before 'a', reset after, then 'bc').
-    assert _take_visible_cells(s, 3) == f"{ESC}[32m{ESC}[7ma{ESC}[0mbc"
+
+def test_cursor_home_lands_on_first_wrapped_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Home moves the cursor to offset 0 → row 0 of the wrapped input."""
+    inst, _ = _mount(
+        TextInput(initial_value="a" * 40),
+        monkeypatch=monkeypatch,
+        feed=[b"\x1b[H"],
+        columns=20,
+        rows=6,
+    )
+    assert _wait_for(lambda: f"{ESC}[7m" in _frame(inst))
+    raw_rows = [line for line in _frame(inst).split("\n") if line.strip()]
+    cursor_rows = [i for i, line in enumerate(raw_rows) if f"{ESC}[7m" in line]
+    assert cursor_rows == [0], (
+        f"cursor should render on wrapped row 0 after Home: {raw_rows!r}"
+    )
+    inst.unmount()
 
 
-def test_take_visible_cells_preserves_mid_string_cursor_sgr() -> None:
-    """Cursor SGR in the middle of the visible prefix survives the cut."""
-    from ink.externals.text_input import _take_visible_cells
+def test_selection_spanning_wrap_boundary_paints_each_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A selection crossing a wrap boundary paints on every row it
+    touches — the SGR is spliced per row, not around the whole buffer.
 
-    # Cursor over 'b' in "abcdef", keep width 3.
-    s = f"a{ESC}[7mb{ESC}[0mcdef"
-    assert _take_visible_cells(s, 3) == f"a{ESC}[7mb{ESC}[0mc"
-
-
-def test_take_visible_cells_drops_unclosed_cursor_when_past_width() -> None:
-    """When the cursor cell itself sits past the width budget, its open
-    SGR sequence is dropped (not left dangling).
-
-    A dangling ``\\x1b[7m`` at the end of a row would flip the terminal's
-    inverse video on for everything painted afterwards — the classic
-    "cursor covering multiple chars" visual bug.
+    Home (cursor → 0) then 25 × Shift+Right selects offsets [0, 25):
+    wrapped row 0 (19 chars) is fully selected, row 1 is selected up to
+    its 6th char, row 2 is untouched.
     """
-    from ink.externals.text_input import _take_visible_cells
+    offsets: list[int] = []
+    feed: list[bytes] = [b"\x1b[H"] + [b"\x1b[1;2C"] * 25
+    inst, _ = _mount(
+        TextInput(initial_value="a" * 40, on_cursor_change=offsets.append),
+        monkeypatch=monkeypatch,
+        feed=feed,
+        columns=20,
+        rows=6,
+    )
+    assert _wait_for(lambda: bool(offsets) and offsets[-1] == 25)
+    assert _wait_for(lambda: _frame(inst).count(f"{ESC}[7m") >= 2)
+    raw_rows = [line for line in _frame(inst).split("\n") if line.strip()]
+    inverse_rows = [i for i, line in enumerate(raw_rows) if f"{ESC}[7m" in line]
+    assert inverse_rows == [0, 1], (
+        f"selection [0,25) should paint wrapped rows 0 and 1 only: {raw_rows!r}"
+    )
+    inst.unmount()
 
-    # Block cursor at end-of-input (inverse space). Width=3 keeps only
-    # 'abc'; the cursor's open `\x1b[7m` must be stripped so it doesn't
-    # leak inverse video onto whatever the renderer paints next.
-    s = f"abc{ESC}[7m {ESC}[0m"
-    assert _take_visible_cells(s, 3) == "abc"
+
+def test_rows_viewport_follows_wrapped_display_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``rows`` caps the height and scrolls to the cursor's *display* row.
+
+    A wrapped single logical line occupies several display rows; the
+    viewport window must follow the wrapped row the cursor is on, not
+    the logical line number (which stays 0). Cursor at end → the window
+    shows the last two wrapped rows.
+    """
+    inst, _ = _mount(
+        TextInput(initial_value="a" * 40, rows=2),
+        monkeypatch=monkeypatch,
+        columns=20,
+        rows=8,
+    )
+    assert _wait_for(lambda: "a" in _visible(_frame(inst)))
+
+    def capped_rows() -> list[str]:
+        return [
+            line for line in _visible(_frame(inst)).split("\n") if line.strip()
+        ]
+
+    assert _wait_for(lambda: len(capped_rows()) == 2), (
+        f"rows=2 should cap the input to 2 visible rows: {capped_rows()!r}"
+    )
+    # 40 chars wrap to 19 + 19 + 2; cursor at end → window = rows 2..3.
+    visible = capped_rows()
+    assert len(visible[0]) == 19, f"first shown row should hold 19 chars: {visible!r}"
+    assert visible[1].rstrip() == "aa", f"last shown row should be the 2-char tail: {visible!r}"
+    inst.unmount()
 
 
-def test_take_visible_cells_keeps_trailing_reset_escape() -> None:
-    """A lone trailing reset (``\\x1b[0m``) at the cut point survives."""
-    from ink.externals.text_input import _take_visible_cells
+def test_wrapped_cjk_input_inside_prompt_row_box(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """jarvis echo-row shape: prompt glyph + TextInput in a row Box.
 
-    s = f"ab{ESC}[0m"
-    assert _take_visible_cells(s, 2) == f"ab{ESC}[0m"
+    Long unspaced CJK wraps between characters inside the input's flex
+    share; every physical row fits the terminal width, all characters
+    survive, and no ellipsis appears. Nested row→column per the
+    layout-bug-testing discipline.
+    """
+    from ink.layout.measure import string_width
+
+    inst, _ = _mount(
+        Box(
+            Text("❯ "),
+            TextInput(initial_value="你好" * 20),
+            flexDirection="row",
+        ),
+        monkeypatch=monkeypatch,
+        columns=24,
+        rows=10,
+    )
+    assert _wait_for(lambda: "你" in _visible(_frame(inst)))
+    vis = _visible(_frame(inst))
+    assert "…" not in vis
+    content_rows = [line for line in vis.split("\n") if line.strip()]
+    assert len(content_rows) > 1, f"CJK content should wrap: {content_rows!r}"
+    for line in content_rows:
+        assert string_width(line) <= 24, f"over-wide row: {line!r}"
+    assert vis.count("你") == 20
+    assert vis.count("好") == 20
+    inst.unmount()
 
 
 def test_cursor_stays_inverse_when_line_truncated_with_cursor_in_spaces(
@@ -3151,82 +3241,6 @@ def test_cursor_position_with_cjk_at_end() -> None:
     assert string_width(prefix) == 4, (
         f"cursor at end should have prefix = full line (width 4); "
         f"got {string_width(prefix)}: {rendered!r}"
-    )
-
-
-def test_truncate_around_cursor_with_cjk() -> None:
-    """Truncation keeps the cursor SGR visible at the right column for CJK.
-
-    Long CJK line truncated so the cursor just fits in the leading
-    window: the cursor's visible column (computed from display width)
-    matches the position the SGR ends up at inside the truncated output.
-
-    Note: we keep the cursor *inside* the leading truncation window so
-    the test exercises the alignment between ``_build_displayed_line``
-    (which now splices the cursor SGR by display width) and
-    ``_truncate_line_around_cursor`` (which advances by visible cell).
-    Edge cases where the window boundary splits a wide character are
-    tracked separately under Bug 1's clip-to-box work.
-    """
-    from ink.externals.text_input import (
-        _build_displayed_line,
-        _cursor_visible_column,
-        _truncate_line_around_cursor,
-    )
-    from ink.layout.measure import string_width
-
-    # 3 CJK chars (width 6) + 3 ASCII = 9 visible cells.
-    line = "你好世abc"
-    assert string_width(line) == 9
-
-    # Cursor at end (after c). local_cursor = 6, visible col = 9.
-    local_cursor = 6
-    rendered = _build_displayed_line(
-        line,
-        cursor_in_line=True,
-        cursor=local_cursor,
-        line_start=0,
-        cursor_style="bar",
-        cursor_color=None,
-        selection=None,
-        mask=None,
-        line_text_raw=line,
-    )
-    cursor_col = _cursor_visible_column(line, None, local_cursor)
-    assert cursor_col == 9
-
-    # Truncate to width 10 — cursor_end (10) <= width-1 (9)? No, but
-    # the full rendered line is 10 cells wide (9 text + 1 bar), so it
-    # fits without truncation. Use a wider window to exercise the
-    # cursor-fits-in-leading-window branch directly.
-    truncated = _truncate_line_around_cursor(
-        rendered,
-        width=12,
-        cursor_visible_column=cursor_col,
-        cursor_visible_width=1,
-    )
-    assert truncated == rendered, (
-        f"no truncation expected when line fits; got {truncated!r}"
-    )
-
-    # Now truncate to exactly the cursor's end — cursor_end = 10, width
-    # = 10 → cursor_end <= width is true (fits exactly).
-    # line_width is 10 (9 content + 1 cursor cell); width=10 → no truncation.
-    truncated_fit = _truncate_line_around_cursor(
-        rendered,
-        width=10,
-        cursor_visible_column=cursor_col,
-        cursor_visible_width=1,
-    )
-    assert f"{ESC}[7m {ESC}[0m" in truncated_fit, (
-        f"cursor cell must survive truncation: {truncated_fit!r}"
-    )
-    cursor_idx = truncated_fit.find(f"{ESC}[7m")
-    prefix = truncated_fit[:cursor_idx]
-    # Cursor cell sits at column 9 — the display width of 你好世.
-    assert string_width(prefix) == 9, (
-        f"cursor should sit at column 9 (display width of 你好世); "
-        f"got {string_width(prefix)}: {truncated_fit!r}"
     )
 
 

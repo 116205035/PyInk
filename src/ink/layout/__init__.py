@@ -31,7 +31,7 @@ from ink.layout.flex import (
     layout,
     layout_root,
 )
-from ink.layout.measure import WrapMode, string_width, wrap_text
+from ink.layout.measure import WrapMode, string_width, wrap_text, wrap_text_rows
 from ink.layout.render_layout import render_layout_to_string
 
 __all__ = [
@@ -54,4 +54,5 @@ __all__ = [
     "render_layout_to_string",
     "string_width",
     "wrap_text",
+    "wrap_text_rows",
 ]

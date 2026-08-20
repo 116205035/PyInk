@@ -435,3 +435,54 @@ def test_wrap_text_ideographic_space_counts_two_cells() -> None:
     # U+3000 is a 2-cell space run: 2 + 2 > 3 → break, space dropped.
     lines = wrap_text("你　好", 3, mode="wrap")
     assert lines == ["你", "好"]
+
+
+# ---------------------------------------------------------------------------
+# wrap_text_rows — offset-annotated wrapping (TextInput wrap-and-grow)
+# ---------------------------------------------------------------------------
+
+
+def test_wrap_text_rows_spans_partition_source() -> None:
+    from ink.layout.measure import wrap_text_rows
+
+    rows = wrap_text_rows("hello world foo", 5)
+    assert [r for r, _s, _e in rows] == ["hello", "world", "foo"]
+    # Contiguous partition of [0, len(s)).
+    for (_t1, _s1, e1), (_t2, s2, _e2) in zip(rows, rows[1:], strict=False):
+        assert e1 == s2
+    assert rows[0][1] == 0
+    assert rows[-1][2] == len("hello world foo")
+
+
+def test_wrap_text_rows_dropped_spaces_stay_in_preceding_span() -> None:
+    from ink.layout.measure import wrap_text_rows
+
+    # "aaaa" + 3 dropped spaces + "bbbb": the spaces belong to row 0's
+    # span (a cursor inside them reads as end-of-row), row 1 starts at 7.
+    rows = wrap_text_rows("aaaa   bbbb", 4)
+    assert rows == [("aaaa", 0, 7), ("bbbb", 7, 11)]
+
+
+def test_wrap_text_rows_cjk_offset_mapping() -> None:
+    from ink.layout.measure import wrap_text_rows
+
+    rows = wrap_text_rows("你好世界再见", 4)
+    assert [r for r, _s, _e in rows] == ["你好", "世界", "再见"]
+    assert [(s, e) for _r, s, e in rows] == [(0, 2), (2, 4), (4, 6)]
+
+
+def test_wrap_text_rows_matches_wrap_text_texts() -> None:
+    from ink.layout.measure import wrap_text_rows
+
+    for text, width in [
+        ("hello world", 5),
+        ("abcdefgh", 3),
+        ("你好，世界真好", 4),
+        ("aa bb cc", 4),
+        ("a" * 45, 19),
+        ("", 5),
+        (" ", 5),
+    ]:
+        assert [r for r, _s, _e in wrap_text_rows(text, width)] == wrap_text(
+            text, width
+        ), (text, width)

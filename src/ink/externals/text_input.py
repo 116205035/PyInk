@@ -26,6 +26,12 @@ Design (per PRD Decision 1):
   callbacks between mounts without resubscribing the input handler.
   The handler closure is registered exactly once via
   :func:`ink.hooks.use_input`.
+* Long content **wraps, never truncates**: each logical line is
+  word-wrapped into display rows (:func:`ink.layout.measure.wrap_text_rows`)
+  and cursor / selection SGR is spliced per row using the row's source
+  span; the input grows vertically (ink.js parity — ``ink-text-input``
+  renders a plain wrapping ``<Text>``). The Text leaf keeps
+  ``wrap="truncate-end"`` purely as a safety net.
 
 Cursor rendering (per PRD Section "cursor 渲染细节"):
 
@@ -70,7 +76,7 @@ from ink.core.element import Element, create_element
 from ink.core.signal import Ref, Signal, effect, ref, signal
 from ink.hooks.input import use_input
 from ink.layout._text_width_context import get_current_text_width
-from ink.layout.measure import string_width
+from ink.layout.measure import string_width, wrap_text_rows
 from ink.render.ansi import apply_style, parse_color
 from ink.render.keys import Key
 
@@ -332,40 +338,6 @@ def _apply_selection(
     return f"{before}{_SGR_INVERSE}{body}{_SGR_RESET}{after}"
 
 
-def _visible_width_to_char_offset(
-    line_text: str,
-    target_width: int,
-) -> int:
-    """Return the char offset in ``line_text`` at visible column ``target_width``.
-
-    Walks characters one at a time, accumulating each character's
-    :func:`ink.layout.measure._char_width`. Returns the char offset
-    whose leading visible column equals ``target_width``. If a wide
-    character straddles ``target_width`` (its left edge is before and
-    right edge is at-or-after), returns the offset of that wide
-    character — the caller decides whether to splice before or onto
-    that character. Clamps to ``[0, len(line_text)]``.
-    """
-    if target_width <= 0:
-        return 0
-    from ink.layout.measure import _char_width
-
-    pos = 0
-    width = 0
-    while pos < len(line_text):
-        ch = line_text[pos]
-        w = _char_width(ch)
-        if w <= 0:
-            # Combining mark — skip; attaches to the previous base char.
-            pos += 1
-            continue
-        if width >= target_width:
-            return pos
-        pos += 1
-        width += w
-    return pos
-
-
 def _build_displayed_line(
     line_text: str,
     cursor_in_line: bool,
@@ -385,7 +357,7 @@ def _build_displayed_line(
     cursor SGR lands on the exact visible column returned by
     :func:`_cursor_visible_column`. For CJK / wide-character rows the
     visible column diverges from the character offset; this walk keeps
-    cursor + selection aligned with what the truncation helper
+    cursor + selection aligned with the row-span mapping the wrapper
     computes (Bug 4).
 
     Parameters
@@ -589,227 +561,6 @@ def _split_lines(value: str) -> list[tuple[int, str]]:
         out.append((offset, piece))
         offset += len(piece) + 1  # +1 for the consumed newline.
     return out
-
-
-#: Ellipsis glyph used by per-line truncation. Kept consistent with
-#: :mod:`ink.layout.measure`'s ``_ELLIPSIS`` so the visual matches the
-#: generic ``truncate-end`` wrap path the Text node falls back to when
-#: the line fits without cursor-aware intervention.
-_ELLIPSIS = "…"
-
-
-def _truncate_line_around_cursor(
-    rendered_line: str,
-    *,
-    width: int,
-    cursor_visible_column: int | None,
-    cursor_visible_width: int,
-) -> str:
-    """Truncate a single rendered line to ``width`` cells, keeping the cursor.
-
-    ``rendered_line`` is one row of the TextInput's display output —
-    the line's text with cursor / selection SGR escapes already
-    spliced in. ANSI escapes don't count toward the visible width.
-
-    ``cursor_visible_column`` is the 0-based cell column the cursor
-    sits at within ``rendered_line`` (``None`` when the cursor is on a
-    different row). ``cursor_visible_width`` is how many cells the
-    cursor itself occupies (1 for block / underline; 1 for bar — the
-    bar inserts an extra cell).
-
-    The truncation strategy adapts to where the cursor is:
-
-    * **No cursor on this row** — plain ``truncate-end`` (leading
-      characters, trailing ellipsis). Matches the generic wrap engine.
-    * **Cursor fits in the leading ``width`` cells** — same: keep the
-      prefix that contains the cursor, append ellipsis. Cursor visible.
-    * **Cursor is past the leading window** — keep a trailing window
-      that ends at (cursor + its width) so the cursor stays visible at
-      the right edge; prepend an ellipsis. This loses some leading
-      content but never the cursor — matches the ink-text-input UX
-      where typing past the right edge scrolls the input so the cursor
-      remains on screen.
-    """
-    if width <= 0:
-        return ""
-    line_width = string_width(rendered_line)
-    if line_width <= width:
-        return rendered_line
-    # No cursor on this row — plain truncate-end.
-    if cursor_visible_column is None:
-        target = width - 1  # 1 cell for ellipsis
-        if target <= 0:
-            return _ELLIPSIS[:width]
-        return _take_visible_cells(rendered_line, target) + _ELLIPSIS
-    # Cursor on this row. Compute the cell range it occupies.
-    cursor_end = cursor_visible_column + max(0, cursor_visible_width)
-    # Case 1: cursor fits in the leading window.
-    if cursor_end <= width - 1:
-        target = width - 1
-        return _take_visible_cells(rendered_line, target) + _ELLIPSIS
-    # Case 2: cursor past the leading window — show the trailing
-    # window that contains the cursor. Window = [cursor_end - width +
-    # 1, cursor_end). 1 cell reserved for the leading ellipsis.
-    target = width - 1
-    if target <= 0:
-        return _ELLIPSIS[:width]
-    # Right edge = cursor_end (exclusive). Left edge = right - target.
-    right_edge = cursor_end
-    left_edge = max(0, right_edge - target)
-    body = _take_visible_cells_range(rendered_line, left_edge, right_edge)
-    return _ELLIPSIS + body
-
-
-def _take_visible_cells(s: str, width: int) -> str:
-    """Return the longest prefix of ``s`` whose visible width ≤ ``width``.
-
-    ANSI escapes ride along with whatever visible character precedes
-    them; escapes that start the string attach to the first visible
-    character we keep. Trailing escapes immediately after the last
-    kept visible character are also preserved so the prefix never ends
-    mid-SGR (otherwise the renderer's per-row ``rstrip`` would eat a
-    trailing cursor cell whose reset escape was dropped).
-
-    Bug fix (cursor-SGR preservation): when a *new* visible character
-    follows one or more escapes (e.g. the cursor's
-    ``\\x1b[7m<char>\\x1b[0m`` run), those escapes are flushed into
-    ``out`` *before* the new char is appended. The previous logic
-    dropped them with ``pending_trailing.clear()``, which silently
-    stripped the cursor's SGR sequences whenever the prefix extended
-    past the cursor — the visible character under the cursor kept its
-    colour but lost its inverse-video (block cursor) or underline
-    (underline cursor) paint, so the cursor "disappeared" whenever
-    the visible window reached past it.
-
-    Trailing-open-SGR guard: when the prefix ends because the next
-    visible character would overflow the width budget, any escapes
-    sitting in ``pending_trailing`` that *open* a new SGR run (without
-    a matching close) are dropped — leaving them in would emit an
-    unterminated ``\\x1b[7m`` that flips the terminal's inverse video
-    on for everything painted afterwards (Bug: long line + cursor at
-    end → cursor cell pushes past width → dangling ``\\x1b[7m`` leaks
-    inverse video onto the rest of the row). A lone trailing reset
-    (``\\x1b[0m``) is kept since it never opens new state.
-    """
-    if width <= 0:
-        return ""
-    from ink.layout.measure import _char_width, _split_visible_chunks
-
-    out: list[str] = []
-    pending_trailing: list[str] = []
-    used = 0
-    for chunk, is_escape in _split_visible_chunks(s):
-        if is_escape:
-            if out:
-                # We've kept at least one visible char — escape rides
-                # along (will be trailing if no more visible chars kept).
-                pending_trailing.append(chunk)
-            else:
-                out.append(chunk)
-            continue
-        for ch in chunk:
-            w = _char_width(ch)
-            if used + w > width:
-                return _join_trailing(out, pending_trailing)
-            # Flush pending escapes into out *before* the new char —
-            # they belong to the SGR run that ended on the previous
-            # visible char (e.g. the reset that closes a cursor cell).
-            if pending_trailing:
-                out.extend(pending_trailing)
-                pending_trailing.clear()
-            out.append(ch)
-            used += w
-    return _join_trailing(out, pending_trailing)
-
-
-def _join_trailing(out: list[str], pending_trailing: list[str]) -> str:
-    """Join ``out`` with sanitised ``pending_trailing`` escapes.
-
-    Strips any trailing run of SGR *openers* (escapes other than the
-    full ``\\x1b[0m`` reset) so the prefix never leaves the terminal
-    in a state the renderer's downstream cells did not opt into. See
-    :func:`_take_visible_cells` for the bug context.
-    """
-    if not pending_trailing:
-        return "".join(out)
-    # Keep only escapes that look like resets (``\x1b[0m`` or any
-    # ``\x1b[<digits>m`` whose final value clears inverse/underline/etc).
-    # The cheap heuristic: keep if the payload ends in ``0m`` (full or
-    # parameterised reset) and drop otherwise. ``\x1b[0m`` is the only
-    # reset we ever emit in this module, so the heuristic is exact.
-    kept: list[str] = []
-    for esc in pending_trailing:
-        if esc.endswith("0m"):
-            kept.append(esc)
-    return "".join(out) + "".join(kept)
-
-
-def _take_visible_cells_range(s: str, start: int, end: int) -> str:
-    """Return the substring of ``s`` covering visible cells ``[start, end)``.
-
-    ANSI escapes that attach to in-window visible characters are kept
-    verbatim. Trailing escapes (those after the last in-window visible
-    character but before any out-of-window visible character) are also
-    kept so the returned substring never ends mid-SGR — the renderer's
-    per-row ``rstrip`` would otherwise eat a trailing cursor cell whose
-    reset escape was dropped, leaving the SGR open and the visible
-    space stripped (Bug: long line + cursor at end → cursor cell vanishes
-    after rstrip removes the un-reset space).
-    """
-    if end <= start:
-        return ""
-    from ink.layout.measure import _char_width, _split_visible_chunks
-
-    out: list[str] = []
-    pending_trailing_escapes: list[str] = []
-    cell_pos = 0
-    seen_in_window = False
-    done = False
-    for chunk, is_escape in _split_visible_chunks(s):
-        if done:
-            # We've passed the window; only trailing escapes immediately
-            # after the last in-window visible char should ride along,
-            # and only until the next visible char appears.
-            if is_escape:
-                pending_trailing_escapes.append(chunk)
-            else:
-                break
-            continue
-        if is_escape:
-            # Keep escape if we're inside the window; otherwise it
-            # might be a trailing escape past the last in-window char.
-            if start <= cell_pos < end:
-                out.append(chunk)
-            elif seen_in_window and cell_pos >= end:
-                pending_trailing_escapes.append(chunk)
-            continue
-        for ch in chunk:
-            w = _char_width(ch)
-            if w <= 0:
-                # Combining mark — attach only if its base is in window.
-                if start <= cell_pos < end and out:
-                    out.append(ch)
-                continue
-            ch_start = cell_pos
-            ch_end = cell_pos + w
-            if ch_end <= start:
-                # Entirely before window.
-                cell_pos = ch_end
-                continue
-            if ch_start >= end:
-                # Entirely after window — flush trailing escapes & stop.
-                done = True
-                break
-            # Overlaps window — keep it.
-            out.append(ch)
-            cell_pos = ch_end
-            seen_in_window = True
-            if cell_pos >= end:
-                # We just consumed the last in-window cell; mark done
-                # so subsequent escapes get captured as trailing.
-                done = True
-                break
-    return "".join(out) + "".join(pending_trailing_escapes)
 
 
 def _cursor_visible_column(
@@ -1337,14 +1088,17 @@ def _TextInputImpl(**props: Any) -> Element:
     scroll_offset_sig: Signal[int] = signal(0)
 
     def _render_lines() -> list[str]:
-        """Build a list of per-line rendered strings (with cursor + selection).
+        """Build a list of per-display-row rendered strings (cursor + selection).
 
-        The list always covers **every** line of the current buffer —
-        vertical scrolling is delegated to the layout's text painter via
-        the public ``scroll_offset`` signal (Phase 5). The painter slices
-        ``[scroll_offset, scroll_offset + height)`` from the joined
-        payload, so the cursor stays visible even when the surrounding
-        box is shrunk below the buffer's natural row count.
+        Every logical line of the buffer wraps into as many display
+        rows as the available width requires (ink.js parity — the input
+        grows vertically; no ellipsis truncation). The list always
+        covers **every** display row — vertical scrolling is delegated
+        to the layout's text painter via the public ``scroll_offset``
+        signal (Phase 5). The painter slices ``[scroll_offset,
+        scroll_offset + height)`` from the joined payload, so the
+        cursor stays visible even when the surrounding box is shrunk
+        below the buffer's natural row count.
         """
         cur_value = value.value
         cur_cursor = cursor.value
@@ -1380,60 +1134,66 @@ def _TextInputImpl(**props: Any) -> Element:
             tail = apply_style(rest, dimColor=True) if rest else ""
             return [cursor_cell + tail]
 
-        # Width available for per-line truncation. We pre-truncate each
-        # rendered line so the cursor cell is preserved when the line
-        # overflows its column budget — the generic ``truncate-end``
-        # wrap path would happily drop the cursor SGR if the cursor
-        # sits past the truncation point (Bug: long line + cursor at
-        # end → cursor "disappears"). Layout's wrap is kept as a
-        # safety net for any case we miss here.
+        # Width budget for wrapping. Each logical line wraps into as
+        # many display rows as the available width requires (ink.js
+        # parity: the input grows vertically instead of truncating).
+        # Wrapping happens on the RAW text first; cursor / selection
+        # SGR is spliced per row afterwards using the row's source
+        # span — wrapping the styled string instead could split an
+        # SGR run from the cell it styles at a row boundary.
         avail_width = get_current_text_width()
-        # Cursor visible-cell width: block / underline sit on a char
-        # (width 1); bar inserts its own 1-cell inverse space. The
-        # downstream ``_truncate_line_around_cursor`` only needs a
-        # rough per-cell budget.
-        cursor_cell_width = 1
 
         lines: list[str] = []
+        # Display-row index of the row carrying the cursor (wrapping can
+        # spread one logical line over several rows — the viewport must
+        # follow the *display* row, not the logical line number).
+        cursor_row_idx: int | None = None
         for line_start, line_text_raw in _split_lines(cur_value):
             line_text = mask * len(line_text_raw) if mask else line_text_raw
             line_end = line_start + len(line_text_raw)
             cursor_in_line = line_start <= cur_cursor <= line_end
-            rendered = _build_displayed_line(
-                line_text,
-                cursor_in_line=cursor_in_line,
-                cursor=cur_cursor,
-                line_start=line_start,
-                cursor_style=cursor_style,
-                cursor_color=cursor_color,
-                selection=cur_sel,
-                mask=mask,
-                line_text_raw=line_text_raw,
-                cursor_visible=cur_cursor_visible,
-            )
-            if avail_width is not None and avail_width >= 1:
-                cursor_col: int | None = None
-                if cursor_in_line:
-                    # The cursor sits at the buffer column
-                    # ``cur_cursor - line_start`` of this row. Mask
-                    # collapses chars to mask glyph (width 1 each) so
-                    # the column is preserved under masking. Wide
-                    # characters in the line would shift the cursor's
-                    # visible column, but TextInput does not currently
-                    # account for that — the cursor's SGR lands at the
-                    # buffer offset within the rendered string.
-                    cursor_col = _cursor_visible_column(
-                        line_text_raw,
-                        mask,
-                        cur_cursor - line_start,
-                    )
-                rendered = _truncate_line_around_cursor(
-                    rendered,
-                    width=avail_width,
-                    cursor_visible_column=cursor_col,
-                    cursor_visible_width=cursor_cell_width,
+            row_spans: list[tuple[str, int, int]]
+            if avail_width is None or avail_width < 1:
+                row_spans = [(line_text, 0, len(line_text))]
+            else:
+                # Reserve one cell on the cursor's logical line: the
+                # bar cursor inserts its own cell and a block /
+                # underline cursor at end-of-row renders an extra
+                # inverse space, so wrapping at the full width could
+                # push the spliced row past the budget.
+                budget = max(
+                    1,
+                    avail_width - (1 if cursor_in_line and cur_cursor_visible else 0),
                 )
-            lines.append(rendered)
+                if string_width(line_text) <= budget:
+                    row_spans = [(line_text, 0, len(line_text))]
+                else:
+                    row_spans = wrap_text_rows(line_text, budget)
+            for row_text, row_off, row_end in row_spans:
+                row_abs_start = line_start + row_off
+                row_abs_end = line_start + row_end
+                # Exactly one row owns the cursor: the row whose span
+                # contains the offset (the last row also owns the
+                # end-of-line position). An offset inside a wrap's
+                # dropped-space tail renders as end-of-row.
+                cursor_in_row = row_abs_start <= cur_cursor < row_abs_end or (
+                    row_abs_end == line_end and cur_cursor == line_end
+                )
+                rendered = _build_displayed_line(
+                    row_text,
+                    cursor_in_line=cursor_in_row,
+                    cursor=cur_cursor,
+                    line_start=row_abs_start,
+                    cursor_style=cursor_style,
+                    cursor_color=cursor_color,
+                    selection=cur_sel,
+                    mask=mask,
+                    line_text_raw=line_text_raw[row_off:row_end] if mask else row_text,
+                    cursor_visible=cur_cursor_visible,
+                )
+                if cursor_in_row and cursor_row_idx is None:
+                    cursor_row_idx = len(lines)
+                lines.append(rendered)
 
         # Vertical viewport (multi-line scroll-to-cursor). When the
         # requested viewport height (``rows`` prop, falling back to a
@@ -1466,7 +1226,7 @@ def _TextInputImpl(**props: Any) -> Element:
         else:
             raw_h = box_props.get("height")
             viewport_h = raw_h if isinstance(raw_h, int) and not isinstance(raw_h, bool) else None
-        cur_line = cursor_line(cur_value, cur_cursor)
+        cur_line = cursor_row_idx if cursor_row_idx is not None else 0
         if viewport_h is not None and viewport_h >= 1 and len(lines) > viewport_h:
             start = 0
             if cur_line >= viewport_h:
@@ -1479,12 +1239,11 @@ def _TextInputImpl(**props: Any) -> Element:
 
     def render_text() -> str:
         # Build the full rendered buffer (with cursor + selection overlays
-        # already applied per line) and join lines with ``\n``. The single
-        # Text child carries the multi-line payload; layout's wrap engine
-        # (``truncate-end``) preserves embedded newlines and measures each
-        # paragraph independently, so the Box grows to N rows when the
-        # buffer has N lines. Per-line truncation keeps very long physical
-        # lines from pushing the layout past its column / row budget.
+        # already applied per display row) and join rows with ``\n``. The
+        # single Text child carries the multi-line payload; layout's wrap
+        # engine (``truncate-end``) preserves embedded newlines and
+        # measures each paragraph independently, so the Box grows to N
+        # rows when the buffer renders to N display rows.
         #
         # Why one Text instead of one Text per line: PyInk function
         # components run *exactly once* at mount (PRD Decision 1). The
@@ -1497,11 +1256,12 @@ def _TextInputImpl(**props: Any) -> Element:
         # string on every paint.
         return "\n".join(_render_lines())
 
-    # ``wrap="truncate-end"`` so a single line longer than the available
-    # width is clipped (with ellipsis) to one visible row instead of
-    # growing the parent Box and pushing siblings past the column / row
-    # budget. For multi-line buffers the wrap engine preserves the
-    # embedded newlines, so the Box still grows to N rows.
+    # ``wrap="truncate-end"`` is now a SAFETY NET only: `_render_lines`
+    # pre-wraps every logical line to the granted width (with a
+    # cursor-cell reserve), so rows arrive already within budget and
+    # nothing is ellipsized in normal operation. It still guards the
+    # placeholder path (a long placeholder clips to one row) and any
+    # width the pre-wrap could not observe (unbounded first layout).
     #
     # Phase 5 scroll routing: the public ``scroll_offset`` signal drives
     # the layout's text painter to slice ``[offset, offset + height)``
