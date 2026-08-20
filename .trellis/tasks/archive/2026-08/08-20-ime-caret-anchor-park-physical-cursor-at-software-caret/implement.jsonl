@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/frontend/rendering-contracts.md", "reason": "Text leaf layout-time 机制（decoration props、width context、Text(callable) 模式）——caret 装饰 prop 走 scroll_offset 同款通道，实现前必须掌握这些契约"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "本任务跨 layout（flex/render_layout）与 render（instance/diff）两层传递 caret 坐标，按跨层思维指南检查数据流闭环"}
+{"file": ".trellis/tasks/08-20-ime-caret-anchor-park-physical-cursor-at-software-caret/research/tui-cursor-parking-prior-art.md", "reason": "Ink v6.7.0 PR #866 同构实现细节：paint 序列必须「归位帧底→diff→停靠」，停靠点与擦写起点解耦——实现的核心约束来源"}
+{"file": ".trellis/tasks/08-20-ime-caret-anchor-park-physical-cursor-at-software-caret/research/ime-anchor-terminal-behavior.md", "reason": "WT IME 锚点=光标格且不检查可见性的源码级证据——确认保持隐藏(?25l)方案的合法性，避免实现时画蛇添足加 ?25h"}

@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/frontend/rendering-contracts.md", "reason": "校验 caret 装饰 prop 实现是否遵守 Text leaf layout-time 契约（decoration props 解析、width context 时机）"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "前端层质量基线：lint/type/测试要求，检查改动是否达标"}
+{"file": ".trellis/tasks/08-20-ime-caret-anchor-park-physical-cursor-at-software-caret/research/tui-cursor-parking-prior-art.md", "reason": "校验 paint 序列约束（归位 bottom-park → diff → 停靠 caret）是否被正确实现——这是最易引入回归的点"}
+{"file": ".trellis/tasks/08-20-ime-caret-anchor-park-physical-cursor-at-software-caret/research/ime-anchor-terminal-behavior.md", "reason": "校验实现没有画蛇添足（如额外 ?25h 显示光标）——锚定不需要可见性"}
