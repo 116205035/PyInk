@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/frontend/rendering-contracts.md", "reason": "Sections 1+2 govern width-aware components and the wrap contract; implementer must add the TextInput wrap contract note and rely on get_current_text_width for the row budget."}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Project quality bar — lint/typecheck/test requirements."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Wrap rules must stay single-source: refactor _word_break to an offset-aware walker (wrap_text_rows) instead of duplicating the greedy algorithm in text_input.py."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "TextInput renders through layout (Text leaf wrap modes, scroll_offset painter slice); verify interplay when swapping truncate for component-level wrap."}

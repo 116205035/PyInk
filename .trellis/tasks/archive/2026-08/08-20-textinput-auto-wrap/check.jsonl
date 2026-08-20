@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/rendering-contracts.md", "reason": "Checker verifies the TextInput wrap contract note was added and that wrap_text_rows is documented as the offset-aware wrap primitive."}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Checker confirms lint/typecheck/tests green and no dead helpers left behind (truncate path fully removed or still used)."}
