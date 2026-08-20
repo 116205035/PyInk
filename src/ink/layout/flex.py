@@ -559,6 +559,17 @@ _DECORATION_PROPS: tuple[str, ...] = (
     # ``None``) and so signal / callable forms subscribe the render
     # loop.
     "scroll_offset",
+    # IME caret anchor (08-20-ime-caret-anchor-park-physical-cursor-at-
+    # software-caret): ``(display_row, visible_col)`` of the focused
+    # component's software caret, expressed inside the text leaf's own
+    # payload (pre-scroll). Resolved here for the same two reasons as
+    # ``scroll_offset``: the painter reads a plain tuple, and the Signal
+    # read at build time subscribes the render loop. NOTE the resolution
+    # happens BEFORE the deferred text renderer runs (build precedes
+    # layout), so the resolved value can be one signal flush behind the
+    # payload — Instance._paint_now's re-park-on-unchanged-frame path
+    # closes that gap (see ``Instance._repark_after_unchanged_frame``).
+    "caret",
 )
 
 

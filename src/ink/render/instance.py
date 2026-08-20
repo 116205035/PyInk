@@ -49,6 +49,7 @@ from ink.core.element import Element
 from ink.core.reconciler import Reconciler
 from ink.core.signal import effect, signal
 from ink.hooks._box_metrics_runtime import bump_layout_epoch
+from ink.hooks._runtime import _reset_current_instance, _set_current_instance
 from ink.layout import clear_box_refs, layout, render_layout_to_string
 from ink.layout.measure import string_width
 from ink.render.diff import _visual_height, repaint_frame, write_diff
@@ -115,6 +116,16 @@ class Instance:
         "_cpr_pending",
         "_cpr_lock",
         "_lock",
+        # IME caret anchor (08-20-ime-caret-anchor-…). ``_caret_anchor``
+        # is written by the layout painter (``_paint_text`` →
+        # ``_report_caret_anchor``) while ``render_layout_to_string``
+        # runs inside ``_paint_now`` — see the paint-sequence docstring
+        # on ``_park_cursor_at_caret`` for the ordering contract.
+        # ``_cursor_at_caret`` mirrors where the *physical* cursor was
+        # actually parked so the next paint can undo the park before
+        # diffing (``(row, col, last_row)`` frame-grid coordinates).
+        "_caret_anchor",
+        "_cursor_at_caret",
     )
 
     def __init__(
@@ -224,6 +235,10 @@ class Instance:
         # CPR protocol — no nested locking, no release/reacquire gymnastics.
         self._cpr_lock = threading.Lock()
         self._lock = threading.RLock()
+        # IME caret anchor state — see ``_paint_now`` /
+        # ``_park_cursor_at_caret`` for the paint-sequence contract.
+        self._caret_anchor: tuple[int, int] | None = None
+        self._cursor_at_caret: tuple[int, int, int] | None = None
         # Register the CPR handler on the terminal so the input loop can
         # route CSI CPR responses here. The terminal's dispatcher checks
         # ``_cpr_pending`` (via the registered handler's return value) to
@@ -307,6 +322,9 @@ class Instance:
         with self._lock:
             frame = self.current_frame
             self.current_frame = ""
+            # Undo a caret park before erasing — write_diff computes its
+            # cursor moves from the bottom-parked position.
+            self._return_from_caret_park()
         if not frame:
             return
         write_diff(frame, "", self.stdout)
@@ -434,7 +452,13 @@ class Instance:
             # terminals (where scroll-clear did the heavy lifting).
             self.stdout.write("\x1b[3J\x1b[2J\x1b[H")
             self.stdout.flush()
-            # PyInk state reset.
+            # PyInk state reset. ``\x1b[H`` above re-homed the physical
+            # cursor, so any recorded caret park is invalid — drop it or
+            # the next paint's ``_return_from_caret_park`` would emit a
+            # spurious cursor-down from home and shift the freshly
+            # painted frame down. The caret anchor dies with the frame.
+            self._cursor_at_caret = None
+            self._caret_anchor = None
             self.current_frame = ""
             self._static_rows_approx = 0
             self._static_tail_text = ""
@@ -535,10 +559,22 @@ class Instance:
         while the cursor is parked at a different row, corrupting the
         scrollback / static region — the root cause of the
         "history disappears after streaming ends" bug.
+
+        IME caret parking (08-20-ime-caret-anchor-…): every write path
+        here is wrapped ``_return_from_caret_park`` (before) →
+        diff/repaint → ``_park_cursor_at_caret`` (after). The diff
+        engine's cursor math assumes a bottom-parked start, so undoing
+        the previous park first is mandatory, not an optimisation.
         """
         with self._lock:
             if self._unmounted:
                 return
+            # Reset the caret anchor for this render pass — the layout
+            # painter re-reports it when a caret leaf paints. Without
+            # this a frame whose caret leaf *disappeared* (input blurred,
+            # ``cursor_visible`` off, TextInput unmounted) would keep
+            # parking at the previous frame's stale anchor cell.
+            self._caret_anchor = None
             mounted = self.mounted_tree
             prev_frame = self.current_frame
             cols = self._resolve_columns()
@@ -559,15 +595,28 @@ class Instance:
                     new_frame = ""
                 else:
                     try:
-                        layout_tree = layout(mounted, columns=cols, rows=rows)
-                        new_frame = render_layout_to_string(layout_tree)
+                        # Bind the instance for the render pass so the
+                        # layout painter can report the IME caret anchor
+                        # (see ``_park_cursor_at_caret``).
+                        token = _set_current_instance(self)
+                        try:
+                            layout_tree = layout(mounted, columns=cols, rows=rows)
+                            new_frame = render_layout_to_string(layout_tree)
+                        finally:
+                            _reset_current_instance(token)
                     except Exception:  # pragma: no cover
                         return
                 # Phase 2 PR7 — bump the layout epoch so ``use_box_metrics``
                 # computeds refresh against the just-painted measurements.
                 bump_layout_epoch()
                 static_text = "".join(static_chunks)
+                # Caret-park contract: undo any previous park (back to
+                # bottom-park) BEFORE the flush writes — the diff
+                # engine assumes the cursor starts at the frame's last
+                # row. Park again once the frame bytes are out.
+                self._return_from_caret_park()
                 self._flush_static_and_frame(prev_frame, new_frame, static_text)
+                self._park_cursor_at_caret(new_frame, None)
                 if not self._unmounted:
                     self.static_lines.clear()
                     self._static_dirty = False
@@ -580,8 +629,15 @@ class Instance:
                 new_frame = ""
             else:
                 try:
-                    layout_tree = layout(mounted, columns=cols, rows=rows)
-                    new_frame = render_layout_to_string(layout_tree)
+                    # Bind the instance for the render pass so the
+                    # layout painter can report the IME caret anchor
+                    # (see ``_park_cursor_at_caret``).
+                    token = _set_current_instance(self)
+                    try:
+                        layout_tree = layout(mounted, columns=cols, rows=rows)
+                        new_frame = render_layout_to_string(layout_tree)
+                    finally:
+                        _reset_current_instance(token)
                 except Exception:  # pragma: no cover
                     # A broken layout must not blank the screen.
                     return
@@ -591,8 +647,6 @@ class Instance:
                 # frame doesn't perturb subscribers; the no-op frame still has
                 # measurements from the previous successful layout.
                 bump_layout_epoch()
-            if prev_frame == new_frame and prev_frame and not force_repaint:
-                return
             # Compute the frame's available row budget so ``write_diff``
             # can cap cursor-UP movements. Without this cap, a frame
             # taller than the viewport (after accounting for static
@@ -623,6 +677,12 @@ class Instance:
             #   while stdout never rewrites that row, and the next paint
             #   early-returns on ``prev_frame == new_frame`` — Jarvis's
             #   sticky "Initializing..." after history load.
+            #
+            # Computed BEFORE the frame-equality early return so the
+            # caret re-park on an unchanged frame gets the same
+            # cursor-up cap as a real diff write (an uncapped re-park
+            # could climb into the scrollback — see
+            # ``_repark_after_unchanged_frame``).
             available_rows: int | None = None
             prev_line_count = len(prev_frame.split("\n")) if prev_frame else 0
             new_line_count = len(new_frame.split("\n")) if new_frame else 0
@@ -632,6 +692,17 @@ class Instance:
                     available_rows = min(rows, frame_h)
                 else:
                     available_rows = max(1, rows - self._static_rows_approx)
+            if prev_frame == new_frame and prev_frame and not force_repaint:
+                self._repark_after_unchanged_frame(prev_frame, available_rows)
+                return
+            # Caret-park contract (Ink PR #866 / research
+            # tui-cursor-parking-prior-art): every diff / repaint entry
+            # point below assumes the cursor starts bottom-parked. If the
+            # previous paint parked it at the software caret, undo that
+            # FIRST — skipping the return move breaks the next frame's
+            # cursor math (the erase walk would start from the caret row
+            # and every subsequent row lands one offset off).
+            self._return_from_caret_park()
             if not prev_frame:
                 write_diff(None, new_frame, self.stdout)
             else:
@@ -776,12 +847,147 @@ class Instance:
                     )
                 else:
                     write_diff(prev_frame, new_frame, self.stdout, available_rows)
+            # Frame bytes are out and the cursor is bottom-parked —
+            # park it at the reported caret anchor (if any) so the
+            # terminal anchors IME preedit at the software caret.
+            self._park_cursor_at_caret(new_frame, available_rows)
             self.stdout.flush()
             if not self._unmounted:
                 self.current_frame = new_frame
                 self.columns = cols
                 self.rows = rows if rows is not None else 0
                 self._size_signal.value = (cols, rows if rows is not None else 0)
+
+    # ------------------------------------------------------------------
+    # IME caret parking (08-20-ime-caret-anchor-…)
+    # ------------------------------------------------------------------
+
+    def _park_cursor_at_caret(
+        self, new_frame: str, available_rows: int | None
+    ) -> None:
+        """Park the (hidden) physical cursor at the reported caret anchor.
+
+        Terminal IME engines anchor the composition / candidate window
+        on the **physical** cursor's cell — visibility is irrelevant
+        (DECTCEM only toggles rendering; verified against Windows
+        Terminal's TSF chain in research/ime-anchor-terminal-behavior.md).
+        PyInk draws its own SGR caret but used to bottom-park the
+        physical cursor, so preedit appeared one row below the input
+        whenever a hint/status row sat under it. Parking the physical
+        cursor on the software caret fixes the anchor; the cursor stays
+        hidden (``?25l``) so the software caret keeps sole visual
+        ownership — the deliberate divergence from Ink v6.7's
+        ``useCursor`` (which shows the cursor; see
+        research/tui-cursor-parking-prior-art.md).
+
+        Sequence contract (same as Ink PR #866): the diff engine assumes
+        every paint starts with the cursor bottom-parked. Therefore each
+        paint must run ``_return_from_caret_park`` BEFORE any diff /
+        repaint write, and this method AFTER them. ``_cursor_at_caret``
+        records where we parked so the *next* paint can undo it.
+
+        ``available_rows`` caps how far the cursor may climb from the
+        frame's last row (same clamp rationale as
+        ``diff._emit_cursor_move``: never crawl into the scrollback /
+        viewport top). ``None`` disables the cap (static-flush path,
+        which already works with approximate row budgets). When the
+        anchor is missing or unreachable we emit nothing and leave the
+        cursor bottom-parked — zero behaviour change for frames without
+        a caret declaration.
+        """
+        anchor = self._caret_anchor
+        self._cursor_at_caret = None
+        if anchor is None:
+            return
+        row, col = anchor
+        line_count = len(new_frame.split("\n")) if new_frame else 1
+        last_row = line_count - 1
+        if row < 0 or row > last_row:
+            return
+        row = self._clamp_caret_row(row, line_count, available_rows)
+        parts: list[str] = []
+        if last_row > row:
+            parts.append(f"\x1b[{last_row - row}A")
+        parts.append("\r")
+        if col > 0:
+            parts.append(f"\x1b[{col + 1}G")
+        self.stdout.write("".join(parts))
+        self._cursor_at_caret = (row, col, last_row)
+
+    def _return_from_caret_park(self) -> None:
+        """Undo a previous caret park: move the cursor back to bottom-park.
+
+        MUST be called before any diff / repaint / erase write when the
+        previous paint parked the cursor at the caret — those code paths
+        compute cursor moves assuming the cursor sits at column 1 of the
+        frame's last row. The recorded ``last_row`` is the row count of
+        the frame that was painted, so the downward move is exact even
+        if the current frame's height differs.
+        """
+        park = self._cursor_at_caret
+        self._cursor_at_caret = None
+        if park is None:
+            return
+        row, _col, last_row = park
+        parts: list[str] = []
+        if last_row > row:
+            parts.append(f"\x1b[{last_row - row}B")
+        parts.append("\r")
+        self.stdout.write("".join(parts))
+
+    def _repark_after_unchanged_frame(
+        self, prev_frame: str, available_rows: int | None
+    ) -> None:
+        """Re-sync the parked cursor when frame bytes didn't change.
+
+        Why this path exists at all: the ``caret`` decoration prop is
+        resolved at flex-tree BUILD time, which precedes the deferred
+        text renderer that writes the caret signal. The anchor the
+        painter reported this pass can therefore be one signal flush
+        behind the payload; the signal write re-triggers the render
+        loop, whose next layout yields a byte-identical frame carrying
+        the fresh anchor. Without a re-park here the equality early
+        return would leave the physical cursor one frame behind the
+        software caret — visible as IME preedit lagging a keystroke
+        behind on fast typing.
+
+        ``available_rows`` is the same cursor-up cap the diff write
+        below the early return would use — the re-park must never climb
+        higher than a real paint could. The "already parked" check
+        compares against the CAPPED anchor row, so a caret that sits
+        below the reachable floor (frame taller than the viewport)
+        doesn't trigger a return+climb byte churn on every unchanged
+        paint.
+        """
+        anchor = self._caret_anchor
+        park = self._cursor_at_caret
+        if anchor is None:
+            return
+        line_count = len(prev_frame.split("\n")) if prev_frame else 1
+        capped = (
+            self._clamp_caret_row(anchor[0], line_count, available_rows),
+            anchor[1],
+        )
+        if park is not None and (park[0], park[1]) == capped:
+            return
+        self._return_from_caret_park()
+        self._park_cursor_at_caret(prev_frame, available_rows)
+        self.stdout.flush()
+
+    @staticmethod
+    def _clamp_caret_row(
+        row: int, line_count: int, available_rows: int | None
+    ) -> int:
+        """Clamp a caret row to the cursor-reachable floor (or ``row``).
+
+        Shared by ``_park_cursor_at_caret`` and the unchanged-frame
+        re-park so both agree on how high the cursor may climb from the
+        frame's last row without crawling into the scrollback (same
+        rationale as ``diff._repaint``'s ``row_floor``).
+        """
+        if available_rows and available_rows > 0:
+            return max(row, max(0, line_count - available_rows))
+        return row
 
     def _flush_static_and_frame(
         self,
@@ -1064,6 +1270,9 @@ class Instance:
         with self._lock:
             frame = self.current_frame
             self.current_frame = ""
+            # Undo a caret park before erasing — write_diff computes its
+            # cursor moves from the bottom-parked position.
+            self._return_from_caret_park()
         if frame:
             write_diff(frame, "", self.stdout)
         # Always emit an SGR reset on inline-mode exit. Components

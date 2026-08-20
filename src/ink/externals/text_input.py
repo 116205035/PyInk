@@ -50,6 +50,23 @@ wrapped in SGR "inverse video" escapes. The escapes are inserted
 cursor paint; the layout measure pass strips CSI sequences so neither
 selection nor cursor escapes inflate the column budget.
 
+IME caret anchor (08-20-ime-caret-anchor-…): ``_render_lines`` also
+writes a payload-relative ``(display_row, visible_col)`` caret signal
+(hung on the Text leaf via the ``caret`` decoration prop). The layout
+painter translates it to absolute frame coordinates and the renderer
+parks the *physical* terminal cursor there after every paint (keeping
+it hidden) — terminal IME engines anchor their composition /
+candidate window on the physical cursor, so this is what makes CJK
+preedit appear inside the input row instead of one row below it. The
+anchor is gated on ``is_active AND cursor_visible``: the anchor must
+follow the *keystroke target* (``is_active`` — where typed text will
+land), not the visual cursor alone. In a multi-input form every input
+would otherwise report a caret and the painter's last-writer-wins
+rule would pin the IME preview to whichever input paints last, even
+though keystrokes land in the focused one. IME preedit is an *input*
+preview, not a visual decoration, so it belongs to the input that is
+about to receive the text.
+
 Paste (PR2): when :class:`ink.render.keys.Key` arrives with a
 ``paste`` payload (delivered by the Terminal's bracketed-paste
 dispatcher) the whole payload is spliced into the buffer at the cursor
@@ -1087,6 +1104,19 @@ def _TextInputImpl(**props: Any) -> Element:
     # letting the layout's top-keeping clip drop it past the viewport.
     scroll_offset_sig: Signal[int] = signal(0)
 
+    # IME caret anchor (08-20-ime-caret-anchor-…): payload-relative
+    # ``(display_row, visible_col)`` of the software caret, or ``None``
+    # when there is no *reportable* caret — gated on
+    # ``is_active AND cursor_visible`` (the anchor must follow the
+    # keystroke target; see the module docstring). Written from inside
+    # ``_render_lines`` (same channel pattern as ``scroll_offset_sig``)
+    # and read by the layout painter via the ``caret`` Text decoration
+    # prop, which translates it to absolute frame coordinates so the
+    # renderer can park the physical cursor on the software caret —
+    # that's what makes the terminal's IME composition window anchor
+    # inside the input row instead of at the frame's bottom.
+    caret_sig: Signal[tuple[int, int] | None] = signal(None)
+
     def _render_lines() -> list[str]:
         """Build a list of per-display-row rendered strings (cursor + selection).
 
@@ -1104,6 +1134,14 @@ def _TextInputImpl(**props: Any) -> Element:
         cur_cursor = cursor.value
         cur_sel = selection.value
         cur_cursor_visible = _resolve_is_active(cursor_visible)
+        # Unlike ``handle_key`` (which resolves ``is_active`` WITHOUT
+        # subscribing, so keystroke dispatch stays imperative), here the
+        # resolution happens inside the render effect's tracking
+        # context on purpose: ``Signal`` / ``Callable`` shapes establish
+        # a subscription, so a focus change (Tab between inputs) re-runs
+        # ``_render_lines``, updates ``caret_sig``, and the IME anchor
+        # moves to the newly focused input.
+        cur_active = _resolve_is_active(is_active)
 
         # Empty buffer with placeholder: render the cursor at column 0
         # (on the placeholder's first character for block/underline, or
@@ -1113,8 +1151,13 @@ def _TextInputImpl(**props: Any) -> Element:
         # cells aligned with their normal-editing appearance.
         if not cur_value and placeholder:
             scroll_offset_sig.value = 0
-            if not cur_cursor_visible:
+            if not cur_cursor_visible or not cur_active:
+                caret_sig.value = None
                 return [apply_style(placeholder, dimColor=True)]
+            # The placeholder caret sits at column 0 whether it is a
+            # bar in its own cell or a block/underline on the first
+            # character — both anchor IME preedit at the same cell.
+            caret_sig.value = (0, 0)
             if cursor_style == "bar":
                 # Bar cursor sits in its own 1-cell slot at column 0;
                 # placeholder trails it in dim.
@@ -1193,6 +1236,21 @@ def _TextInputImpl(**props: Any) -> Element:
                 )
                 if cursor_in_row and cursor_row_idx is None:
                     cursor_row_idx = len(lines)
+                    if cur_cursor_visible and cur_active:
+                        # Visible column of the caret within this
+                        # display row — same helper (and same raw /
+                        # mask inputs) ``_build_displayed_line`` uses
+                        # to place the SGR cursor cell, so the physical
+                        # cursor parks on exactly the cell the software
+                        # cursor occupies.
+                        local = cur_cursor - row_abs_start
+                        raw_row = (
+                            line_text_raw[row_off:row_end] if mask else row_text
+                        )
+                        caret_sig.value = (
+                            cursor_row_idx,
+                            _cursor_visible_column(raw_row, mask, local),
+                        )
                 lines.append(rendered)
 
         # Vertical viewport (multi-line scroll-to-cursor). When the
@@ -1235,6 +1293,12 @@ def _TextInputImpl(**props: Any) -> Element:
             scroll_offset_sig.value = start
         else:
             scroll_offset_sig.value = 0
+        # No visible caret this frame (cursor_visible=False, the input
+        # is not active — i.e. not the keystroke target — or the buffer
+        # produced no cursor row) — clear the anchor so the renderer
+        # keeps the physical cursor bottom-parked.
+        if cursor_row_idx is None or not cur_cursor_visible or not cur_active:
+            caret_sig.value = None
         return lines
 
     def render_text() -> str:
@@ -1286,6 +1350,7 @@ def _TextInputImpl(**props: Any) -> Element:
             color=color,
             wrap="truncate-end",
             scroll_offset=scroll_offset_sig,
+            caret=caret_sig,
         ),
         **resolved_box_props,
     )
@@ -1417,6 +1482,14 @@ def TextInput(
         is rendered as plain text — use this to give a "disabled"
         visual signal without disabling keystroke handling (which
         is ``is_active``'s job). Defaults to ``True``.
+
+        The IME caret anchor (where the terminal parks its physical
+        cursor so the IME composition window follows) is reported only
+        when ``is_active AND cursor_visible`` both resolve true: the
+        anchor belongs to the input that is about to receive keystrokes
+        (``is_active``) *and* shows a visible cursor. In a multi-input
+        form this keeps the IME preedit anchored to the focused input
+        instead of whichever input happens to paint last.
     ignore_arrows_when:
         Controls whether :func:`handle_key` skips ArrowUp / ArrowDown.
         Evaluated on **every keypress** (same shape dispatch as

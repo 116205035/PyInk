@@ -38,7 +38,8 @@ Run::
 Controls:
 
 * Type          — edit the focused input.
-* Tab           — cycle focus to the next input.
+* Tab           — cycle focus to the next input (the text cursor
+                  follows focus: only the focused input shows a caret).
 * Shift+Tab     — cycle focus backwards.
 * Enter         — submit (single-line inputs) or insert newline
                   (multi-line input).
@@ -195,6 +196,10 @@ def TextInputDemo() -> Element:
                         on_submit=_name_submit,
                         cursor_color="green",
                         is_active=is_active,
+                        # Software cursor only on the focused input —
+                        # one visible caret at a time, and the IME
+                        # caret anchor follows the same gate.
+                        cursor_visible=is_active,
                     ),
                 ),
                 _LabeledInput(
@@ -212,6 +217,7 @@ def TextInputDemo() -> Element:
                         rows=5,
                         on_change=_notes_change,
                         is_active=is_active,
+                        cursor_visible=is_active,
                     ),
                 ),
                 _LabeledInput(
@@ -224,6 +230,7 @@ def TextInputDemo() -> Element:
                         mask="*",
                         on_change=_password_change,
                         is_active=is_active,
+                        cursor_visible=is_active,
                     ),
                 ),
                 _LabeledInput(
@@ -236,6 +243,7 @@ def TextInputDemo() -> Element:
                         on_change=_search_change,
                         on_submit=_search_submit,
                         is_active=is_active,
+                        cursor_visible=is_active,
                     ),
                 ),
                 Text(

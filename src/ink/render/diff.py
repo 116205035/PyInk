@@ -30,6 +30,19 @@ of the live frame). This mirrors Claude Code's ink renderer, which parks
   yanks the viewport back to the cursor" symptom. Bottom-parked micro
   moves stay far from that trigger.
 
+Caret-park override (08-20-ime-caret-anchor-…): this module still
+*assumes and produces* the bottom-parked start/end position — it knows
+nothing about carets. The override lives one layer up in
+:class:`ink.render.instance.Instance`: when the just-painted frame
+declared a caret anchor (a focused TextInput reporting its software
+caret cell via the ``caret`` decoration prop), ``_paint_now`` emits an
+extra cursor move AFTER the diff write to park the physical cursor on
+the software caret, so the terminal's IME composition window anchors on
+the input row instead of the frame's last row. The next paint undoes
+that park (``Instance._return_from_caret_park``) BEFORE calling into
+this module, so the bottom-park precondition below keeps holding. For
+frames without a caret declaration the byte stream is unchanged.
+
 Frame-shrink / overflow cursor safety (PR for 07-07-tui-palette-layout-bug,
 direction inverted in 07-19): when the frame is taller than the viewport
 its top rows live in the scrollback. Cursor-up moves toward those rows

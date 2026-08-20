@@ -576,8 +576,18 @@ def _paint_text(
     if not text and node.props.get("collapseIfEmpty"):
         return
     raw_lines = text.split("\n")
+    scroll_start = 0
     if node.height > 0 and len(raw_lines) > node.height:
-        raw_lines = _clip_lines_to_height(raw_lines, node.height, node.props)
+        scroll_start = _effective_scroll_start(
+            len(raw_lines), node.height, node.props
+        )
+        raw_lines = raw_lines[scroll_start : scroll_start + node.height]
+    # IME caret anchor report (08-20-ime-caret-anchor-…): if this leaf
+    # declares a ``caret`` prop, translate its payload-relative
+    # ``(row, col)`` into absolute frame-grid coordinates and hand it to
+    # the live Instance so the renderer can park the physical cursor
+    # there after the paint (IME preedit anchors the *physical* cursor).
+    _report_caret_anchor(node, len(raw_lines), scroll_start, abs_x, abs_y)
     own_bg = node.props.get("backgroundColor") if node.props else None
     effective_bg = own_bg if own_bg is not None else inherited_bg
     flush_bg = bool(node.props.get("flushBackgroundToWidth")) if node.props else False
@@ -616,6 +626,69 @@ def _paint_text(
                 grid.mark_row_background(abs_x, abs_y + i, leaf_w, bg_open, _SGR_RESET)
 
 
+def _effective_scroll_start(
+    total: int, height: int, props: dict[str, Any]
+) -> int:
+    """Clamped top row of the ``scroll_offset`` window (0 when unset).
+
+    Single source of truth for the scroll-window clamp so the clipping
+    in ``_paint_text`` and the caret-anchor row translation (below)
+    always agree on which payload row is visible as row 0. The clamp
+    pins a past-the-end offset to the last window (natural
+    bottom-of-list scroll behaviour).
+    """
+    raw = props.get("scroll_offset")
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        # ``bool`` is an ``int`` subclass — never a meaningful scroll
+        # value. Signal / callable forms arrive already resolved to a
+        # plain ``int`` by ``_resolve_decoration_props``; anything else
+        # means "unset".
+        return 0
+    if raw <= 0:
+        return 0
+    max_start = max(0, total - height)
+    return max(0, min(raw, max_start))
+
+
+def _report_caret_anchor(
+    node: LayoutNode,
+    visible_rows: int,
+    scroll_start: int,
+    abs_x: int,
+    abs_y: int,
+) -> None:
+    """Report this leaf's ``caret`` prop to the live Instance, if any.
+
+    The prop's value (already resolved to a plain tuple or ``None`` at
+    flex build time) is ``(display_row, visible_col)`` **inside the
+    leaf's payload** — i.e. before the scroll window slides. The frame
+    anchor is therefore ``(abs_y + row - scroll_start, abs_x + col)``.
+    When the caret row falls outside the visible window (scrolled off)
+    we report nothing, and :class:`Instance` falls back to bottom-park.
+
+    Coordinates here are frame-grid cells (the same coordinate system
+    as the diff engine's row indices): grid row ``n`` == frame string
+    line ``n``. Only the last caret-bearing leaf wins — PyInk frames
+    have at most one focused input at a time.
+    """
+    caret = node.props.get("caret") if node.props else None
+    if not isinstance(caret, tuple) or len(caret) != 2:
+        return
+    row, col = caret
+    if isinstance(row, bool) or isinstance(col, bool):
+        return
+    if not isinstance(row, int) or not isinstance(col, int):
+        return
+    visible_row = row - scroll_start
+    if visible_row < 0 or visible_row >= visible_rows:
+        return
+    from ink.hooks._runtime import _get_current_instance
+
+    inst = _get_current_instance()
+    if inst is not None:
+        inst._caret_anchor = (abs_y + visible_row, abs_x + col)
+
+
 def _clip_lines_to_height(
     lines: list[str], height: int, props: dict[str, Any]
 ) -> list[str]:
@@ -643,20 +716,7 @@ def _clip_lines_to_height(
     the cursor sits on, so the cursor "disappears" past the last
     visible row and only re-appears after scrolling back up.
     """
-    raw = props.get("scroll_offset")
-    scroll_offset: int | None
-    if isinstance(raw, bool):
-        # ``bool`` is an ``int`` subclass — never a meaningful scroll
-        # value, so normalise to "unset".
-        scroll_offset = None
-    elif isinstance(raw, int):
-        scroll_offset = raw
-    else:
-        scroll_offset = None
-    if scroll_offset is None or scroll_offset <= 0:
-        return lines[:height]
-    max_start = max(0, len(lines) - height)
-    start = max(0, min(scroll_offset, max_start))
+    start = _effective_scroll_start(len(lines), height, props)
     return lines[start : start + height]
 
 

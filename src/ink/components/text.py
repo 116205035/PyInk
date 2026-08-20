@@ -26,6 +26,21 @@ Supported ``props``:
   the multi-line :func:`ink.externals.TextInput` cursor-follow
   viewport drives, and application code can use it directly to scroll
   any oversized text payload inside a height-constrained Box.
+* ``caret`` — report the software caret's position so the renderer
+  can park the (hidden) physical terminal cursor on it after each
+  paint. Terminal IME engines anchor the composition / candidate
+  window on the *physical* cursor's cell, so without this the IME
+  preedit appears wherever the renderer last left the cursor (the
+  frame's bottom row) instead of inside the input. The value is
+  ``(display_row, visible_col)`` **inside this leaf's payload** —
+  i.e. row/col before the ``scroll_offset`` window slides; the
+  painter translates it to absolute frame coordinates and applies the
+  scroll correction. Accepts a plain tuple, a
+  :class:`ink.Signal` wrapping one, or a 0-arg callable returning
+  one; ``None`` (default) means "no caret — keep the cursor
+  bottom-parked" (zero byte-stream change). Focused-input components
+  (e.g. :func:`ink.externals.TextInput`) feed this from a signal they
+  update whenever the cursor moves.
 * ``flushBackgroundToWidth`` — when ``True``, the ``backgroundColor``
   spans the text leaf's full layout width (not just the visible text
   cells). Default ``False`` preserves the legacy behaviour (bg only
@@ -62,7 +77,7 @@ def Text(*children: Any, **props: Any) -> Element:
     Recognised keyword props (all optional): ``color``,
     ``backgroundColor``, ``bold``, ``italic``, ``underline``,
     ``strikethrough``, ``inverse``, ``dimColor``, ``wrap``,
-    ``scroll_offset``, ``flushBackgroundToWidth``. See module docstring
+    ``scroll_offset``, ``caret``, ``flushBackgroundToWidth``. See module docstring
     for semantics. Unrecognised props are forwarded verbatim — the
     renderer ignores unknown keys.
     """

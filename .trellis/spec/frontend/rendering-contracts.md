@@ -582,6 +582,141 @@ suite will not catch this regression.
 
 ---
 
+## 4. IME Caret Anchor: `Text(caret=…)` + Caret-Park Paint Sequence
+
+### 1. Scope / Trigger
+
+Terminal IME engines (Windows Terminal TSF, WezTerm, kitty, iTerm2,
+Alacritty) anchor the composition / candidate window on the **physical
+cursor's cell** — cursor visibility (DECTCEM `?25l`) is irrelevant
+(source-verified against WT's TSF chain:
+`research/ime-anchor-terminal-behavior.md` in the
+`08-20-ime-caret-anchor` task). PyInk hides the physical cursor and
+draws SGR software cursors, so *any* component that renders its own
+caret MUST also declare the `caret` prop — otherwise IME preedit pins
+to wherever the renderer parked the physical cursor (bottom-park =
+frame's last row) and CJK preedit appears in the wrong place. Touching
+the paint pipeline (`Instance._paint_now`, `diff.py`) or adding a new
+focusable component triggers this section.
+
+### 2. Signatures
+
+```python
+# Text decoration prop (same channel as scroll_offset; whitelisted in
+# flex.py _DECORATION_PROPS, resolved at flex build time):
+Text(caret=caret_sig)  # caret_sig: Signal[tuple[int, int] | None]
+# tuple is (display_row, visible_col) RELATIVE TO THE LEAF'S PAYLOAD
+# (before the scroll window slides). None = no anchor this frame.
+
+# Layout painter (render_layout.py):
+_report_caret_anchor(node, visible_rows, scroll_start, abs_x, abs_y)
+#   -> inst._caret_anchor = (abs_y + row - scroll_start, abs_x + col)
+#   scrolled-out caret rows report nothing (bottom-park fallback).
+#   Last caret-bearing leaf in paint order wins (one focused input).
+
+# Instance paint sequence (instance.py) — the ordering contract:
+_return_from_caret_park()   # BEFORE any diff / repaint / erase write
+write_diff(...) / repaint_frame(...)
+_park_cursor_at_caret(new_frame, available_rows)  # AFTER the write
+# Park = CUU to the anchor row (clamped by available_rows' row_floor),
+# \r, then \x1b[{col+1}G. Cursor STAYS HIDDEN (no ?25h anywhere).
+```
+
+### 3. Contracts
+
+- **Anchor gate (component layer): report only when `is_active AND
+  `cursor_visible`.** The anchor follows the *keystroke target*, not
+  the visual cursor: IME preedit is an input preview, not decoration.
+  Resolve `is_active` INSIDE the render callable (reactive tracking)
+  so a focus change re-renders and moves the anchor — the opposite of
+  the keypress handler, which resolves it without subscribing.
+- **Zero byte-stream change for frames without a caret** — no `CSI n G`
+  escapes may appear (the diff engine never uses absolute column
+  addressing, so its absence is byte-parity proof).
+- The park must respect the `available_rows` row_floor clamp (never
+  climb into scrollback — same rationale as `diff._emit_cursor_move`).
+- `_repark_after_unchanged_frame` covers the frame-equality early
+  return: decoration props resolve at build time, so a fresh anchor can
+  arrive one signal flush after a byte-identical frame.
+
+### 4. Validation & Error Matrix
+
+- caret leaf unmounts / blurs mid-session → next `_paint_now` clears
+  the stale anchor (anchor reset at top of every render pass)
+- `reset_static()` (`\x1b[H` homes the cursor) → park record cleared
+  with it, else the next `_return_from_caret_park` emits a spurious
+  cursor-down from home
+- anchor row above the reachable floor (frame taller than viewport) →
+  row clamps to floor; unchanged frames must not return+climb in a loop
+- multiple caret-bearing leaves → last painted wins (single focused
+  input is the supported configuration)
+
+### 5. Good/Base/Bad Cases
+
+- Good: focused input + hint rows below → preedit inside the input row
+  at the software caret cell; Tab moves it to the next input.
+- Base: no `caret` prop anywhere → output byte-identical to pre-feature
+  renders (bottom-park).
+- Bad: anchor gated on `cursor_visible` alone (multi-input form) →
+  every input reports, last-writer-wins pins IME to the bottom-most
+  input while keystrokes land in the focused one (the bug that
+  motivated the `is_active` gate).
+
+### 6. Tests Required
+
+`tests/render/test_caret_park.py` — all seven are regression gates:
+
+- park bytes land on the caret cell (`\x1b[nA\r\x1b[mG` tail, hint row
+  below the input)
+- **anti-drift**: bytes appended after a park START with the
+  return-to-bottom move, then diff bytes, then re-park
+- no-caret frame: zero `CSI n G` anywhere in the stream
+- `cursor_visible=False` suppresses the park
+- caret disappearing clears a stale anchor (no ghost park)
+- anchor follows focus between two inputs via a Signal-driven
+  `is_active` callable
+- `is_active=False` + `cursor_visible=True` never reports
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+# 1. Park without undoing before the next paint — diff math assumes a
+#    bottom-parked start; the erase walk offsets every row.
+stdout.write(move_to_caret_seq)
+# 2. Gate on visuals only — multi-input forms pin IME to the wrong input.
+caret_sig.value = (row, col) if cur_cursor_visible else None
+# 3. Show the cursor around the park — unnecessary: DECTCEM does not
+#    affect IME anchoring.
+stdout.write("\x1b[?25h")
+```
+
+#### Correct
+
+```python
+# 1. Every write path: return -> diff -> park (Instance._paint_now).
+self._return_from_caret_park()
+write_diff(prev, new, self.stdout, available_rows)
+self._park_cursor_at_caret(new, available_rows)
+# 2. Gate on the keystroke target, resolved reactively in the render.
+caret_sig.value = (row, col) if (cur_cursor_visible and cur_active) else None
+# 3. Keep ?25l for the whole session; software cursor owns the visuals.
+```
+
+### Reference Consumers
+
+- `src/ink/externals/text_input.py` (`caret_sig` in `_render_lines`) —
+  the canonical reporter; `examples/text-input/text_input_demo.py`
+  shows the focus wiring (`is_active` + `cursor_visible` bound to
+  `use_focus`).
+- Architecture validated against Ink v6.7.0 PR #866
+  (`useCursor().setCursorPosition`) and Textual's `app.cursor_position`
+  (`research/tui-cursor-parking-prior-art.md` in the
+  `08-20-ime-caret-anchor` task).
+
+---
+
 ## Related
 
 - `src/ink/layout/_text_width_context.py` — width context implementation
@@ -592,7 +727,13 @@ suite will not catch this regression.
 - `src/ink/externals/diff.py` — reference consumer (Section 3, including
   bg-band-on-wrapped-rows)
 - `src/ink/externals/markdown.py` — reference consumer (Sections 1+2)
+- `src/ink/externals/text_input.py` — reference consumer (Section 4:
+  IME caret anchor reporter)
+- `src/ink/render/instance.py` — caret-park paint sequence (Section 4)
 - `.trellis/tasks/07-11-pyink-markdown-render-polish/research/` — research
   notes that established Sections 1 and 2
 - `.trellis/tasks/07-23-long-code-line-wrap/prd.md` — full bug analysis +
   architectural decision that established Section 3
+- `.trellis/tasks/08-20-ime-caret-anchor-park-physical-cursor-at-software-caret/`
+  — research + PRD that established Section 4 (IME anchoring evidence,
+  Ink PR #866 sequencing constraints)
