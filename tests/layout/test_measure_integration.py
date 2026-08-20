@@ -189,3 +189,39 @@ def test_single_line_overwide_wrap_unchanged() -> None:
     assert all(not ln.strip() or ln.strip() for ln in lines)
     blank = [i for i, ln in enumerate(lines) if not ln.strip()]
     assert not blank, f"unexpected blank rows {blank}: {lines!r}"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: CJK-aware word wrap (UAX #14 subset)
+# ---------------------------------------------------------------------------
+
+
+def test_cjk_prefix_echo_wraps_with_prefix_on_first_line() -> None:
+    """End-to-end jarvis ``❯``-echo regression through the layout
+    pipeline, nested (Box → Box → Text) under a constrained viewport.
+
+    Pre-fix, the unspaced CJK run tokenised as one oversized word, so
+    ``_word_break`` flushed the ``❯`` prefix to its own first line and
+    hard-broke the content from line 2. Post-fix the prefix shares line
+    1 with content and every physical line respects the granted width.
+    """
+    text = "❯ " + "反而感觉到机会" * 10
+    tree = Box(
+        Box(Text(text), flexDirection="column"),
+        flexDirection="column",
+        width=24,
+    )
+    rendered = render_to_string(tree, columns=24)
+    lines = rendered.split("\n")
+
+    assert len(lines) > 1, f"expected wrapped output: {lines!r}"
+    assert lines[0].startswith("❯ 反"), f"prefix torn from content: {lines!r}"
+    for ln in lines:
+        assert string_width(ln) <= 24, f"over-wide line: {ln!r}"
+    # Zero content loss across the wrap.
+    assert rendered.count("机") == 10
+    assert rendered.count("会") == 10
+    # Kinsoku: no wrapped line starts with closing punctuation.
+    for ln in lines[1:]:
+        assert not ln.startswith("，")
+        assert not ln.startswith("。")

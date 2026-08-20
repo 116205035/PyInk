@@ -172,6 +172,12 @@ helpers).
 - Any wrap / truncate / pad operation on text that may contain emoji
   clusters — `wrap_text`'s helpers iterate clusters atomically and
   never split one across lines.
+- Wrap mode is **CJK-aware** (UAX #14 subset): break opportunities are
+  whitespace runs and boundaries between wide CJK clusters (Han, kana,
+  fullwidth punctuation, wide emoji). Latin words and Hangul runs stay
+  atomic (Korean breaks at spaces, LB28). Kinsoku punctuation glues to
+  the adjacent token — closers (`。，、」…`) never start a line, openers
+  (`（「【…`) never end one.
 - Any `len(s)` on a string that came from `_render_inline` /
   `apply_style` / `_wrap_osc8` / any function that emits SGR sequences
 
@@ -230,6 +236,27 @@ are atomic — a cluster is taken whole onto a line or moved whole to the
 next line, never split. Callers do not need to change; the atomicity
 contract is honoured inside `wrap_text`.
 
+### Common Mistake: Unspaced CJK treated as one word — prefix torn from content
+
+**Symptom**: A short prefix followed by unspaced CJK (e.g. the Jarvis
+user echo `Text("❯ " + content)`) renders as `❯` alone on line 1 with
+the Chinese content hard-broken from line 2. Prefix-less CJK
+paragraphs show the same distortion (first "word" = the whole
+paragraph), it just looks less broken.
+
+**Cause**: `_tokenise_words` split only on whitespace, so an unspaced
+CJK run became a single oversized "word" token. `_word_break` couldn't
+fit it after the prefix → flushed the prefix line (trailing space
+trimmed) → hard-broke the run from line 2.
+
+**Fix**: `_tokenise_words` iterates grapheme clusters and emits each
+wide CJK cluster (east-asian-width `W`/`F`, Hangul excluded) as its
+own token, with a kinsoku post-pass (`_merge_kinsoku`). Breaks now
+happen between CJK characters; latin words remain atomic. Do not
+reintroduce whitespace-only tokenisation, and do not "fix" CJK
+wrapping at the call site (e.g. `wrap="hard"` on the echo) — that
+splits latin words too.
+
 ### Common Mistake: Multi-line text never wraps; blank rows pad the leaf
 
 **Symptom**: A `Text` leaf whose content spans multiple physical lines
@@ -263,6 +290,13 @@ a whole-string `string_width` comparison on possibly-multi-line text.
 - `wrap_text` does not split a grapheme cluster across two lines
   (presentation sequence, keycap, ZWJ family, regional flag each tested
   with a width that forces a wrap mid-cluster).
+- Unspaced CJK wraps between characters; a `❯ `-style prefix stays on
+  the first line with content; kinsoku closers never start a line and
+  openers never end one; latin words stay atomic next to CJK; Hangul
+  runs are not broken between syllables
+  (`tests/layout/test_measure.py` CJK section, plus the nested
+  `tests/layout/test_measure_integration.py::
+  test_cjk_prefix_echo_wraps_with_prefix_on_first_line`).
 - Multi-line leaf with an over-wide line wraps with zero trailing blank
   rows, and short-line multi-line leaves stay unwrapped
   (`tests/layout/test_measure_integration.py::test_multiline_leaf_*`);

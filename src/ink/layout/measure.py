@@ -16,6 +16,7 @@ PR4 can re-emit them when rendering styled text.
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Literal
 
 __all__ = [
@@ -226,7 +227,13 @@ def _hard_break(s: str, width: int) -> list[str]:
 
 
 def _word_break(s: str, width: int) -> list[str]:
-    """Word-wrap ``s`` to ``width`` cells, breaking spaces only."""
+    """Word-wrap ``s`` to ``width`` cells.
+
+    Break opportunities: whitespace runs and boundaries between wide
+    CJK clusters (UAX #14 subset — see :func:`_tokenise_words`).
+    Latin words and Hangul runs stay atomic; a word longer than a
+    full line is hard-split via :func:`_hard_break`.
+    """
     if width <= 0:
         return [_strip_ansi(s)]
     # Tokenise keeping whitespace runs and ANSI runs as separate tokens.
@@ -239,7 +246,7 @@ def _word_break(s: str, width: int) -> list[str]:
             current.append(tok_text)
             continue
         if tok_kind == "space":
-            ws_w = len(tok_text)  # spaces are width 1 each
+            ws_w = wcswidth(tok_text)  # U+3000 ideographic space is 2 cells
             if current_w + ws_w > width:
                 # Break here — drop trailing whitespace on this line.
                 lines.append("".join(current))
@@ -279,34 +286,118 @@ def _word_break(s: str, width: int) -> list[str]:
     return lines if lines else [""]
 
 
+#: Hangul blocks. Korean line breaking is space-based (UAX #14 LB28
+#: keeps Hangul syllable sequences unbroken), so Hangul clusters never
+#: become individual break tokens even though they are East Asian "W".
+_HANGUL_RANGES: tuple[tuple[int, int], ...] = (
+    (0x1100, 0x11FF),
+    (0xA960, 0xA97F),
+    (0x3130, 0x318F),
+    (0xAC00, 0xD7A3),
+    (0xD7B0, 0xD7FF),
+)
+
+#: Kinsoku (UAX #14 CL/OP approximation): closers never start a line,
+#: openers never end one.
+_KINSOKU_NO_LINE_START = frozenset(
+    "！？｡。．，、；：…‥〜～·）〕］｝》〉」』】"
+    "ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶー"
+)
+_KINSOKU_NO_LINE_END = frozenset("（〔［｛《〈「『【")
+
+
+def _is_cjk_breakable(cluster: str) -> bool:
+    """True when a break is allowed after ``cluster``.
+
+    Approximates the UAX #14 ideographic break opportunities: Han,
+    kana, fullwidth punctuation and wide emoji clusters each form
+    their own word token, so wrapping may break between any two of
+    them. Hangul is excluded (Korean breaks at spaces, LB28).
+    """
+    ch = cluster[0]
+    if unicodedata.east_asian_width(ch) not in ("W", "F"):
+        return False
+    o = ord(ch)
+    return not any(lo <= o <= hi for lo, hi in _HANGUL_RANGES)
+
+
+def _merge_kinsoku(tokens: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Glue kinsoku punctuation onto the adjacent word token.
+
+    Closers (``。``, ``、``, ``」`` …) merge into the *previous* word
+    token so they can never be pushed to a line start; openers
+    (``（``, ``「`` …) merge into the *following* word token so they
+    can never dangle at a line end. Chained openers accumulate onto
+    the next word token together.
+    """
+    merged: list[tuple[str, str]] = []
+    for kind, text in tokens:
+        if (
+            kind == "word"
+            and text in _KINSOKU_NO_LINE_START
+            and merged
+            and merged[-1][0] == "word"
+        ):
+            merged[-1] = ("word", merged[-1][1] + text)
+        else:
+            merged.append((kind, text))
+    out: list[tuple[str, str]] = []
+    glue = ""
+    for kind, text in merged:
+        if kind != "word":
+            if glue:
+                out.append(("word", glue))
+                glue = ""
+            out.append((kind, text))
+        elif text in _KINSOKU_NO_LINE_END:
+            glue += text
+        else:
+            out.append(("word", glue + text))
+            glue = ""
+    if glue:
+        out.append(("word", glue))
+    return out
+
+
 def _tokenise_words(s: str) -> list[tuple[str, str]]:
     """Yield ``(kind, text)`` tokens; kind ∈ {"word", "space", "escape"}.
 
-    A "word" is a maximal run of non-space visible characters; "space" is
-    a run of ASCII whitespace; "escape" is one ANSI sequence.
+    A "word" is a maximal run of clusters that must stay unbroken:
+    latin words, Hangul runs, and kinsoku-glued groups are atomic.
+    Each wide CJK cluster (Han, kana, fullwidth punctuation, emoji)
+    is its own token, so wrap mode may break between CJK clusters
+    (UAX #14 subset). "space" is a run of whitespace clusters;
+    "escape" is one ANSI sequence.
     """
     tokens: list[tuple[str, str]] = []
-    chunks = _split_visible_chunks(s)
-    for chunk, is_escape in chunks:
+    for chunk, is_escape in _split_visible_chunks(s):
         if is_escape:
             tokens.append(("escape", chunk))
             continue
-        i = 0
-        n = len(chunk)
-        while i < n:
-            if chunk[i].isspace():
-                j = i
-                while j < n and chunk[j].isspace():
-                    j += 1
-                tokens.append(("space", chunk[i:j]))
-                i = j
+        word: list[str] = []
+        pending_space: list[str] = []
+        for cl, _w in _iter_clusters(chunk):
+            if cl.isspace():
+                pending_space.append(cl)
+                continue
+            if pending_space:
+                if word:
+                    tokens.append(("word", "".join(word)))
+                    word = []
+                tokens.append(("space", "".join(pending_space)))
+                pending_space = []
+            if _is_cjk_breakable(cl):
+                if word:
+                    tokens.append(("word", "".join(word)))
+                    word = []
+                tokens.append(("word", cl))
             else:
-                j = i
-                while j < n and not chunk[j].isspace():
-                    j += 1
-                tokens.append(("word", chunk[i:j]))
-                i = j
-    return tokens
+                word.append(cl)
+        if word:
+            tokens.append(("word", "".join(word)))
+        if pending_space:
+            tokens.append(("space", "".join(pending_space)))
+    return _merge_kinsoku(tokens)
 
 
 _ELLIPSIS = "…"

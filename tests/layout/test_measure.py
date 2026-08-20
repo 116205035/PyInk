@@ -360,3 +360,78 @@ def test_wrap_truncate_start_keeps_cluster() -> None:
     assert string_width(out[0]) <= 3
     # Cluster atomic: either both halves of ☠️ present or neither.
     assert out[0].count("☠") == out[0].count("️")
+
+
+# ---------------------------------------------------------------------------
+# wrap_text — CJK-aware word breaking (UAX #14 subset)
+# ---------------------------------------------------------------------------
+
+
+def test_wrap_text_cjk_breaks_between_characters() -> None:
+    """Unspaced CJK wraps per character: each wide cluster is its own
+    break token instead of one oversized word."""
+    lines = wrap_text("你好世界再见", 4, mode="wrap")
+    assert lines == ["你好", "世界", "再见"]
+
+
+def test_wrap_text_prefix_stays_with_cjk_content() -> None:
+    """Regression (jarvis ❯ echo): a short prefix followed by a long
+    unspaced CJK run must share the first line with its content.
+
+    Pre-fix, the whole run was one oversized word token: ``_word_break``
+    flushed the prefix line (trailing space trimmed) so ``❯`` sat alone
+    on line 1 while the content hard-broke from line 2.
+    """
+    text = "❯ " + "你好" * 30
+    lines = wrap_text(text, 20, mode="wrap")
+    assert lines[0].startswith("❯ 你")
+    for ln in lines:
+        assert string_width(ln) <= 20
+    assert "".join(lines).count("你") == 30
+
+
+def test_wrap_text_mixed_latin_cjk() -> None:
+    """Latin words stay atomic; breaks allowed at CJK boundaries."""
+    # hello(5) / 你(2) 好(2) / world(5) at width 5.
+    lines = wrap_text("hello你好world", 5, mode="wrap")
+    assert lines == ["hello", "你好", "world"]
+
+
+def test_wrap_text_kinsoku_closer_never_starts_line() -> None:
+    """Closing CJK punctuation glues to the preceding cluster.
+
+    Greedy + kinsoku push-out: when ``，`` can't fit after ``好``, the
+    pair moves to the next line together (``好，``), leaving ``你`` on
+    the previous line — the standard browser/terminal behaviour.
+    """
+    lines = wrap_text("你好，世界真好", 4, mode="wrap")
+    assert lines == ["你", "好，", "世界", "真好"]
+    for ln in lines:
+        assert not ln.startswith("，")
+
+
+def test_wrap_text_kinsoku_opener_never_ends_line() -> None:
+    lines = wrap_text("你好（世界）再见", 8, mode="wrap")
+    assert "".join(lines) == "你好（世界）再见"
+    for ln in lines:
+        assert not ln.endswith("（")
+
+
+def test_wrap_text_hangul_not_broken_between_syllables() -> None:
+    """Korean breaks at spaces (UAX #14 LB28) — an unspaced Hangul run
+    stays one word and falls back to hard-split like any long word."""
+    lines = wrap_text("한국어텍스트", 4, mode="wrap")
+    assert lines == ["한국", "어텍", "스트"]
+
+
+def test_wrap_text_emoji_between_cjk_is_breakable() -> None:
+    # Wide emoji clusters are their own tokens; wrap can break around
+    # them without ever splitting the cluster itself.
+    lines = wrap_text("你" + _SKULL + "好", 2, mode="wrap")
+    assert lines == ["你", _SKULL, "好"]
+
+
+def test_wrap_text_ideographic_space_counts_two_cells() -> None:
+    # U+3000 is a 2-cell space run: 2 + 2 > 3 → break, space dropped.
+    lines = wrap_text("你　好", 3, mode="wrap")
+    assert lines == ["你", "好"]
