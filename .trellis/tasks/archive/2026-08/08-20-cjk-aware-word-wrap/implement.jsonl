@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/frontend/rendering-contracts.md", "reason": "Wrap contract lives here — implementer must refresh the wrap-mode wording to describe CJK-aware breaking (break between CJK clusters, latin atomic, kinsoku)."}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Project quality bar — forbidden patterns, test expectations, lint/typecheck requirements the implementation must meet."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Fix must reuse _iter_clusters for cluster iteration instead of hand-rolling a second segmenter; guide formalises the search-before-hand-rolling discipline."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "wrap_text(mode=wrap) feeds flex _measure_paragraph, markdown, diff, highlighted_code — implementer must verify downstream call sites are unaffected by the tokenisation change."}

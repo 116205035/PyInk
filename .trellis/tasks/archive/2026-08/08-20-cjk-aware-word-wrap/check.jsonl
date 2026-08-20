@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/rendering-contracts.md", "reason": "Checker verifies the wrap contract section was refreshed to describe CJK-aware tokenisation and kinsoku behavior."}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Checker confirms lint/typecheck/tests green and no forbidden patterns introduced."}
