@@ -820,3 +820,36 @@ Unspaced CJK was tokenised as one oversized word, tearing the ❯ prefix from co
 ### Next Steps
 
 - None - task complete
+
+
+## Session 24: TextInput wrap-and-grow (ink.js parity)
+
+**Date**: 2026-08-20
+**Task**: TextInput wrap-and-grow (ink.js parity)
+**Branch**: `main`
+
+### Summary
+
+Verified against D:\Projects\github\ink: ink-text-input never truncates; Text default wrap grows the input. Replaced PyInk's cursor-centred ellipsis window with component-level wrap: measure.py gains wrap_text_rows (offset-aware word-break core, _word_break delegates to it); TextInput wraps raw lines then splices cursor/selection SGR per row via source spans. Fixed latent rows= viewport bug (logical vs display row). Suite 1654 green; baseline ruff/mypy unchanged.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1a8a607` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
