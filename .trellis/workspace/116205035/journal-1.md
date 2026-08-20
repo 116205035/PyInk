@@ -756,3 +756,34 @@ Completed zero-padded line-number gutter fix for HighlightedCode + StructuredDif
 ### Next Steps
 
 - None - task complete
+
+
+## Session 22: Archive grapheme-width task; prep CJK wrap fix
+
+**Date**: 2026-08-20
+**Task**: Archive grapheme-width task; prep CJK wrap fix
+**Branch**: `main`
+
+### Summary
+
+Archived completed 08-04 grapheme-aware string-width task. Incoming bug from jarvis: _tokenise_words splits on spaces only, so unspaced CJK becomes one oversized word token and _word_break flushes the prefix line (❯ separated from content). New task queued: CJK-aware tokenisation per UAX #14.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

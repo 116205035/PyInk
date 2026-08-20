@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 21
-- **Last Active**: 2026-07-23
+- **Total Sessions**: 22
+- **Last Active**: 2026-08-20
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~758 | Active |
+| `journal-1.md` | ~789 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 22 | 2026-08-20 | Archive grapheme-width task; prep CJK wrap fix | - | `main` |
 | 21 | 2026-07-23 | PyInk gutter zero-pad + long-line wrap fix follow-through | `27b76f0` | `main` |
 | 20 | 2026-07-11 | markdown 遗留清理：quote_color wire-up + 边框字符集去重 | `0cf343f` | `main` |
 | 19 | 2026-07-11 | 完善 markdown 显示效果细节 | `401e17e`, `ae477a5`, `ba295b4`, `529b830` | `main` |
