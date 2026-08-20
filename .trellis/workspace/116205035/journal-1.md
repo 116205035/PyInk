@@ -787,3 +787,36 @@ Archived completed 08-04 grapheme-aware string-width task. Incoming bug from jar
 ### Next Steps
 
 - None - task complete
+
+
+## Session 23: CJK-aware word wrap (jarvis ❯ echo regression)
+
+**Date**: 2026-08-20
+**Task**: CJK-aware word wrap (jarvis ❯ echo regression)
+**Branch**: `main`
+
+### Summary
+
+Unspaced CJK was tokenised as one oversized word, tearing the ❯ prefix from content in jarvis user echo. Rewrote _tokenise_words per grapheme cluster: wide CJK clusters (Hangul excluded, LB28) are individual break tokens, latin stays atomic, kinsoku glue for CJK punctuation, space runs measured via wcswidth (U+3000=2). 9 new tests incl. nested constrained-viewport integration; suite 1648 green. Pre-existing unrelated failures noted: test_diff_handles_growing_frame, 18 ruff / 27 mypy in other files.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0458b9a` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

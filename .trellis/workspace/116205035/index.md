@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 22
+- **Total Sessions**: 23
 - **Last Active**: 2026-08-20
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~789 | Active |
+| `journal-1.md` | ~822 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 23 | 2026-08-20 | CJK-aware word wrap (jarvis ❯ echo regression) | `0458b9a` | `main` |
 | 22 | 2026-08-20 | Archive grapheme-width task; prep CJK wrap fix | - | `main` |
 | 21 | 2026-07-23 | PyInk gutter zero-pad + long-line wrap fix follow-through | `27b76f0` | `main` |
 | 20 | 2026-07-11 | markdown 遗留清理：quote_color wire-up + 边框字符集去重 | `0cf343f` | `main` |
