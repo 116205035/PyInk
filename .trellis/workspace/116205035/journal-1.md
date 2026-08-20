@@ -853,3 +853,36 @@ Verified against D:\Projects\github\ink: ink-text-input never truncates; Text de
 ### Next Steps
 
 - None - task complete
+
+
+## Session 25: IME caret anchor: park physical cursor at software caret
+
+**Date**: 2026-08-20
+**Task**: IME caret anchor: park physical cursor at software caret
+**Branch**: `main`
+
+### Summary
+
+Diagnosed CJK IME preedit appearing below the input row (terminal IME anchors the physical cursor cell; PyInk's bottom-park convention left it on the hint row). Implemented the Ink PR #866-style mechanism: Text caret decoration prop -> layout painter reports absolute frame cell -> Instance parks the hidden physical cursor there after every paint (return-to-bottom-park -> diff -> park sequence). Anchor gated on is_active AND cursor_visible so it follows the keystroke target in multi-input forms (bug found in manual verification: 4-input demo pinned IME to the last input). Captured contract as rendering-contracts.md Section 4. Pending: release 0.3.1 + JarvisCopilot pin bump via tools/release.py --pyink.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9cbe0cc` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

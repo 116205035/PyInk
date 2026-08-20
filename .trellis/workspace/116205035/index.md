@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 24
+- **Total Sessions**: 25
 - **Last Active**: 2026-08-20
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~855 | Active |
+| `journal-1.md` | ~888 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 25 | 2026-08-20 | IME caret anchor: park physical cursor at software caret | `9cbe0cc` | `main` |
 | 24 | 2026-08-20 | TextInput wrap-and-grow (ink.js parity) | `1a8a607` | `main` |
 | 23 | 2026-08-20 | CJK-aware word wrap (jarvis ❯ echo regression) | `0458b9a` | `main` |
 | 22 | 2026-08-20 | Archive grapheme-width task; prep CJK wrap fix | - | `main` |
