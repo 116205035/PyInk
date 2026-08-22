@@ -1585,18 +1585,49 @@ def _render_table(
         mid_border = apply_style(mid_border, color=border_color)
         bottom_border = apply_style(bottom_border, color=border_color)
 
+    # Wrap each cell to its (possibly shrunk) column width before building
+    # data lines. Without this, a cell wider than its column was emitted
+    # verbatim — the row outgrew the frame and the layout pass re-wrapped
+    # the whole row mid-cell, breaking the border alignment. Wrapping here
+    # keeps the render consistent with the ``_max_wrap_lines`` simulation
+    # that gates the key-value fallback.
+    wrap_mode: WrapMode = "hard" if needs_hard_wrap else "wrap"
+
+    def _wrap_row_lines(cells: list[str]) -> list[list[str]]:
+        per_col: list[list[str]] = []
+        max_lines = 1
+        for idx in range(n_cols):
+            cell = cells[idx] if idx < len(cells) else ""
+            wrapped = wrap_text(cell, col_widths[idx], mode=wrap_mode) or [""]
+            per_col.append(wrapped)
+            max_lines = max(max_lines, len(wrapped))
+        return [
+            [
+                per_col[idx][li] if li < len(per_col[idx]) else ""
+                for idx in range(n_cols)
+            ]
+            for li in range(max_lines)
+        ]
+
     lines: list[Element] = []
     if header:
         lines.append(Text(top_border))
-        header_line = _dataline(
-            chars, styled_header, col_widths, header_aligns, padding, border_color,
-        )
-        lines.append(Text(header_line))
+        for cell_row in _wrap_row_lines(styled_header):
+            lines.append(
+                Text(_dataline(
+                    chars, cell_row, col_widths, header_aligns, padding, border_color,
+                ))
+            )
         lines.append(Text(mid_border))
     else:
         lines.append(Text(top_border))
     for r in rows:
-        lines.append(Text(_dataline(chars, r, col_widths, aligns, padding, border_color)))
+        for cell_row in _wrap_row_lines(r):
+            lines.append(
+                Text(_dataline(
+                    chars, cell_row, col_widths, aligns, padding, border_color,
+                ))
+            )
     lines.append(Text(bottom_border))
 
     return Box(*lines, flexDirection="column"), end + 1

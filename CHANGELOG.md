@@ -6,6 +6,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — markdown table cells wrap inside the frame; wcswidth no longer zeroed by newlines
+
+Symptom: a bordered markdown table whose total ideal width exceeded the
+available width (e.g. a long CJK "conclusions" column in Jarvis's TUI)
+rendered with misaligned borders — data rows grew wider than the frame
+and the layout pass re-wrapped the whole row mid-cell, so continuation
+lines lost the left border and the right border drifted onto the last
+wrapped line.
+
+Cause: `_render_table`'s bordered path emitted cells verbatim via
+`_pad_aligned` (which returns over-wide text unchanged) — the column
+shrink regimes (B/C) computed narrower column widths but the render
+path never wrapped cells, even though `_max_wrap_lines` simulated
+wrapping to gate the key-value fallback. Separately, `wcswidth`
+returned 0 for any string containing `\n` (upstream wcswidth
+short-circuits to -1 on control chars, mapped to 0), zeroing the
+measured width of multi-line cells.
+
+Fix: the bordered path now wraps each cell to its column width with
+`wrap_text` (same mode as the kv-gate simulation) and emits one framed
+dataline per wrapped row, padding shorter cells — borders stay aligned
+at every terminal width. `wcswidth` normalizes `\r`/`\n` and measures
+per line, returning the widest logical line.
+
 ### Fixed — StructuredDiff wrap continuation carries indent + bg gutter + sigil
 
 Symptom: when a `+` / `-` row in `StructuredDiff` (full-width-bg mode)

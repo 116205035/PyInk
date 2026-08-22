@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/rendering-contracts.md", "reason": "§1 Tests Required 列出的宽度相关测试要求；验收时按契约核对 string_width/wrap 行为"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "检查阶段质量清单"}

@@ -89,6 +89,16 @@ def test_wcswidth_tab_does_not_poison_whole_string() -> None:
     assert wcswidth("你\thello") == 2 + 1 + 5
 
 
+def test_wcswidth_newline_does_not_poison_whole_string() -> None:
+    """A ``\\n`` no longer zeroes the whole string (POSIX wcswidth
+    short-circuits to -1 on control chars); a multi-line string's
+    width is its widest logical line."""
+    assert wcswidth("a\nb") == 1
+    assert string_width("你好\nx") == 4
+    assert wcswidth("abc\n你好") == 4
+    assert wcswidth("\r\n\r\n") == 0
+
+
 # ---------------------------------------------------------------------------
 # string_width — grapheme clusters (PR1)
 # ---------------------------------------------------------------------------

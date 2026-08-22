@@ -2249,3 +2249,55 @@ def test_markdown_long_cjk_paragraph_line_wraps_without_blank_runs() -> None:
     # Content preserved end-to-end.
     assert "08-10" in plain[0]
     assert "股票0" in rendered and "股票59" in rendered
+
+
+def test_table_long_cell_wraps_inside_frame() -> None:
+    """Regression: a cell wider than its shrunk column wraps within the
+    frame instead of overflowing and letting the layout pass re-wrap the
+    whole row mid-cell (the Jarvis TUI "border misalignment" symptom).
+
+    Pre-fix ``_dataline`` emitted over-wide cells verbatim, so the row
+    line outgrew the frame; the layout word-wrap then broke the row at
+    an arbitrary cell boundary — continuation lines lost the left border
+    and the right border drifted to the last wrapped line.
+    """
+    src = (
+        "| 层 | 结论 |\n"
+        "| --- | --- |\n"
+        "| L1 技术面 | 上证 3905 站上 MA20（3893）但 MA60（3970）下方，周线空头、月线多头 |\n"
+        "| L4 资金+抱团 | 科技成交占大盘 10.0%、科技/传统 4.92x、寒武纪占半导体 40.6% "
+        "→ 拥挤度 8.2/10 后期，价格端已分化，筹码分歧博弈，不是趋势 |\n"
+    )
+    import re
+
+    from ink.layout.measure import _strip_ansi, string_width
+
+    for columns in (110, 150):
+        out = _render(Markdown(src), columns=columns)
+        visible = re.sub(r"\x1b\[[0-9;]*m", "", out)
+        lines = [_strip_ansi(ln) for ln in visible.split("\n")]
+
+        table_lines = [
+            ln for ln in lines if ln.startswith(("┌", "├", "└", "│"))
+        ]
+        assert "┌" in visible, f"expected bordered table at {columns}: {visible!r}"
+        assert len(table_lines) >= 6, f"expected a full frame: {visible!r}"
+
+        # Every line containing a vertical border must be a fully framed
+        # data row (left border at col 0) — the pre-fix mid-cell wrap
+        # produced continuation lines carrying only the trailing border.
+        for ln in lines:
+            if "│" in ln:
+                assert ln.startswith("│"), (
+                    f"unframed table row at columns={columns}: {ln!r}"
+                )
+
+        # Border lines and data rows share one display width.
+        widths = {string_width(ln) for ln in table_lines}
+        assert len(widths) == 1, (
+            f"table rows have inconsistent widths {widths} at "
+            f"columns={columns}: {visible!r}"
+        )
+
+        # Content survived (wrap did not drop or clip the long cell).
+        assert "筹码分歧博弈" in visible.replace("\n", "")

@@ -96,6 +96,9 @@ def wcswidth(s: str) -> int:
     delegation: POSIX ``wcswidth`` short-circuits to -1 the moment it
     sees any control char, which would otherwise zero out the entire
     string width and crash ``_paint_text`` 's row-capacity calculation.
+    Newlines are normalized and split before delegation for the same
+    reason: a multi-line string's width is its widest logical line,
+    not 0.
     """
     stripped = _ANSI_RE.sub("", s)
     if not stripped:
@@ -104,7 +107,15 @@ def wcswidth(s: str) -> int:
     # the whole string. Per-char width (``_char_width``) keeps the tab
     # visible at its own 1-cell value during the paint loop.
     sanitized = stripped.replace("\t", " ")
+    sanitized = sanitized.replace("\r\n", "\n").replace("\r", "\n")
     if _HAS_WCWIDTH:
+        if "\n" in sanitized:
+            widest = 0
+            for line in sanitized.split("\n"):
+                w = _wcswidth_upstream(line)
+                if w > widest:
+                    widest = w
+            return widest
         w = _wcswidth_upstream(sanitized)
         return w if w >= 0 else 0
     # ASCII fallback (no wcwidth installed) — keep the existing path.
