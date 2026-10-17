@@ -85,12 +85,13 @@ Esc / Ctrl+C are deliberately *not* swallowed so the surrounding
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import lru_cache
 from typing import Any, Literal
 
 from ink.components.box import Box
 from ink.components.text import Text
 from ink.core.element import Element, create_element
-from ink.core.signal import Ref, Signal, effect, ref, signal
+from ink.core.signal import Ref, Signal, batch, effect, ref, signal
 from ink.hooks.input import use_input
 from ink.layout._text_width_context import get_current_text_width
 from ink.layout.measure import string_width, wrap_text_rows
@@ -580,6 +581,24 @@ def _split_lines(value: str) -> list[tuple[int, str]]:
     return out
 
 
+@lru_cache(maxsize=1024)
+def _cached_row_spans(
+    line_text: str, budget: int
+) -> tuple[tuple[str, int, int], ...]:
+    """Memoized wrap decision for one logical line at a fixed budget.
+
+    The render loop re-evaluates ``_render_lines`` on every layout pass
+    (once per signal flush, once per paint), so an unchanged line must
+    not pay the grapheme-level tokenize/wrap cost again — with a
+    multi-thousand-char buffer that was the dominant CPU cost of every
+    keystroke *and* of every unrelated animation frame. Content-
+    addressed key ⇒ no invalidation needed.
+    """
+    if string_width(line_text) <= budget:
+        return ((line_text, 0, len(line_text)),)
+    return tuple(wrap_text_rows(line_text, budget))
+
+
 def _cursor_visible_column(
     line_text_raw: str,
     mask: str | None,
@@ -704,9 +723,16 @@ def _TextInputImpl(**props: Any) -> Element:
 
     def _set_cursor(pos: int, *, keep_selection: bool = False) -> None:
         clamped = max(0, min(pos, len(value.value)))
-        if not keep_selection:
-            _clear_selection()
-        cursor.value = clamped
+
+        # batch: selection-clear + cursor move must land as one
+        # notification flush — unbatched, each write re-runs the render
+        # loop's full-buffer layout pass.
+        def _apply() -> None:
+            if not keep_selection:
+                _clear_selection()
+            cursor.value = clamped
+
+        batch(_apply)
 
     def _extend_selection(target: int) -> None:
         """Move the cursor to ``target`` and grow the selection.
@@ -740,13 +766,19 @@ def _TextInputImpl(**props: Any) -> Element:
         else:
             anchor = old_cursor
         new_cursor = max(0, min(target, len(value.value)))
-        cursor.value = new_cursor
-        if new_cursor == anchor:
-            selection.value = None
-        else:
-            lo = min(anchor, new_cursor)
-            hi = max(anchor, new_cursor)
-            selection.value = (lo, hi)
+
+        # batch: cursor + selection advance together (same flush
+        # rationale as ``_set_cursor``).
+        def _apply() -> None:
+            cursor.value = new_cursor
+            if new_cursor == anchor:
+                selection.value = None
+            else:
+                lo = min(anchor, new_cursor)
+                hi = max(anchor, new_cursor)
+                selection.value = (lo, hi)
+
+        batch(_apply)
 
     def _splice(
         text: str,
@@ -766,10 +798,17 @@ def _TextInputImpl(**props: Any) -> Element:
         new_value = old_value[:start] + text + old_value[end:]
         if max_length is not None and len(new_value) > max_length:
             return False
-        value.value = new_value
         clamped = max(0, min(new_cursor, len(new_value)))
-        cursor.value = clamped
-        _clear_selection()
+
+        # batch: value / cursor / selection must land as ONE notification
+        # flush — unbatched, each write re-runs the render loop's layout
+        # pass over the whole buffer (the dominant cost of a keystroke).
+        def _apply() -> None:
+            value.value = new_value
+            cursor.value = clamped
+            _clear_selection()
+
+        batch(_apply)
         _notify_change(old_value, new_value)
         return True
 
@@ -1195,7 +1234,7 @@ def _TextInputImpl(**props: Any) -> Element:
             line_text = mask * len(line_text_raw) if mask else line_text_raw
             line_end = line_start + len(line_text_raw)
             cursor_in_line = line_start <= cur_cursor <= line_end
-            row_spans: list[tuple[str, int, int]]
+            row_spans: list[tuple[str, int, int]] | tuple[tuple[str, int, int], ...]
             if avail_width is None or avail_width < 1:
                 row_spans = [(line_text, 0, len(line_text))]
             else:
@@ -1208,10 +1247,7 @@ def _TextInputImpl(**props: Any) -> Element:
                     1,
                     avail_width - (1 if cursor_in_line and cur_cursor_visible else 0),
                 )
-                if string_width(line_text) <= budget:
-                    row_spans = [(line_text, 0, len(line_text))]
-                else:
-                    row_spans = wrap_text_rows(line_text, budget)
+                row_spans = _cached_row_spans(line_text, budget)
             for row_text, row_off, row_end in row_spans:
                 row_abs_start = line_start + row_off
                 row_abs_end = line_start + row_end

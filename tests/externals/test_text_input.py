@@ -3620,3 +3620,131 @@ def test_cursor_signal_omitted_keeps_internal_behavior(
     # Last reported cursor offset must be at end of "hix" (3).
     assert cursors and cursors[-1] == 3
     inst.unmount()
+
+
+# ---------------------------------------------------------------------------
+# Wrap memoization (large-buffer CPU fix) — 2026-10-18
+# ---------------------------------------------------------------------------
+
+
+def test_cached_row_spans_matches_uncached_decision() -> None:
+    """``_cached_row_spans`` returns exactly the pre-memoization decision.
+
+    The fits-in-budget branch passes the line through verbatim
+    (trailing spaces kept, same as the historic inline check); the
+    over-budget branch delegates to ``wrap_text_rows``. Both must match
+    the original uncached logic on a mixed corpus.
+    """
+    from ink.externals.text_input import _cached_row_spans
+    from ink.layout.measure import string_width, wrap_text_rows
+
+    _cached_row_spans.cache_clear()
+    corpus = [
+        "short",
+        "word " * 20,
+        "量化交易复盘记录，缩量修复与军工V型反弹。" * 5,
+        "a" * 200,  # long unbreakable word → hard-split
+        "  leading and trailing   ",
+        "mixed 中英 words",
+    ]
+    for text in corpus:
+        for budget in (1, 5, 17, 40):
+            if string_width(text) <= budget:
+                expected = [(text, 0, len(text))]
+            else:
+                expected = wrap_text_rows(text, budget)
+            assert list(_cached_row_spans(text, budget)) == expected, (
+                f"mismatch at budget={budget} for {text[:20]!r}"
+            )
+    # Same key twice → same object (cache hit, not a recompute).
+    first = _cached_row_spans(corpus[2], 17)
+    assert _cached_row_spans(corpus[2], 17) is first
+
+
+def test_idle_rerender_hits_wrap_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unrelated signal ticks must not re-wrap an unchanged buffer.
+
+    The render loop re-evaluates ``_render_lines`` on every layout pass;
+    before memoization an animation tick re-paid the full grapheme-level
+    wrap cost for every line (idle CPU scaled with buffer size).
+    """
+    import ink.externals.text_input as _ti_mod
+    from ink.externals.text_input import _cached_row_spans
+
+    _cached_row_spans.cache_clear()
+    calls = {"n": 0}
+    real = _ti_mod.wrap_text_rows
+
+    def counting(s: str, width: int):
+        calls["n"] += 1
+        return real(s, width)
+
+    monkeypatch.setattr(_ti_mod, "wrap_text_rows", counting)
+
+    tick = signal(0)
+    buf = "\n".join("量化复盘 第%d行 军工V型反弹 蓄势diff。" % i for i in range(4))
+    inst, _ = _mount(
+        Box(
+            Text(lambda: f"t{tick.value}"),
+            TextInput(initial_value=buf, multiline=True),
+            flexDirection="column",
+        ),
+        monkeypatch=monkeypatch,
+        columns=20,
+        rows=12,
+    )
+    assert _wait_for(lambda: "军工" in _visible(_frame(inst)))
+    assert calls["n"] > 0  # initial mount wrapped the over-budget lines
+    settled = calls["n"]
+    for i in range(5):
+        tick.value = i
+        assert _wait_for(lambda: f"t{i}" in _visible(_frame(inst)))
+    assert calls["n"] == settled, (
+        f"idle ticks re-wrapped the buffer: {settled} → {calls['n']}"
+    )
+    inst.unmount()
+
+
+def test_keystroke_rewraps_only_edited_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Editing the buffer re-wraps the edited logical line only.
+
+    External ``value_signal`` write (the jarvis wiring) is the edit
+    path here; ``_splice`` edits are behaviour-covered by the suite
+    above. Initial mount wraps each over-budget line exactly once;
+    a one-line edit is exactly one cache miss — its siblings must hit.
+    """
+    import ink.externals.text_input as _ti_mod
+    from ink.externals.text_input import _cached_row_spans
+
+    _cached_row_spans.cache_clear()
+    calls = {"n": 0}
+    real = _ti_mod.wrap_text_rows
+
+    def counting(s: str, width: int):
+        calls["n"] += 1
+        return real(s, width)
+
+    monkeypatch.setattr(_ti_mod, "wrap_text_rows", counting)
+
+    lines = ["line%d " % i + "x" * 22 for i in range(3)]
+    buf = "\n".join(lines)
+    vs = signal(buf)
+    inst, _ = _mount(
+        TextInput(value_signal=vs, multiline=True),
+        monkeypatch=monkeypatch,
+        columns=20,
+        rows=12,
+    )
+    assert _wait_for(lambda: "line2" in _visible(_frame(inst)))
+    assert calls["n"] == 3, f"mount should wrap 3 lines once, got {calls['n']}"
+
+    lines[1] = lines[1] + "y"  # edit the MIDDLE line
+    vs.value = "\n".join(lines)
+    assert _wait_for(
+        lambda: "y" in _visible(_frame(inst)) and calls["n"] == 4
+    ), f"edit should be exactly one wrap call, got {calls['n']}"
+    inst.unmount()

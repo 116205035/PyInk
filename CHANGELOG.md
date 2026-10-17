@@ -6,6 +6,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Performance — TextInput large-buffer rendering CPU (memoized wrap + batched writes)
+
+Symptom: typing into (or merely animating near) a TextInput holding a
+large buffer burned CPU linear in buffer size — at 8000 chars, every
+keystroke cost ~161ms CPU and every unrelated animation frame (spinner
+tick, streaming) ~75ms, on Jarvis's wiring (`value_signal` +
+`cursor_signal`).
+
+Cause: `_render_lines` recomputed the grapheme-level tokenize/wrap of
+the entire buffer on every layout pass with no memoization, and each
+keystroke issued two unbatched notification flushes (value, then
+cursor), each re-running the render loop's full-buffer layout.
+
+Fix: per-logical-line wrap results are memoized by
+`(line_text, budget)` (`_cached_row_spans`, content-addressed so no
+invalidation is needed) — steady-state typing re-wraps only the edited
+line, idle frames re-wrap nothing; and the signal writes in `_splice` /
+`_set_cursor` / `_extend_selection` are coalesced with `batch()` into
+one flush per edit. Measured at 8000 chars: keystroke 161ms → ~33ms
+(5×), idle frame 75ms → ~8-12ms. No public API or visual behaviour
+change; the cursor / selection / wrap semantics are pinned by the
+existing suite plus three new cache regression tests.
+
 ### Fixed — markdown table cells wrap inside the frame; wcswidth no longer zeroed by newlines
 
 Symptom: a bordered markdown table whose total ideal width exceeded the
